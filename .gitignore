@@ -1,0 +1,8 @@
+/runs/
+/build/
+/scores/
+/.cache/
+/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

@@ -1,0 +1,31 @@
+[project]
+name = "apin"
+version = "0.1.0"
+description = "A workbench for measuring patches to MCMC samplers"
+requires-python = ">=3.12"
+license = "BSD-3-Clause"
+dependencies = [
+    "numpy==2.5.5",
+    "scipy==1.18.1",
+]
+
+[project.optional-dependencies]
+nutpie = ["nutpie==0.16.11"]
+
+[project.scripts]
+apin = "harness.cli:main"
+
+[dependency-groups]
+dev = ["pytest==9.2.0"]
+
+[build-system]
+requires = ["hatchling==1.33.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["harness"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: runs CmdStan end to end (needs CMDSTAN); deselect with -m 'not slow'"]
+addopts = "-m 'not slow'"
