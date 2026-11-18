@@ -208,3 +208,45 @@ def test_a_reference_without_halves_cannot_make_a_run_wrong(ref):
     d = with_lp(ar1(np.random.default_rng(6), 5000, 4, 0.0))
     d["x.1"] = d["x.1"] + 1.0
     assert gate.check(d, ref).status == "wrong" and gate.check(d, bare).status == "unproven"
+
+
+def _rare_tens(rng, shape):
+    """x = z + w/4, y = z - w/4, w = +-1 except a rare 10 that x - y shows."""
+    z = rng.normal(size=shape)
+    w = rng.choice([-1.0, 1.0], size=shape)
+    return z, w
+
+
+def test_an_exact_mismatch_the_halves_disagree_on_is_unproven():
+    """U1: the reference's below_q95 of x - y is exactly 1 (no draw above its q95), but one half
+    saw a draw of 10 that the other half did not: estimates 0.9996 and 1.0, MCSEs 0.00028 and 0.
+    A correct run that sees the excursions at their true rate was called wrong by the exact
+    branch. The halves disagree there, so the mismatch keeps the run from right and no more.
+    Where the halves agree the exact check still makes the run wrong."""
+    rng = np.random.default_rng(8)
+    z, w = _rare_tens(rng, (500, 10))
+    w[0, 0] = 10
+    z, w = np.concatenate([z, -z]), np.tile(w, (2, 1))
+    ref = reference.summarise({"x": z + 0.25 * w, "y": z - 0.25 * w})
+    _, sd, _ = ref.targets()
+    exact_disputed = gate.disputed(ref) & (sd == 0)
+    assert exact_disputed[3, 3] and ref.series[3] == "proj.2"
+    a, b = _rare_tens(rng, (5000, 4))
+    b[rng.random(a.shape) < 0.0004] = 10
+    v = gate.check({"x": a + 0.25 * b, "y": a - 0.25 * b}, ref, reps=5)
+    assert v.status == "unproven" and v.reason == "disputed", v.label()
+    assert v.series == "proj.2"
+    shifted = gate.check({"x": a + 0.25 * b + 0.5, "y": a - 0.25 * b}, ref, reps=5)
+    assert shifted.status == "wrong", shifted.label()
+
+
+def test_a_zero_mcse_half_disagrees_with_any_difference_beyond_the_exact_tolerance():
+    """A half whose MCSE is 0 claims its estimate is exact. Estimates that differ by more than
+    EXACT disagree; ones that differ by less agree."""
+    import dataclasses
+    ref = reference.summarise({"x": np.random.default_rng(9).normal(size=(1000, 10))})
+    m = np.zeros((2, len(ref.series), 4))
+    s = np.zeros_like(m)
+    m[1, 0, 0], m[1, 0, 1] = 1e-3, 1e-9
+    d = gate.disputed(dataclasses.replace(ref, halves={"mean": m, "mcse": s}))
+    assert d[0, 0] and not d[0, 1] and not d[0, 2]

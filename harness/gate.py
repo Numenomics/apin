@@ -124,7 +124,9 @@ def disputed(ref: Reference) -> np.ndarray:
 
     They disagree on a quantity when their estimates differ by more than SPLIT_Z times the
     smaller of the two halves' MCSEs: one half's estimate is far outside what the other half
-    claims as its own error. The combined MCSE, hypot of the two, does not do: a half that saw
+    claims as its own error. A half whose MCSE is 0 claims its estimate is exact, so against it
+    any difference beyond the exact tolerance (EXACT, as for exact reference values) is a
+    disagreement; estimates within that tolerance agree. The combined MCSE, hypot of the two, does not do: a half that saw
     k rare excursions the other half missed differs from it by about sqrt(k) combined MCSEs,
     since its own MCSE grows with what it saw. A reference without halves cannot show that they
     agree, so every quantity is disputed."""
@@ -132,7 +134,8 @@ def disputed(ref: Reference) -> np.ndarray:
     if not ref.halves:
         return np.ones(target.shape, dtype=bool)
     m, s = ref.halves["mean"], ref.halves["mcse"]
-    return np.abs(m[0] - m[1]) > SPLIT_Z * np.minimum(s[0], s[1])
+    slack = np.maximum(SPLIT_Z * np.minimum(s[0], s[1]), EXACT * np.maximum(1.0, np.abs(m).max(axis=0)))
+    return np.abs(m[0] - m[1]) > slack
 
 
 def check(draws: dict[str, np.ndarray], ref: Reference, reps: int = 1, tolerance: float = TOLERANCE) -> Verdict:
@@ -157,6 +160,8 @@ def check(draws: dict[str, np.ndarray], ref: Reference, reps: int = 1, tolerance
     err = np.full((n_series, n_fun), math.nan)
     se = np.full((n_series, n_fun), math.nan)
     rhats, esses = np.empty(n_series), np.empty(n_series)
+    split = disputed(ref)
+    exact_disputed = None  # the first exact value missed where the halves disagree: unproven at most
     for i, x in enumerate(s):
         parts = [r for r in ess.rhat_parts(x) if not math.isnan(r)]
         rhats[i] = max(parts) if parts else math.inf
@@ -166,7 +171,9 @@ def check(draws: dict[str, np.ndarray], ref: Reference, reps: int = 1, tolerance
             run = float(f.mean())
             if sd[i, j] == 0:  # the reference value is exact (S10): compare it directly
                 if abs(run - target[i, j]) > EXACT * max(1.0, abs(target[i, j])):
-                    return Verdict("wrong", "exact", ref.series[i], FUNCTIONS[j], run - target[i, j])
+                    if not split[i, j]:
+                        return Verdict("wrong", "exact", ref.series[i], FUNCTIONS[j], run - target[i, j])
+                    exact_disputed = exact_disputed or (i, j, run - target[i, j])
                 continue
             err[i, j] = (run - target[i, j]) / sd[i, j]
             e = ess.ess_mean(f) if np.ptp(f) > 0 else math.nan
@@ -193,14 +200,17 @@ def check(draws: dict[str, np.ndarray], ref: Reference, reps: int = 1, tolerance
 
     absval = np.abs(np.where(checked, err, 0.0))
     # a quantity the reference's halves disagree on can keep the run from right, not make it wrong
-    lower = np.where(checked & ~disputed(ref), absval - z_wrong(q, reps) * se, -math.inf)
+    lower = np.where(checked & ~split, absval - z_wrong(q, reps) * se, -math.inf)
     i, j = np.unravel_index(int(np.argmax(lower)), lower.shape)
     if lower[i, j] > tolerance:
         return Verdict("wrong", "error", ref.series[i], FUNCTIONS[j], float(err[i, j]), float(lower[i, j]), **base)
     upper = np.where(checked, absval + _z_right() * se, -math.inf)
     i, j = np.unravel_index(int(np.argmax(upper)), upper.shape)
     status = "right" if upper[i, j] < tolerance else "unproven"
-    reason = "" if status == "right" else "disputed" if disputed(ref)[i, j] else "unproven"
+    if status == "right" and exact_disputed:
+        i, j, e = exact_disputed
+        return Verdict("unproven", "disputed", ref.series[i], FUNCTIONS[j], float(e), math.nan, **base)
+    reason = "" if status == "right" else "disputed" if split[i, j] else "unproven"
     return Verdict(status, reason, ref.series[i], FUNCTIONS[j],
                    float(err[i, j]), float(upper[i, j]), **base)
 
