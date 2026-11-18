@@ -379,4 +379,5 @@ What the run shows:
 - Models that are not Stan programs. The seam works through BridgeStan, so every model must be a `.stan` file.
 - A replicate check on the references. The halves rule compares two halves of one build, and nothing compares two independent builds of a reference. An error that both halves share is found only when a correct sampler fails against it, as on radon_vis and bym2_offset_only.
 - Larger posteriordb references. The posteriordb draws are 10 chains of 1000, so their projections are summarised on 5 chains. An error of a few of their MCSEs in one projection is about 0.05 SD on these models. That is enough to make a correct run unproven, and too small to make it wrong at a tolerance of 0.1.
+- Tail ESS at a tie. When many draws share the maximum or minimum, as in a normal clipped at a bound, the tail ESS is undefined (NaN), so the rep is unproven however well it mixed.
 - GPU samplers, and samplers that evaluate many points in one call. `log_density_gradient` takes one point.
