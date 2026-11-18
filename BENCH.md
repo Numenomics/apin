@@ -219,7 +219,7 @@ CmdStan 2.39 NUTS with default settings, 5 reps per model, at the budgets above:
 | pilots | 5000 | unproven | 0 of 5 | – | 32 | unproven: R-hat 1.092 on sigma_a |
 | hier_2pl | 5000 | right | 5 of 5 | 0.076 | 3089 |  |
 | gp_regr | 5000 | right | 5 of 5 | 0.063 | 9797 |  |
-| accel_gp | 20000 | unproven | 3 of 5 | 0.151 | 15333 | unproven: proj.17 square e=+0.0583 bound=0.144 |
+| accel_gp | 20000 | wrong | 2 of 5 | – | – | wrong: rep0 took 2945 s, the limit is 1800 s |
 | bym2_offset_only | 5000 | right | 5 of 5 | 0.077 | 1094 |  |
 | eight_schools_centered | 5000 | wrong | 0 of 5 | – | 43 | wrong: lp__ mean e=-0.274 bound=0.16 |
 | garch11 | 5000 | right | 5 of 5 | 0.081 | 7072 |  |
@@ -227,12 +227,12 @@ CmdStan 2.39 NUTS with default settings, 5 reps per model, at the budgets above:
 | low_dim_gauss_mix | 5000 | right | 5 of 5 | 0.064 | 9337 |  |
 | arma11 | 5000 | right | 5 of 5 | 0.066 | 9893 |  |
 
-The verdict counts only correctness; it does not depend on timing. The runs behind this table were made on a machine under load, so their times are not reported here.
+The runs behind this table were made on a machine under load, so their times are not reported here. The verdict depends on timing in one place: a rep over the time limit is wrong. accel_gp's rep0 took 2945 s against the limit of 1800 s, so accel_gp is wrong, and the bound and ESS columns are blank because rep0 was not checked. With the time limit lifted, its verdict is unproven, with 3 reps of 5 right, a largest bound of 0.151 and a smallest ESS of 15 333. Its other reps took 340 to 1204 s.
 
 - 17 of 20 models are right. "Largest bound" is the largest upper bound on |e| over the reps' quantities; it must be below 0.1. "Smallest ESS" is the smallest credited ESS over the reps.
 - eight_schools_centered is wrong. In one rep the mean of lp__ is 0.27 SD off, with a lower bound of 0.16 on the error. This is the known bias of NUTS on the centred funnel, and more draws only make it clearer.
 - pilots is unproven. sigma_a has R-hat 1.092 and an ESS of 32 in 4 × 5000 draws: the chains do not cross the funnel. ESS grows about linearly with the draws, so 400 would take some 60 000 draws per chain. The budget stays at 5000.
-- accel_gp is unproven at 4 × 20 000 draws. Three reps are right. In the other two, the run's own MCSE of the square of proj.17 is 0.05 SD, an ESS of about 390 for that function, while the bulk and tail ESS of the series is 21 000. That points to rare long excursions along this direction. At 4 × 5000, one rep of five failed the same way: one chain went to 25 SD on proj.16. Proving it would take about 4 × 80 000 draws.
+- Without the time limit, accel_gp is unproven at 4 × 20 000 draws. Three reps are right. In the other two, the run's own MCSE of the square of proj.17 is 0.05 SD, an ESS of about 390 for that function, while the bulk and tail ESS of the series is 21 000. That points to rare long excursions along this direction. At 4 × 5000, one rep of five failed the same way: one chain went to 25 SD on proj.16. Proving it would take about 4 × 80 000 draws.
 - radon_variable_intercept_slope_noncentered and bym2_offset_only were unproven against references built on 10 chains. The summary half of those references was off by 3 to 5 of its own MCSEs on one projection (see rule 3). Against the 20-chain references both are right at 4 × 5000.
 - lsat_model runs 4 × 10 000 draws. The budget was raised when its reference still had 10 chains. 4 × 5000 has not been retried against the 20-chain reference.
 - At 4 × 1000 draws, the old default, most reps of most models were unproven: their bounds were 0.09 to 0.15.
