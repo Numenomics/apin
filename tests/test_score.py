@@ -160,3 +160,39 @@ def test_verdicts_are_cached_by_reference_and_reps(tmp_path, grid):
     score.score(tmp_path, tmp_path / "s", grid, log=lambda *_: None)
     cached = json.loads((d / "gate.json").read_text())
     assert cached["key"]["reps"] == 2 and cached["verdict"]["status"] in gate.STATUSES
+
+
+def _reasons(tmp_path, grid):
+    out = score.score(tmp_path, tmp_path / "s", grid, log=lambda *_: None)
+    return {(r["model"], r["rep"]): (r["status"], r["reason"]) for r in out["per_run"]}
+
+
+def test_a_rep_short_of_its_chains_or_draws_is_wrong(tmp_path, grid):
+    """Rule 4: the files must hold the budget run.json declares. A lost chain or a chain cut short
+    (a crash, a full disk) is missing draws, so the rep is wrong rather than gated on what is left."""
+    write_rep(tmp_path, "x", "m1", 0, grid)
+    (write_rep(tmp_path, "x", "m1", 1, grid) / "chain_3.csv").unlink()
+    d = write_rep(tmp_path, "x", "m2", 0, grid)
+    lines = (d / "chain_1.csv").read_text().splitlines()
+    (d / "chain_1.csv").write_text("\n".join(lines[:-100]) + "\n")
+    reasons = _reasons(tmp_path, grid)
+    assert reasons[("m1", 0)][0] != "wrong"
+    assert reasons[("m1", 1)][0] == "wrong" and "3 chains" in reasons[("m1", 1)][1]
+    assert reasons[("m2", 0)][0] == "wrong" and "draws" in reasons[("m2", 0)][1]
+
+
+def test_a_truncated_chain_file_is_wrong_not_a_crash(tmp_path, grid):
+    d = write_rep(tmp_path, "x", "m1", 0, grid)
+    text = (d / "chain_0.csv").read_text()
+    (d / "chain_0.csv").write_text(text[: len(text) - 7])  # the last row loses its last fields
+    status, reason = _reasons(tmp_path, grid)[("m1", 0)]
+    assert status == "wrong" and "chain_0.csv" in reason
+
+
+def test_a_corrupt_verdict_cache_is_recomputed(tmp_path, grid):
+    d = write_rep(tmp_path, "x", "m1", 0, grid)
+    write_rep(tmp_path, "x", "m1", 1, grid)
+    first = _reasons(tmp_path, grid)[("m1", 0)]
+    (d / "gate.json").write_text('{"key": {"reps": 2, "refer')
+    assert _reasons(tmp_path, grid)[("m1", 0)] == first
+    assert json.loads((d / "gate.json").read_text())["verdict"]["status"] == first[0]

@@ -111,7 +111,8 @@ def read_csv(path: Path) -> StanCsv:
     With save_warmup=1, CmdStan writes the warmup draws first and then a
     comment "# Adaptation terminated". Rows before that comment go to
     `warmup_values`; `values` holds only the draws after it. A file without
-    the comment (save_warmup=0, or not from CmdStan) has no warmup rows.
+    the comment (save_warmup=0, or not from CmdStan) has no warmup rows. A row without a line end
+    or with a different number of fields than the header raises CmdStanError: the file was cut short.
     """
     comments, header, rows, warm = [], None, [], None
     with open(path) as fh:
@@ -121,13 +122,17 @@ def read_csv(path: Path) -> StanCsv:
                 if warm is None and "Adaptation terminated" in line:
                     warm, rows = rows, []
                 continue
-            line = line.strip()
-            if not line:
+            if not line.strip():
                 continue
+            if not line.endswith("\n"):
+                raise CmdStanError(f"{path.name}: the last row is cut short (no line end)")
+            fields = line.strip().split(",")
             if header is None:
-                header = line.split(",")
+                header = fields
+            elif len(fields) != len(header):
+                raise CmdStanError(f"{path.name}: a row has {len(fields)} fields, the header {len(header)}")
             else:
-                rows.append([float(v) for v in line.split(",")])
+                rows.append([float(v) for v in fields])
     if header is None:
         raise CmdStanError(f"{path} has no header row")
     def mat(r):

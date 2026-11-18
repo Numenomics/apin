@@ -68,13 +68,19 @@ def declared(spec: str = "all", reps: int = 5, base_seed: int = grid_mod.BASE_SE
     return Grid(entries, reps, base_seed)
 
 
-def chain_draws(rep_dir: Path, names: list[str] | None = None) -> dict[str, np.ndarray]:
+def chain_files(rep_dir: Path) -> list[Path]:
+    return sorted(rep_dir.glob("chain_*.csv"), key=lambda p: int(p.stem.split("_")[1]))
+
+
+def chain_draws(rep_dir: Path, names: list[str] | None = None, csvs: list | None = None) -> dict[str, np.ndarray]:
     """The named columns (default: all but the sampler's `__` columns) as (draws, chains) arrays.
-    A name missing from a chain is left out. Ragged chains are cut to the shortest."""
-    files = sorted(rep_dir.glob("chain_*.csv"), key=lambda p: int(p.stem.split("_")[1]))
-    if not files:
-        raise FileNotFoundError(f"no chain CSVs in {rep_dir}")
-    csvs = [cmdstan.read_csv(f) for f in files]
+    A name missing from a chain is left out. Ragged chains are cut to the shortest; the score
+    checks the budget's shape first (`read_rep`)."""
+    if csvs is None:
+        files = chain_files(rep_dir)
+        if not files:
+            raise FileNotFoundError(f"no chain CSVs in {rep_dir}")
+        csvs = [cmdstan.read_csv(f) for f in files]
     n = min(f.values.shape[0] for f in csvs)
     if names is None:
         names = [c for c in csvs[0].columns if not c.endswith("__")]
@@ -89,20 +95,45 @@ def _key(entry: Entry, reps: int) -> dict:
     return {"reps": reps, "reference": hashlib.sha256(entry.ref.to_json().encode()).hexdigest(), "gate": consts}
 
 
+def read_rep(rep_dir: Path, chains: int, draws: int) -> list:
+    """The chain CSVs of a rep, which must be exactly the budget: `chains` files of `draws` rows.
+    Raises ValueError naming what is missing or unreadable (rule 4: missing is failing)."""
+    files = chain_files(rep_dir)
+    if len(files) != chains:
+        raise ValueError(f"{len(files)} chains, the budget is {chains}")
+    csvs = []
+    for f in files:
+        try:
+            csvs.append(cmdstan.read_csv(f))
+        except (OSError, ValueError, cmdstan.CmdStanError) as e:
+            raise ValueError(f"{f.name} unreadable: {e}") from None
+        if len(csvs[-1].values) != draws:
+            raise ValueError(f"{f.name} has {len(csvs[-1].values)} draws, the budget is {draws}")
+    return csvs
+
+
 def verdict(rep_dir: Path, entry: Entry, reps: int) -> gate.Verdict:
     """The gate's verdict on a finished rep, cached in rep_dir/gate.json. lp__ is computed by the
-    harness from the constrained draws; a column of that name written by the sampler is ignored."""
+    harness from the constrained draws; a column of that name written by the sampler is ignored.
+    A rep whose files fall short of the budget is wrong. An unreadable cache is recomputed."""
     key = _key(entry, reps)
     cache = rep_dir / "gate.json"
-    if cache.is_file():
+    try:
         c = json.loads(cache.read_text())
         if c.get("key") == key:
             return gate.Verdict.from_dict(c["verdict"])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
     ref = entry.ref
-    draws = chain_draws(rep_dir, list(ref.names) + list(ref.constants))
-    if ref.has_lp and all(n in draws for n in ref.names):
-        draws[LP] = entry.lp(draws)
-    v = gate.check(draws, ref, reps=reps)
+    try:
+        csvs = read_rep(rep_dir, entry.chains, entry.draws)
+    except ValueError as e:
+        v = gate.Verdict("wrong", str(e))
+    else:
+        draws = chain_draws(rep_dir, list(ref.names) + list(ref.constants), csvs)
+        if ref.has_lp and all(n in draws for n in ref.names):
+            draws[LP] = entry.lp(draws)
+        v = gate.check(draws, ref, reps=reps)
     cache.write_text(json.dumps({"key": key, "verdict": v.to_dict()}))
     return v
 
