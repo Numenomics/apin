@@ -31,12 +31,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .. import stan_library
+from .. import grid, stan_library
 from ..models import ROOT
 from ..sampler import RunRequest, Sampler, Timing
 
-TREEDEPTH_CEILING = 1023
-DEFAULT_SECONDS = 1800.0
 
 
 class Adapter(Sampler):
@@ -66,8 +64,8 @@ class Adapter(Sampler):
                 "max_evals": self.opt("max_evals"), "max_seconds": self.opt("max_seconds")}
 
     def budget(self, req: RunRequest) -> tuple[int, float]:
-        evals = int(self.opt("max_evals") or req.chains * (req.warmup + req.draws) * TREEDEPTH_CEILING)
-        return evals, float(self.opt("max_seconds") or DEFAULT_SECONDS)
+        evals = int(self.opt("max_evals") or grid.max_evaluations(req.chains, req.warmup, req.draws))
+        return evals, float(self.opt("max_seconds") or grid.MAX_SECONDS)
 
     def run(self, req: RunRequest) -> Timing:
         so = stan_library.build(stan_library.tree(self.opt("bridgestan")), req.model.stan_file,

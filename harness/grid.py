@@ -24,6 +24,13 @@ from . import models as models_mod
 from .sampler import RunRequest, Sampler
 
 BASE_SEED = 20260819
+TREEDEPTH_CEILING = 1023  # leapfrog steps of one NUTS transition at CmdStan's default max_depth 10
+MAX_SECONDS = 1800.0  # wall time of one rep
+
+
+def max_evaluations(chains: int, warmup: int, draws: int) -> int:
+    """The evaluation limit of one rep: every transition at the tree-depth ceiling (BENCH.md, "The budget")."""
+    return chains * (warmup + draws) * TREEDEPTH_CEILING
 
 
 def seed_for(rep: int, base: int = BASE_SEED) -> int:

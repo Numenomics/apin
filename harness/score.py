@@ -4,7 +4,9 @@
 
 The grid is every model with a reference posterior and its budget (models/manifest.json), times
 `reps` reps whose seeds follow from the base seed. A rep that is missing, failed, or was run with
-another seed or budget is wrong. A model is right only when every rep is right and the reps pass
+another seed or budget is wrong. So is a rep that recorded other evaluation or time limits than
+the grid's, or used more than them; a rep from a sampler the harness does not meter (CmdStan)
+records no limits and is checked on its usage only. A model is right only when every rep is right and the reps pass
 the calibration test (gate.judge); only a right model earns speed credit.
 
 Outputs, in out_dir:
@@ -46,6 +48,14 @@ class Entry:
     warmup: int
     draws: int
     lp: Callable[[dict], np.ndarray]
+
+    @property
+    def max_evaluations(self) -> int:
+        return grid_mod.max_evaluations(self.chains, self.warmup, self.draws)
+
+    @property
+    def max_seconds(self) -> float:
+        return grid_mod.MAX_SECONDS
 
 
 @dataclass(frozen=True)
@@ -183,9 +193,18 @@ def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid) -> dict:
     want = (entry.chains, entry.warmup, entry.draws)
     if got != want:
         return wrong(f"rep{rep} budget {got} (chains, warmup, draws), the grid's is {want}")
-    v = verdict(d, entry, g.reps)
     t = rec["timing"]
     total, dens, grad = evaluation_counts(t)
+    limits = (entry.max_evaluations, entry.max_seconds)
+    extra = t.get("extra") or {}
+    recorded = (extra.get("max_evaluations"), extra.get("max_seconds"))
+    if recorded != (None, None) and recorded != limits:
+        return wrong(f"rep{rep} limits {recorded} (evaluations, s), the grid's are {limits}")
+    if total is not None and total > entry.max_evaluations:
+        return wrong(f"rep{rep} used {total} evaluations, the limit is {entry.max_evaluations}")
+    if t.get("wall_s") is not None and t["wall_s"] > entry.max_seconds:
+        return wrong(f"rep{rep} took {t['wall_s']:.0f} s, the limit is {entry.max_seconds:.0f} s")
+    v = verdict(d, entry, g.reps)
     secs = float(sum(t["chain_s"]))
     row.update(status=v.status, reason=v.label(), ess=v.ess, evaluations=total, density_evals=dens,
                gradient_evals=grad, seconds=secs, verdict=v)

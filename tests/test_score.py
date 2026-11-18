@@ -30,7 +30,7 @@ def grid():
 
 
 def write_rep(runs, label, model, rep, grid, *, shift=0.0, evaluations=10**5, seconds=2.0, identity=None,
-              seed=None, draws=None, seed_rng=None):
+              seed=None, draws=None, seed_rng=None, limits=None):
     d = runs / label / model / f"rep{rep}"
     d.mkdir(parents=True)
     e = grid.entries[model]
@@ -45,6 +45,8 @@ def write_rep(runs, label, model, rep, grid, *, shift=0.0, evaluations=10**5, se
               "evaluations": evaluations,
               "extra": {} if evaluations is None else {"density_evals": evaluations // 4,
                                                        "gradient_evals": evaluations - evaluations // 4}}
+    if limits is not None:
+        timing["extra"].update(max_evaluations=limits[0], max_seconds=limits[1])
     rec = {"label": label, "sampler": "fake", "model": model, "rep": rep,
            "seed": grid.base_seed + 1000 * rep if seed is None else seed, "base_seed": grid.base_seed,
            "chains": e.chains, "warmup": e.warmup, "draws": n, "identity": identity or {"name": label},
@@ -219,3 +221,20 @@ def test_a_cached_verdict_holds_only_for_the_files_it_was_computed_from(tmp_path
                             for l in lines[1:]]
     (d / "chain_1.csv").write_text("\n".join(shifted) + "\n")  # same shape, other draws
     assert _reasons(tmp_path, grid)[("m1", 0)][0] != "right"  # recomputed: one chain off by 5
+
+
+def test_a_rep_run_with_other_limits_or_over_them_is_wrong(tmp_path, grid):
+    """T2: the grid carries the evaluation and time limits. A rep that recorded other limits, or
+    used more than the grid's, is wrong; one within them that recorded none is scored."""
+    e = grid.entries["m1"]
+    cap, secs = e.max_evaluations, e.max_seconds
+    assert (cap, secs) == (e.chains * (e.warmup + e.draws) * 1023, 1800.0)
+    write_rep(tmp_path, "x", "m1", 0, grid, limits=(cap, secs))
+    write_rep(tmp_path, "x", "m1", 1, grid, evaluations=cap + 1)
+    write_rep(tmp_path, "x", "m2", 0, grid, limits=(10**9, 9000.0))
+    write_rep(tmp_path, "x", "m2", 1, grid, seconds=secs + 1)
+    got = _reasons(tmp_path, grid)
+    assert got[("m1", 0)][0] == "right"
+    assert got[("m1", 1)][0] == "wrong" and "evaluations" in got[("m1", 1)][1]
+    assert got[("m2", 0)][0] == "wrong" and "limits" in got[("m2", 0)][1]
+    assert got[("m2", 1)][0] == "wrong" and " s" in got[("m2", 1)][1]
