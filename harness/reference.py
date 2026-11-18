@@ -71,7 +71,8 @@ DERIVED = {
 
 
 def _round(v, digits: int = 7):
-    return np.vectorize(lambda x: float(f"{x:.{digits}g}"), otypes=[float])(np.asarray(v, dtype=float))
+    a = np.asarray(v, dtype=float)
+    return np.array([float(f"{x:.{digits}g}") for x in a.ravel().tolist()], dtype=float).reshape(a.shape)
 
 
 @dataclass

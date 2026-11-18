@@ -156,3 +156,15 @@ def test_a_rebuild_reuses_only_csvs_made_with_the_requested_settings(tmp_path, m
     text = (tmp_path / "ref_2.csv").read_text()
     (tmp_path / "ref_2.csv").write_text(text[: len(text) - 7])  # a cut-off last row
     assert build(other).meta["settings"] == other and runs == [4, 4]
+
+
+def test_to_json_raises_no_numpy_warning():
+    """`_round` with np.vectorize raised "invalid value encountered" on finite input now and then."""
+    import warnings
+    ref = reference.load("bym2_offset_only")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for _ in range(5):
+            ref.to_json()
+    v = np.array([[1.23456789, -2.5e-12], [np.nan, np.inf]])
+    assert np.array_equal(reference._round(v, 4), [[1.235, -2.5e-12], [np.nan, np.inf]], equal_nan=True)
