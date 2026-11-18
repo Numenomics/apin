@@ -1,4 +1,9 @@
-"""The correctness gate: its false-fail rate on correct samplers and its power on broken ones."""
+"""The correctness gate: three verdicts, and the findings of the first review (S1-S4, S6, S10).
+
+The target is a correlated normal in five variables with lp__ computed from the draws, as the
+harness computes it. The reference is estimated from 10 chains x 1000 independent draws, as
+posteriordb's are. harness/gate_rates.py measures the error rates at full scale.
+"""
 
 import math
 
@@ -10,110 +15,159 @@ from harness import gate, reference
 MU = np.array([0.0, 3.0, -1.0, 10.0, 0.5])
 SIGMA = np.array([1.0, 0.5, 2.0, 1.0, 0.1])
 NAMES = [f"x.{i + 1}" for i in range(len(MU))]
+CORR = np.array([[1.0, -0.888, 0.2, 0.0, 0.0],
+                 [-0.888, 1.0, -0.1, 0.0, 0.0],
+                 [0.2, -0.1, 1.0, 0.3, 0.0],
+                 [0.0, 0.0, 0.3, 1.0, 0.0],
+                 [0.0, 0.0, 0.0, 0.0, 1.0]])
+L = np.linalg.cholesky(CORR)
 
 
-def ar1(rng, n, chains, rho):
-    """Stationary AR(1) chains with N(MU, SIGMA^2) marginals: dict name -> (n, chains)."""
-    e = rng.standard_normal((n, chains, len(MU)))
+def with_lp(x: np.ndarray) -> dict:
+    """x: (n, chains, 5) draws -> the run's dict, with lp__ as the harness would compute it."""
+    e = np.linalg.solve(L, ((x - MU) / SIGMA)[..., None])[..., 0]
+    return {**{name: x[:, :, i] for i, name in enumerate(NAMES)}, "lp__": -0.5 * (e**2).sum(axis=-1)}
+
+
+def ar1(rng, n, chains, rho, latent=None):
+    """Stationary AR(1) chains on the latent independent normals, mapped to the target."""
+    e = rng.standard_normal((n, chains, len(MU))) if latent is None else latent
     z = np.empty_like(e)
     z[0] = e[0]
     for t in range(1, n):
         z[t] = rho * z[t - 1] + math.sqrt(1 - rho**2) * e[t]
-    x = MU + SIGMA * z
-    return {name: x[:, :, i] for i, name in enumerate(NAMES)}
+    return MU + SIGMA * (z @ L.T)
 
 
-def estimated_reference(rng, n=10000):
-    """A reference estimated from n independent draws, as posteriordb's are (10 chains x 1000,
-    thinned). The draws are independent, so each MCSE is the sample sd over sqrt(n); this is
-    what reference.summarise gives for them, without the cost of n-draw ESS estimates."""
-    x = MU + SIGMA * rng.standard_normal((n, len(MU)))
-    m = x.mean(axis=0)
-    cols = {"x": x, "x2": x**2, "var": (x - m) ** 2}
-    sd = {k: v.std(axis=0, ddof=1) for k, v in cols.items()}
-    stats = {"mean": m, "sd": sd["x"], "mcse_mean": sd["x"] / math.sqrt(n),
-             "sq_mean": cols["x2"].mean(axis=0), "sq_sd": sd["x2"], "mcse_sq": sd["x2"] / math.sqrt(n),
-             "var": cols["var"].mean(axis=0), "var_sd": sd["var"], "mcse_var": sd["var"] / math.sqrt(n)}
-    return reference.Reference("sim", "test", list(NAMES), stats, {})
+@pytest.fixture(scope="module")
+def ref():
+    rng = np.random.default_rng(991)
+    d = with_lp(ar1(rng, 1000, 10, 0.0))
+    return reference.summarise({n: d[n] for n in NAMES}, lp=d["lp__"], model="sim", source="test")
 
 
-def test_false_fail_rate_is_at_most_alpha():
-    """Correct samplers with few and correlated draws, against an estimated reference.
+def test_independent_draws_are_right(ref):
+    v = gate.check(with_lp(ar1(np.random.default_rng(2), 5000, 4, 0.0)), ref)
+    assert v.status == "right" and v.label() == "right", v.label()
+    assert v.quantities == 4 * len(ref.series) and v.ess > 15000
 
-    The gate is designed for a false-fail rate of at most ALPHA = 1 % per run
-    (Bonferroni over 3 x 5 tests). 300 runs at a true rate of 1 % give 3
-    fails on average; 10 or more would happen with probability about 0.1 %.
-    The naive rule (point estimate of b2 above 0.01, no MCSE) fails most of
-    the same runs, which is why the gate accounts for Monte Carlo error.
-    """
+
+def test_autocorrelated_correct_chains_are_never_wrong(ref):
+    """S1: stationary AR(1) chains of length 1000. At rho 0.99 and 0.999 the chains have not mixed
+    and the old gate called most of them wrong; they are unproven, and none is wrong."""
     rng = np.random.default_rng(1)
-    fails = naive = runs = 0
-    for n, rho in ((100, 0.0), (250, 0.5), (500, 0.9)):
-        for _ in range(100):
-            ref = estimated_reference(rng)
-            v = gate.check(ar1(rng, n, 4, rho), ref, rhat_bad=math.inf)
-            runs += 1
-            fails += not v.passed
-            naive += v.b2 > gate.THRESHOLD
-    assert runs == 300
-    assert fails < 10, fails
-    assert naive > 120, naive
+    for rho in (0.9, 0.99, 0.999):
+        got = [gate.check(with_lp(ar1(rng, 1000, 4, rho)), ref, reps=1).status for _ in range(20)]
+        assert "wrong" not in got, (rho, got)
+        assert set(got) == {"unproven"}, (rho, got)  # ESS about 210, 20 and 2 of 4000: no proof possible
 
 
-def test_threshold_and_z():
-    assert gate.THRESHOLD == 0.01 and gate.ALPHA == 0.01
-    assert gate.critical_z(1) == pytest.approx(2.5758, abs=1e-4)
-    assert gate.critical_z(30) == pytest.approx(3.5879, abs=1e-3)
+def test_a_shift_of_one_sd_is_wrong(ref):
+    x = ar1(np.random.default_rng(3), 5000, 4, 0.0)
+    x[..., 0] += SIGMA[0]
+    v = gate.check(with_lp(x), ref)
+    assert v.status == "wrong" and v.reason == "error"
 
 
-def test_correct_sampler_passes_with_many_draws():
-    rng = np.random.default_rng(2)
-    v = gate.check(ar1(rng, 1000, 4, 0.3), estimated_reference(rng))
-    assert v.passed and v.reason == "" and v.label() == "pass"
-    assert v.n_tests == 15
+def test_one_wild_draw_earns_no_credit(ref):
+    """S2: the old gate passed a run with one draw at 1e6 because that draw inflated its own MCSE.
+    The fractions below the reference quantiles are bounded, and the square is not proven."""
+    x = ar1(np.random.default_rng(4), 5000, 4, 0.0)
+    x[0, 0, 0] = 1e6
+    assert gate.check(with_lp(x), ref).status != "right"
+    x[..., 0] += SIGMA[0]  # with the shift as well, the bounded fractions show the error
+    assert gate.check(with_lp(x), ref).status == "wrong"
 
 
-def test_scaled_draws_fail():
-    """Draws multiplied by 1.2: the mean of x.4 (mu 10) is off by 2 standard deviations."""
-    rng = np.random.default_rng(3)
-    draws = {k: 1.2 * x for k, x in ar1(rng, 1000, 4, 0.3).items()}
-    v = gate.check(draws, estimated_reference(rng))
-    assert not v.passed and v.reason == "bias"
-    assert v.worst_variable == "x.4" and v.b2 > 1
-    assert v.label().startswith("wrong: x.4")
+def test_a_frozen_coordinate_is_wrong(ref):
+    """S3: a variable held at one value gave an undefined MCSE, which the old gate read as a pass."""
+    d = with_lp(ar1(np.random.default_rng(4), 1000, 4, 0.0))
+    d["x.1"] = np.full((1000, 4), 0.9996422734533653)
+    v = gate.check(d, ref)
+    assert v.status == "wrong" and v.reason == "frozen" and v.series == "x.1"
 
 
-def test_overdispersed_around_the_mean_fails():
-    """Variance 1.44x too large, means right: only the centred second moment catches it on x.4."""
+def test_independent_marginals_are_wrong(ref):
+    """S4: draws with the right marginals but no correlation (a diagonal approximation). The
+    projections on the reference's eigenvectors and lp__ see it."""
     rng = np.random.default_rng(4)
-    ref = estimated_reference(rng)
-    draws = {k: MU[i] + 1.2 * (x - MU[i]) for i, (k, x) in enumerate(ar1(rng, 1000, 4, 0.0).items())}
-    v = gate.check(draws, ref)
-    assert not v.passed and v.worst_moment == "var"
+    x = MU + SIGMA * rng.standard_normal((5000, 4, 5))
+    v = gate.check(with_lp(x), ref)
+    assert v.status == "wrong" and (v.series.startswith("proj.") or v.series == "lp__"), v.label()
 
 
-def test_stuck_chain_fails_on_rhat():
-    rng = np.random.default_rng(5)
-    draws = ar1(rng, 1000, 4, 0.3)
-    for x in draws.values():
-        x[:, 0] = x[0, 0]
-    v = gate.check(draws, estimated_reference(rng))
-    assert not v.passed and v.reason == "rhat" and v.rhat_max > gate.RHAT_BAD
+def test_a_two_valued_variable_is_compared_exactly():
+    """S10: the reference variable is +-1 in equal shares, so its square is exactly 1 and has no
+    MCSE. Chains frozen at -2, -2, +2, +2 have the right mean; their square is 4."""
+    x = np.tile([-1.0, 1.0], 5000).reshape(1000, 10)
+    ref = reference.summarise({"x": x})
+    run = np.column_stack([np.full(1000, -2.0)] * 2 + [np.full(1000, 2.0)] * 2)
+    v = gate.check({"x": run}, ref)
+    assert v.status == "wrong" and v.reason == "exact" and v.function == "square"
 
 
-def test_nan_and_missing_fail():
+def test_copied_chains_are_caught_by_the_heuristic(ref):
+    """S6: one chain copied four times, the copies shifted by c * 1e-10, also reordered."""
     rng = np.random.default_rng(6)
-    ref = estimated_reference(rng)
-    draws = ar1(rng, 200, 4, 0.0)
-    draws["x.2"][5, 1] = np.nan
-    assert gate.check(draws, ref).reason == "nonfinite"
-    draws = ar1(rng, 200, 4, 0.0)
-    del draws["x.3"]
-    v = gate.check(draws, ref)
-    assert v.reason == "missing" and v.worst_variable == "x.3"
+    one = ar1(rng, 1000, 1, 0.0)
+    for order in (np.arange(1000), rng.permutation(1000)):
+        x = np.concatenate([one[order] + c * 1e-10 for c in range(4)], axis=1)
+        v = gate.check(with_lp(x), ref)
+        assert v.status == "unproven" and "near-identical" in v.reason, v.label()
 
 
-def test_extra_run_variables_are_ignored_by_the_bias_test():
+def test_copies_the_heuristic_misses_fail_the_calibration(ref):
+    """Rule 2: copies shifted by 1e-3 SD escape the heuristic; each rep may look right, but over the
+    reps they scatter twice as far as the claimed SE says, and the model is not right."""
     rng = np.random.default_rng(7)
-    draws = dict(ar1(rng, 1000, 4, 0.0), extra=rng.standard_normal((1000, 4)) + 50)
-    assert gate.check(draws, estimated_reference(rng)).passed
+    verdicts = []
+    for _ in range(3):
+        one = ar1(rng, 5000, 1, 0.0)
+        x = np.concatenate([one + c * 1e-3 * SIGMA for c in range(4)], axis=1)
+        verdicts.append(gate.check(with_lp(x), ref, reps=3))
+    assert all("near-identical" not in v.reason for v in verdicts)
+    m = gate.judge(verdicts, ref, reps=3)
+    assert m.status == "unproven" and m.calibration > 2.5, m
+
+
+def test_correct_reps_pass_the_calibration(ref):
+    rng = np.random.default_rng(8)
+    verdicts = [gate.check(with_lp(ar1(rng, 5000, 4, 0.0)), ref, reps=3) for _ in range(3)]
+    m = gate.judge(verdicts, ref, reps=3)
+    assert m.status == "right" and 0.5 < m.calibration < 1.5, m
+
+
+def test_model_verdict_from_reps(ref):
+    right = gate.Verdict("right", quantities=44, errors=[0.0] * 44, mcse=[0.01] * 44)
+    unproven = gate.Verdict("unproven", "rhat", "x.1", rhat_max=1.2)
+    wrong = gate.Verdict("wrong", "missing", "x.2")
+    assert gate.judge([right, right], ref, 2).status == "right"
+    assert gate.judge([right], ref, 2).status == "wrong"  # a rep is missing
+    assert gate.judge([right, None], ref, 2).status == "wrong"
+    assert gate.judge([right, wrong], ref, 2).status == "wrong"
+    assert gate.judge([right, unproven], ref, 2).status == "unproven"
+
+
+def test_hard_failures(ref):
+    rng = np.random.default_rng(9)
+    d = with_lp(ar1(rng, 500, 4, 0.0))
+    d["x.2"][5, 1] = np.nan
+    assert gate.check(d, ref).reason == "nonfinite"
+    d = with_lp(ar1(rng, 500, 4, 0.0))
+    del d["lp__"]
+    v = gate.check(d, ref)
+    assert v.status == "wrong" and v.reason == "missing" and v.series == "lp__"
+
+
+def test_a_reference_constant_must_be_reproduced():
+    rng = np.random.default_rng(10)
+    ref = reference.summarise({"a": rng.standard_normal((1000, 10)), "one": np.ones((1000, 10))})
+    run = {"a": rng.standard_normal((1000, 4)), "one": np.ones((1000, 4))}
+    assert gate.check(run, ref).status == "right"
+    run["one"] = run["one"] + 1e-3
+    assert gate.check(run, ref).reason == "constant"
+
+
+def test_extra_run_variables_are_ignored(ref):
+    d = dict(with_lp(ar1(np.random.default_rng(11), 5000, 4, 0.0)), extra=np.full((5000, 4), np.nan))
+    assert gate.check(d, ref).status == "right"
