@@ -233,7 +233,7 @@ The verdict counts only correctness; it does not depend on timing. The runs behi
 2. Each model gets a verdict from its reps: right if all are right and the calibration test passes, wrong if any is wrong, unproven otherwise.
 3. The rank is by the number of models right, out of every model in the grid. That includes models where NUTS is wrong or unproven. A sampler that proves a model NUTS cannot prove gains a full point.
 4. Ties are broken by speed: the geometric mean, over the models where both the submission and the baseline are right, of the ratio of the submission's ESS per evaluation to the baseline's. The ratio for a model is the ratio of the means over reps.
-5. A 95 % bootstrap interval comes with the speed. It resamples the reps of the submission and of the baseline, 2000 times.
+5. A 95 % bootstrap interval comes with the speed. It resamples the reps of the submission and of the baseline, 2000 times. The baseline's own row is 1 with no interval. The interval is conditional on the set of models where both labels are right, so two labels tied on models right can have their speeds taken over different sets of models.
 
 There is no penalty factor and no median over reps. A model omitted counts as wrong, so it never scores better than an attempt.
 
@@ -282,7 +282,7 @@ One run on 5 public and held-out models, 5 reps each, at the bench budget (4 × 
 
 | rank | label | models right | speed per evaluation [95 %] | speed per second [95 %] |
 |---|---|---|---|---|
-| 1 | CmdStan NUTS | 4 of 5 | 1 [0.965, 1.04] | 1 [0.931, 1.08] |
+| 1 | CmdStan NUTS | 4 of 5 | 1 | 1 |
 | 2 | HMC example | 3 of 5 | 0.538 [0.52, 0.559] | 0.155 [0.147, 0.163] |
 | 3 | ULA (wrong on purpose) | 0 of 5 | | |
 

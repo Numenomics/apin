@@ -263,6 +263,9 @@ def rank(models: list[dict], baseline: str | None, names: list[str], seed: int =
                 continue
             if not pairs:
                 continue
+            if lab == baseline:
+                row[key] = 1.0  # by definition; an interval against itself means nothing
+                continue
             row[key] = _geo([np.mean(a) / np.mean(b) for a, b in pairs])
             row[f"{key}_lo"], row[f"{key}_hi"] = _bootstrap(pairs, seed)
         out.append(row)
@@ -325,6 +328,8 @@ def table(ranking: list[dict], models: list[dict], baseline: str | None, names: 
 def _speed(r, key) -> str:
     if not math.isfinite(r[key]):
         return ""
+    if not math.isfinite(r[key + "_lo"]):
+        return f"{r[key]:.3g}"
     return f"{r[key]:.3g} [{r[key + '_lo']:.3g}, {r[key + '_hi']:.3g}]"
 
 

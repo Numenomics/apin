@@ -143,6 +143,16 @@ def test_the_interval_resamples_the_baseline():
     assert c["speed_eval_lo"] < c["speed_eval"] < c["speed_eval_hi"]
 
 
+def test_the_baseline_row_is_1_with_no_interval():
+    """T10: resampling the baseline against itself gave an interval around 1 that means nothing."""
+    rows = [{"label": "base", "model": "m", "status": "right", "eval": [1.0, 2.0, 4.0], "sec": [1.0, 3.0, 2.0]},
+            {"label": "cand", "model": "m", "status": "right", "eval": [2.0] * 3, "sec": [1.0] * 3}]
+    b = next(r for r in score.rank(rows, "base", names=["m"]) if r["label"] == "base")
+    assert b["speed_eval"] == b["speed_s"] == 1
+    assert all(math.isnan(b[k]) for k in ("speed_eval_lo", "speed_eval_hi", "speed_s_lo", "speed_s_hi"))
+    assert score._speed(b, "speed_eval") == "1"
+
+
 def test_rank_orders_by_models_right_then_speed():
     def rows(label, status, v):
         return [{"label": label, "model": m, "status": s, "eval": [x] * 2, "sec": [x] * 2}
