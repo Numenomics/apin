@@ -48,7 +48,7 @@ A reference holds summary statistics only, never draws (`harness/reference.py`).
 For each checked quantity j (a function of a series), with e_j the error of the run mean in reference SDs of the function and s_j its standard error (run and reference MCSE combined), the gate calls the rep
 
 - wrong, before the tests below, when a function whose reference value is exact (its reference SD is 0) misses that value by more than 1e-6 (relative) and the halves agree on it. When the halves disagree, the miss only blocks right: the rep goes through the tests below, can still be wrong on another quantity, and is unproven where it would have been right;
-- wrong when some |e_j| − z_w·s_j exceeds the tolerance 0.1 on a quantity the two halves of the reference agree on, z_w the Bonferroni value for all quantities of all reps at 1 % per model. The halves disagree when their estimates differ by more than 5 times the smaller of their two MCSEs. A half whose MCSE is 0 claims an exact estimate, so against it any difference above 1e-6 (relative, as for exact values) is a disagreement; with both MCSEs positive, 5 times the smaller decides however small it is. A quantity the halves disagree on can keep the rep from right but cannot make it wrong (BENCH.md, rule 1);
+- wrong when some |e_j| − z_w·s_j exceeds the tolerance 0.1 on a quantity the two halves of the reference agree on, z_w the Bonferroni value for all quantities of all reps at 1 % per model. The halves disagree when their estimates differ by more than 5 times the smaller of their two MCSEs. A half whose MCSE is 0 claims an exact estimate, so against it any difference above 1e-6 is a disagreement, relative to the larger magnitude of the two estimates when that is above 1 in absolute value; with both MCSEs positive, 5 times the smaller decides however small it is. A quantity the halves disagree on can keep the rep from right but cannot make it wrong (BENCH.md, rule 1);
 - right when every |e_j| + 1.645·s_j is below 0.1 and no exact value is missed;
 - unproven otherwise.
 
@@ -73,7 +73,7 @@ Before the statistical tests, a rep is wrong for:
 - a non-finite draw, or a non-finite lp__ (a draw outside the support, or one the model rejects);
 - a reference variable the run did not write;
 - a variable that never moves;
-- a reference constant the run does not reproduce to 1e-6 (relative, for constants above 1);
+- a reference constant the run does not reproduce to 1e-6 (relative, for constants above 1 in absolute value);
 - a function whose reference value is exact and which the run misses by more than 1e-6, when the halves of the reference agree on it. Where they disagree, the reference saw something one half did not, and the miss makes the rep unproven instead.
 
 The verdict is cached in `gate.json` next to the rep. It is recomputed when the rep's chain files, the reference, the number of reps or the code the verdict comes from changes. The key holds a sha256 of that code (`gate.py`, `ess.py`, `reference.py`, `cmdstan.py` and `score.py`), so a cache written by an older gate is not reused. The key does not cover the Stan model, its data or the BridgeStan build that compute lp__: after a change to those, delete the `gate.json` files.
