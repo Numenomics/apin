@@ -42,7 +42,34 @@ The verdict is decided in this order.
 5. Every |e_j| + 1.645·s_j below the tolerance: `right`.
 6. Otherwise `unproven`.
 
-The tolerance is **0.1 reference SDs** of each function. The right test is an intersection–union test. A rep whose true error on one quantity equals the tolerance is called right at most 5 % of the time, however many quantities there are.
+The tolerance is **0.1 reference SDs** of each function. The right test is an intersection–union test. It measures a run's distance from the stored reference, not from the truth. A rep whose distance from the reference on one quantity equals the tolerance is called right at most 5 % of the time, however many quantities there are, and this 5 % is a rate over rebuilt references: the simulations draw a new reference for every batch. Against one fixed reference, the gate resolves the truth only to the tolerance plus that reference's own error. For example, a 5-chain reference of one standard normal variable whose mean was 0.038 SD off (MCSE 0.0142) called 95 of 100 runs right whose mean was 0.099 SD from the truth, because they were only 0.061 SD from the reference.
+
+The reference's own error is its MCSE. The table gives each shipped reference's largest MCSE over its checked quantities, in reference SDs (`mcse / sd` from `Reference.targets()`, where sd > 0).
+
+| reference | source | largest MCSE [SD] | on |
+|---|---|---|---|
+| accel_gp | posteriordb | 0.0153 | proj.2 square |
+| arma11 | posteriordb | 0.0149 | proj.1 mean |
+| blr | posteriordb | 0.0150 | proj.3 below_q05 |
+| bym2_offset_only | local | 0.0119 | proj.1 mean |
+| diamonds | posteriordb | 0.0151 | proj.14 square |
+| dogs_hierarchical | local | 0.0103 | proj.2 below_q95 |
+| eight_schools_centered | posteriordb | 0.0150 | proj.4 below_q95 |
+| eight_schools_noncentered | posteriordb | 0.0150 | proj.4 below_q95 |
+| garch11 | posteriordb | 0.0152 | proj.2 mean |
+| gp_regr | posteriordb | 0.0151 | proj.1 below_q05 |
+| hier_2pl | local | 0.0117 | proj.1 mean |
+| kidscore_momiq | posteriordb | 0.0153 | proj.1 below_q05 |
+| logmesquite_logvash | posteriordb | 0.0151 | proj.6 below_q05 |
+| lotka_volterra | posteriordb | 0.0146 | proj.8 mean |
+| low_dim_gauss_mix | posteriordb | 0.0146 | proj.4 mean |
+| lsat_model | local | 0.0103 | proj.1 below_q95 |
+| pilots | local | 0.0107 | proj.5 mean |
+| radon_partially_pooled_noncentered | local | 0.0107 | proj.2 mean |
+| radon_variable_intercept_slope_noncentered | local | 0.0106 | proj.5 below_q95 |
+| wells_dist100_model | local | 0.0103 | proj.1 mean |
+
+At the largest of these, 0.015 SD, a reference error of two MCSEs moves the tolerance measured against the truth to anywhere from about 0.07 to 0.13 SD on that quantity.
 
 The reference's MCSE comes from its own draws. A reference that missed a rare excursion claims an MCSE far below its true error, and then a correct run that does see the excursion is called wrong. The reference therefore keeps each half's estimate and MCSE of every function (`models/reference/halves/<model>.json`). For the variables and lp__ the halves are the two halves of the chains. For the projections they are the half that chose the directions and the half that summarises them. The halves disagree on a quantity when their estimates differ by more than 5 times the smaller of their two MCSEs (`gate.SPLIT_Z`). The smaller MCSE is used and not the combined one: a half that saw k excursions which the other half missed differs from it by only about √k combined MCSEs, because its own MCSE grows with what it saw. On references of correct draws of the five-variable target, 10 chains × 1000 draws, the halves disagree by chance on 0.10 % of quantities with independent draws, 0.19 % with AR(1) draws at ρ = 0.5 and 0.61 % at ρ = 0.9. These rates and the trials below are in `results/tables/gate_rates.md`.
 
