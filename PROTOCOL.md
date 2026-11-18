@@ -56,7 +56,7 @@ Both tests trust s_j. So they run only on chains that look mixed: split R-hat be
 The rates, from `harness/gate_rates.py` (`results/tables/gate_rates.md`):
 
 - a correct sampler whose chains have mixed: called wrong in 0 of 1100 runs (design: at most 1 % per model); right in 90 % of reps at an ESS of 4000 per variable and in all reps at 20 000. This was measured on Gaussian AR(1) chains against references whose MCSE is accurate. A reference that missed rare excursions understates its MCSE and breaks the rate: the halves rule removes the false wrongs where one half saw the excursions (5 of 120 trials before, 0 after) and not those where neither half did (3 of 150, with or without it);
-- a sampler with an error of exactly the tolerance: called right in 0 to 4 % of runs (design: at most 5 % per rep);
+- a sampler with an error of exactly the tolerance: called right in 0 to 4 % of runs (nominal: at most 5 % per rep, when the run's MCSE estimates its error; a sampler with rare jumps that its runs do not show is called right far more often, BENCH.md, rule 1);
 - chains that have not mixed (AR(1) at ρ = 0.99 or 0.999 with too few draws): unproven in every run, correct or not.
 
 BENCH.md, "Rule 1: the gate", has the table.
