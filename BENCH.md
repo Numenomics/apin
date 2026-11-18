@@ -342,7 +342,7 @@ Cells are the mean over reps of the credited ESS per evaluation and per second o
 What the run shows:
 
 - NUTS is wrong on eight_schools_centered. One of its five reps passed R-hat and ESS and still showed the funnel's bias in lp__, 0.27 SD with a lower bound of 0.16. The others had not mixed. This is the known failure of NUTS on the centred funnel, and the gate sees it.
-- ULA earns nothing. It is wrong where its chains mix and show its bias, and where it returns a non-finite draw. Elsewhere it is unproven.
+- ULA earns nothing. It is wrong where its chains mix and show its bias, and where the recomputed lp__ of a draw was non-finite. Elsewhere it is unproven.
 - The HMC example ranks below NUTS. It proves fewer models and is about half as fast per evaluation where both are right. With the old score, which credited the bulk ESS of the variables alone at 4 × 1000 draws, it scored 1.32 times NUTS on four of these models, with NUTS's cost counted as `n_leapfrog__` alone. A likely reason for the change is that the credited ESS now includes the projections on the correlated directions and lp__, and the example uses a diagonal metric, which mixes slowly along them. This run does not test that.
 
 ## Ways to game the score
