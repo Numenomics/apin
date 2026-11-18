@@ -193,6 +193,14 @@ def test_a_rebuild_with_another_cmdstan_samples_again(tmp_path, monkeypatch):
     installed[0] = "stanc3 v2.40.0 (Unix)"
     assert build().meta["cmdstan"] == "stanc3 v2.40.0" and runs == [4]
     assert build().meta["cmdstan"] == "stanc3 v2.40.0" and runs == [4]
+    # U7 remainder: a release candidate is another version than its release
+    installed[0] = "stanc3 v2.39.0 (Unix)"
+    for c in range(4):
+        _fake_cmdstan_csv(tmp_path / f"ref_{c}.csv", s, c, rng, stanc="stanc3 v2.39.0-rc1")
+    assert build().meta["cmdstan"] == "stanc3 v2.39.0" and runs == [4, 4]
+    assert [reference._version(v) for v in ("stanc3 v2.39.0-rc1", "stanc3 v2.39.0-rc1 (Unix)",
+                                            "stanc3 v2.39.0 (Unix)", "stanc3 v2.39.0")] == \
+        ["2.39.0-rc1", "2.39.0-rc1", "2.39.0", "2.39.0"]
 
 
 def test_to_json_raises_no_numpy_warning():

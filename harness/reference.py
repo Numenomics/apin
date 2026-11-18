@@ -425,14 +425,16 @@ def _made_with(f: cmdstan.StanCsv, s: dict, chain: int) -> bool:
 
 
 def _version(text: str | None) -> str | None:
-    """The x.y.z of a stanc version string ("stanc3 v2.39.0 (Unix)" or a CSV's "stanc3 v2.39.0")."""
-    m = re.search(r"v(\d+\.\d+\.\d+)", text or "")
+    """The version in a stanc version string, without the platform label: "2.39.0" from
+    "stanc3 v2.39.0 (Unix)" or a CSV's "stanc3 v2.39.0". A release suffix is kept, so a release
+    candidate ("v2.39.0-rc1") is another version than its release."""
+    m = re.search(r"v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.+-]+)?)", text or "")
     return m.group(1) if m else None
 
 
 def _complete(csvs: list[Path], s: dict, version: str | None) -> list | None:
     """The chain CSVs, when every one is there, readable, complete and made with settings `s` by
-    stanc `version` (x.y.z); otherwise None (a cache miss)."""
+    stanc `version` (`_version`); otherwise None (a cache miss)."""
     files = []
     for c, p in enumerate(csvs):
         try:
