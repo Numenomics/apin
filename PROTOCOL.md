@@ -47,8 +47,9 @@ A reference holds summary statistics only, never draws (`harness/reference.py`).
 
 For each checked quantity j (a function of a series), with e_j the error of the run mean in reference SDs of the function and s_j its standard error (run and reference MCSE combined), the gate calls the rep
 
+- wrong, before the tests below, when a function whose reference value is exact (its reference SD is 0) misses that value by more than 1e-6 (relative) and the halves agree on it. When the halves disagree, the miss only blocks right: the rep goes through the tests below, can still be wrong on another quantity, and is unproven where it would have been right;
 - wrong when some |e_j| − z_w·s_j exceeds the tolerance 0.1 on a quantity the two halves of the reference agree on, z_w the Bonferroni value for all quantities of all reps at 1 % per model. The halves disagree when their estimates differ by more than 5 times the smaller of their two MCSEs. A half whose MCSE is 0 claims an exact estimate, so against it any difference above 1e-6 (relative, as for exact values) is a disagreement; with both MCSEs positive, 5 times the smaller decides however small it is. A quantity the halves disagree on can keep the rep from right but cannot make it wrong (BENCH.md, rule 1);
-- right when every |e_j| + 1.645·s_j is below 0.1;
+- right when every |e_j| + 1.645·s_j is below 0.1 and no exact value is missed;
 - unproven otherwise.
 
 Both tests trust s_j. So they run only on chains that look mixed: split R-hat below 1.01 and bulk and tail ESS of at least 400 on every series, and no two chains near-identical. Chains that fail this are unproven, not wrong. With strong autocorrelation and few effective draws, the ESS estimate is itself noisy and understates the MCSE. The old gate called such correct runs wrong.
