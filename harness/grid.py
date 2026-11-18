@@ -7,7 +7,9 @@ Layout of a run directory (the runner output schema, see README):
         run.json         request, sampler identity and Timing
         DONE | FAILED    marker; FAILED holds the error
 
-A rep with DONE is skipped on rerun, so an interrupted grid resumes.
+A rep with DONE is reused on rerun, so an interrupted grid resumes, but only when its seed, base
+seed, sampler identity (for a submission, its sha256) and budget match the request; otherwise it is
+run again (BENCH.md, rule 4).
 """
 
 from __future__ import annotations
@@ -16,7 +18,6 @@ import json
 import platform
 import shutil
 import traceback
-from dataclasses import asdict
 from pathlib import Path
 
 from . import models as models_mod
@@ -30,35 +31,39 @@ def seed_for(rep: int, base: int = BASE_SEED) -> int:
 
 
 def run_grid(sampler: Sampler, models: list[models_mod.Model], reps: int, runs_dir: Path, label: str | None = None,
-             chains: int = 4, warmup: int = 1000, draws: int = 1000, log=print, base_seed: int = BASE_SEED
-             ) -> list[Path]:
+             chains: int | None = None, warmup: int | None = None, draws: int | None = None, log=print,
+             base_seed: int = BASE_SEED) -> list[Path]:
+    """chains, warmup and draws default to each model's budget in models/manifest.json."""
     sampler.check()
     label = label or sampler.name
     identity = sampler.describe()
     done = []
     for model in models:
         data = model.data_file()
+        budget = {"chains": chains or model.chains, "warmup": model.warmup if warmup is None else warmup,
+                  "draws": draws or model.draws}
         for rep in range(reps):
             d = runs_dir / label / model.name / f"rep{rep}"
+            key = {"seed": seed_for(rep, base_seed), "base_seed": base_seed, "identity": identity, **budget}
             if (d / "DONE").exists():
-                done.append(d)
-                continue
+                old = json.loads((d / "run.json").read_text())
+                changed = [k for k in key if old.get(k) != key[k]]
+                if not changed:
+                    done.append(d)
+                    continue
+                log(f"[{label}] {model.name} rep{rep}: rerun, {', '.join(changed)} changed")
             if d.exists():
                 shutil.rmtree(d)
             d.mkdir(parents=True)
-            req = RunRequest(model=model, data_file=data, seed=seed_for(rep, base_seed), chains=chains, warmup=warmup,
-                             draws=draws, out_dir=d)
+            req = RunRequest(model=model, data_file=data, seed=key["seed"], out_dir=d, **budget)
             try:
                 timing = sampler.run(req)
             except Exception:
                 (d / "FAILED").write_text(traceback.format_exc())
                 log(f"[{label}] {model.name} rep{rep}: FAILED (see {d / 'FAILED'})")
                 continue
-            record = {
-                "label": label, "sampler": sampler.name, "model": model.name, "rep": rep, "seed": req.seed,
-                "chains": chains, "warmup": warmup, "draws": draws, "identity": identity,
-                "host": platform.node(), "timing": timing.to_dict(),
-            }
+            record = {"label": label, "sampler": sampler.name, "model": model.name, "rep": rep, **key,
+                      "host": platform.node(), "timing": timing.to_dict()}
             (d / "run.json").write_text(json.dumps(record, indent=1))
             (d / "DONE").touch()
             done.append(d)
