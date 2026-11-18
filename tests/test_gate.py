@@ -250,3 +250,16 @@ def test_a_zero_mcse_half_disagrees_with_any_difference_beyond_the_exact_toleran
     m[1, 0, 0], m[1, 0, 1] = 1e-3, 1e-9
     d = gate.disputed(dataclasses.replace(ref, halves={"mean": m, "mcse": s}))
     assert d[0, 0] and not d[0, 1] and not d[0, 2]
+
+
+def test_halves_with_tiny_positive_mcses_are_judged_by_their_mcses_alone():
+    """V2: the exact tolerance was a floor under SPLIT_Z times the smaller MCSE, so halves with
+    MCSEs of 1e-8 and estimates 5e-7 apart, more than 5 times either MCSE, agreed. The exact
+    tolerance applies only when a half's MCSE is 0."""
+    import dataclasses
+    ref = reference.summarise({"x": np.random.default_rng(31).normal(size=(5000, 4))})
+    m = np.zeros((2, len(ref.series), 4))
+    s = np.full_like(m, 1e-8)
+    m[1, 0, 0], m[1, 0, 1] = 5e-7, 4e-8
+    d = gate.disputed(dataclasses.replace(ref, halves={"mean": m, "mcse": s}))
+    assert d[0, 0] and not d[0, 1] and not d[0, 2]

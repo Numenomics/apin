@@ -47,7 +47,7 @@ A reference holds summary statistics only, never draws (`harness/reference.py`).
 
 For each checked quantity j (a function of a series), with e_j the error of the run mean in reference SDs of the function and s_j its standard error (run and reference MCSE combined), the gate calls the rep
 
-- wrong when some |e_j| − z_w·s_j exceeds the tolerance 0.1 on a quantity the two halves of the reference agree on, z_w the Bonferroni value for all quantities of all reps at 1 % per model. The halves disagree when their estimates differ by more than 5 times the smaller of their two MCSEs. A half whose MCSE is 0 claims an exact estimate, so against it any difference above 1e-6 (relative, as for exact values) is a disagreement. A quantity the halves disagree on can keep the rep from right but cannot make it wrong (BENCH.md, rule 1);
+- wrong when some |e_j| − z_w·s_j exceeds the tolerance 0.1 on a quantity the two halves of the reference agree on, z_w the Bonferroni value for all quantities of all reps at 1 % per model. The halves disagree when their estimates differ by more than 5 times the smaller of their two MCSEs. A half whose MCSE is 0 claims an exact estimate, so against it any difference above 1e-6 (relative, as for exact values) is a disagreement; with both MCSEs positive, 5 times the smaller decides however small it is. A quantity the halves disagree on can keep the rep from right but cannot make it wrong (BENCH.md, rule 1);
 - right when every |e_j| + 1.645·s_j is below 0.1;
 - unproven otherwise.
 

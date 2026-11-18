@@ -126,7 +126,9 @@ def disputed(ref: Reference) -> np.ndarray:
     smaller of the two halves' MCSEs: one half's estimate is far outside what the other half
     claims as its own error. A half whose MCSE is 0 claims its estimate is exact, so against it
     any difference beyond the exact tolerance (EXACT, as for exact reference values) is a
-    disagreement; estimates within that tolerance agree. The combined MCSE, hypot of the two, does not do: a half that saw
+    disagreement; estimates within that tolerance agree. The exact tolerance applies only then:
+    with both MCSEs positive, however small, SPLIT_Z times the smaller decides. The combined
+    MCSE, hypot of the two, does not do: a half that saw
     k rare excursions the other half missed differs from it by about sqrt(k) combined MCSEs,
     since its own MCSE grows with what it saw. A reference without halves cannot show that they
     agree, so every quantity is disputed."""
@@ -134,7 +136,8 @@ def disputed(ref: Reference) -> np.ndarray:
     if not ref.halves:
         return np.ones(target.shape, dtype=bool)
     m, s = ref.halves["mean"], ref.halves["mcse"]
-    slack = np.maximum(SPLIT_Z * np.minimum(s[0], s[1]), EXACT * np.maximum(1.0, np.abs(m).max(axis=0)))
+    smaller = np.minimum(s[0], s[1])
+    slack = np.where(smaller > 0, SPLIT_Z * smaller, EXACT * np.maximum(1.0, np.abs(m).max(axis=0)))
     return np.abs(m[0] - m[1]) > slack
 
 
