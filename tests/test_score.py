@@ -362,6 +362,19 @@ def test_the_score_can_check_the_submission_digest(tmp_path, grid):
     assert all(r["status"] == "wrong" and "digest" in r["reason"] for r in out["per_run"])
 
 
+def test_a_submission_for_a_label_not_scored_is_refused(tmp_path, grid):
+    """V3: `--submission hcm=current.py`, a typo for hmc, skipped the digest check in silence."""
+    sub = tmp_path / "current.py"
+    sub.write_text("def sample(problem, budget, rng): return None\n")
+    runs = tmp_path / "runs"
+    write_rep(runs, "hmc", "m1", 0, grid, identity={"submission_sha256": "old"})
+    write_rep(runs, "other", "m1", 0, grid)
+    with pytest.raises(ValueError, match="hcm"):
+        score.score(runs, tmp_path / "s", grid, submissions={"hcm": sub}, log=lambda *_: None)
+    with pytest.raises(ValueError, match="other"):
+        score.score(runs, tmp_path / "s", grid, labels=["hmc"], submissions={"other": sub}, log=lambda *_: None)
+
+
 def test_a_verdict_cached_by_another_gate_is_recomputed(tmp_path, grid, monkeypatch):
     """U1 remainder: a gate.json written before 42417d4 kept its `wrong: exact` for a run the new
     gate calls unproven, because the key named the gate's constants and not its code. A cache

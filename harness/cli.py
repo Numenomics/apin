@@ -95,8 +95,11 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "score":
         g = score.declared(a.models, a.reps, a.base_seed, a.build)
         subs = dict(x.split("=", 1) for x in a.submission)
-        score.score(a.runs, a.out, g, a.baseline, a.labels.split(",") if a.labels else None,
-                    submissions={k: Path(v) for k, v in subs.items()})
+        try:
+            score.score(a.runs, a.out, g, a.baseline, a.labels.split(",") if a.labels else None,
+                        submissions={k: Path(v) for k, v in subs.items()})
+        except ValueError as e:  # a refused label or submission, not a crash
+            raise SystemExit(f"apin score: {e}") from None
         return 0
     if a.cmd == "reference":
         settings = {"adapt_delta": a.adapt_delta} if a.adapt_delta else None

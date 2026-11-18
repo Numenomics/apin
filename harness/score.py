@@ -406,9 +406,14 @@ def score(runs_dir: Path, out_dir: Path, g: Grid, baseline: str | None = None, l
           log=print, submissions: dict[str, Path] | None = None) -> dict:
     """Score every label under runs_dir over the grid g. A label whose reps record different
     sampler identities (another submission, other options) is refused. `submissions` maps a label
-    to its submission file; each rep of that label must record the file's sha256."""
+    to its submission file; each rep of that label must record the file's sha256. A submission for a
+    label that is not scored is refused."""
     digests = {k: hashlib.sha256(Path(p).read_bytes()).hexdigest() for k, p in (submissions or {}).items()}
     label_dirs = sorted(p for p in Path(runs_dir).iterdir() if p.is_dir() and (not labels or p.name in labels))
+    unknown = sorted(set(digests) - {ld.name for ld in label_dirs})
+    if unknown:
+        raise ValueError(f"--submission names {', '.join(map(repr, unknown))}, which is not among the scored labels "
+                         f"({', '.join(ld.name for ld in label_dirs) or 'none'}); its digest would not be checked")
     if baseline and baseline not in [p.name for p in label_dirs]:
         raise KeyError(f"baseline label {baseline!r} has no runs under {runs_dir}")
     names = list(g.entries)
