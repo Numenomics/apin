@@ -10,20 +10,20 @@ Each cell is one sampler, one model and one rep:
 
 - 4 chains, 1000 warmup iterations, and the draws per chain in the model's `budget` in `models/manifest.json`: 5000 for most models, 10 000 for lsat_model and 20 000 for accel_gp. These budgets are what stock NUTS needs to be proven right at the gate's tolerance (BENCH.md, "The budget"). `--chains`, `--warmup` and `--draws` override them for experiments, but the scorer marks a rep with another budget wrong. CmdStan saves its warmup draws so that their gradient count is known. `read_csv` keeps them apart, and they are never scored.
 - 3 reps for development, 5 for a benchmark result. Rep r uses seed BASE + 1000·r, with BASE 20260819 unless `--base-seed` says otherwise. Chains inside a rep get the chain id or seed offset that their sampler uses (CmdStan `id=c+1`; walnutpie `seed+c`).
-- At most 4 cores in use for the whole grid. The old campaign ran on a 12-core Ryzen 9 5900X and kept to 4 cores so that memory bandwidth and turbo states were comparable between arms. A rep's 4 chains run in parallel. Run one grid at a time.
+- Use at most 4 cores for the whole grid. The harness does not enforce this. The old campaign ran on a 12-core Ryzen 9 5900X and kept to 4 cores so that memory bandwidth and turbo states were comparable between arms. A rep's 4 chains run in parallel. Run one grid at a time.
 
-A rep that finishes gets a `DONE` marker; a rep that raises gets `FAILED` with the traceback. A rerun reuses a rep with `DONE` only when its seed, base seed, sampler identity and budget match the new request. Otherwise it deletes the rep and runs it again, so an interrupted grid resumes where it stopped and a changed grid never keeps old rows.
+A rep that finishes gets a `DONE` marker; a rep that raises gets `FAILED` with the traceback. A rerun reuses a rep with `DONE` only when its seed, base seed, sampler identity and budget match the new request. Otherwise it deletes the rep and runs it again, so an interrupted grid resumes where it stopped and a rep whose request changed is not kept.
 
 ## The score
 
-`apin score --models M --reps R` scores the grid of the models in M that have a reference, with R reps each. It walks that grid, not the run directories: a rep the grid declares and a label lacks is wrong, and so is a rep whose run.json names another model, rep, seed or base seed than its cell. `--submission LABEL=PATH` makes every rep of that label match the file's sha256; a LABEL that is not scored is refused. It computes, for every rep, the rank-normalized bulk and tail ESS and split R-hat of every series the gate checks (Vehtari et al. 2021; `harness/ess.py` reproduces the R package posterior 1.7.0 to 10 significant digits). Columns whose names end in `__` are sampler diagnostics and are not scored; lp__ is recomputed by the harness. A rep whose chains hold another number of draws than the budget, or are cut short, is wrong; the scorer does not cut chains to the shortest.
+`apin score --models M --reps R` scores the grid of the models in M that have a reference, with R reps each. It walks that grid, not the run directories: a rep the grid declares and a label lacks is wrong, and so is a rep whose run.json names another model, rep, seed, base seed or budget than its cell. `--submission LABEL=PATH` makes every rep of that label match the file's sha256; a LABEL that is not scored is refused. It computes, for every rep, the rank-normalized bulk and tail ESS and split R-hat of every series the gate checks (Vehtari et al. 2021; `harness/ess.py` reproduces the R package posterior 1.7.0 to a relative 1e-9 on the fixture in `tests/test_ess.py`). Columns whose names end in `__` are sampler diagnostics and are not scored; lp__ is recomputed by the harness. A rep whose chains hold another number of draws than the budget, or are cut short, is wrong; the scorer does not cut chains to the shortest.
 
 Every rep gets a verdict from the correctness gate (next section): right, wrong or unproven. The credited ESS of a rep is the smallest bulk or tail ESS over every series. Cost is reported two ways, and only for a rep that is right:
 
 | column | meaning |
 |---|---|
-| `ess_per_eval` | credited ESS divided by every density and gradient evaluation, warmup included. It does not depend on the machine and does not let a sampler hide work in warmup. It is the primary speed. It needs complete counts: for CmdStan, the count read from every saved warmup and sampling row with thin = 1 (see below), or the logdensity adapter's own count. An adapter that cannot count all its evaluations says why in `timing.uncounted`, and the rep has no `ess_per_eval`. |
-| `ess_per_s` | credited ESS divided by the sum of each chain's own time (warmup plus sampling). This removes the effect of parallel dispatch and machine load. W-109 and W-133 used this convention ("stanza sum"). It is the secondary speed. |
+| `ess_per_eval` | credited ESS divided by every density and gradient evaluation, warmup included. It does not depend on load, depends on the machine only through floating-point results, and does not let a sampler hide work in warmup. It is the primary speed. It needs complete counts: for CmdStan, the count read from every saved warmup and sampling row with thin = 1 (see below), or the logdensity adapter's own count. An adapter that cannot count all its evaluations says why in `timing.uncounted`, and the rep has no `ess_per_eval`. |
+| `ess_per_s` | credited ESS divided by the sum of each chain's own time (warmup plus sampling). This removes the effect of parallel dispatch. It does not remove the effect of machine load. W-109 and W-133 used this convention ("stanza sum"). It is the secondary speed. |
 
 Never compare numbers that use different conventions. A report states which one it uses.
 
@@ -58,11 +58,11 @@ The rates, from `harness/gate_rates.py` (`results/tables/gate_rates.md`):
 
 - a correct sampler whose chains have mixed: called wrong in 0 of 1100 runs (design: at most 1 % per model); right in 90 % of reps at an ESS of 4000 per variable and in all reps at 20 000. This was measured on Gaussian AR(1) chains against references whose MCSE is accurate. A reference that missed rare excursions understates its MCSE and breaks the rate: the halves rule removes the false wrongs where one half saw the excursions (5 of 120 trials before, 0 after) and not those where neither half did (3 of 150, with or without it);
 - a sampler with an error of exactly the tolerance: called right in 0 to 4 % of runs (nominal: at most 5 % per rep, when the run's MCSE estimates its error; a sampler with rare jumps that its runs do not show is called right far more often, BENCH.md, rule 1);
-- chains that have not mixed (AR(1) at ρ = 0.99 or 0.999 with too few draws): unproven in every run, correct or not.
+- chains that have not mixed (AR(1) at ρ = 0.99 with 1000 draws per chain, and at ρ = 0.999 with 1000 or 50 000): unproven in every run, correct or not.
 
 BENCH.md, "Rule 1: the gate", has the table.
 
-The power to call a bias wrong grows with ESS. A rep is wrong once |e| exceeds 0.1 + z_w·s. At an ESS of 400 per quantity s is about 0.05 (√(1/400) plus the reference's share), and z_w is about 4 for a model with 100 quantities and 5 reps, so the gate calls a bias wrong from about 0.3 SD. At an ESS of 4000, s is about 0.02 and the gate calls a bias wrong from about 0.18 SD. Between the two bounds the rep is unproven, which earns nothing. A rep earns credit only when its error is shown to be below 0.1.
+The power to call a bias wrong grows with ESS. A rep is wrong once |e| exceeds 0.1 + z_w·s. At an ESS of 400 per quantity s is about 0.05 (√(1/400) plus the reference's share), and z_w is about 4 for a model with 100 quantities and 5 reps, so the gate calls a bias wrong from about 0.3 SD. At an ESS of 4000, s is about 0.02 and the gate calls a bias wrong from about 0.19 SD. Between the two bounds the rep is unproven, which earns nothing. A rep earns credit only when its error is shown to be below 0.1.
 
 The model's verdict is the worst of its reps (wrong, then unproven), and a model whose reps are all right must also pass the calibration test of BENCH.md, rule 2: the realized errors over all quantities and reps must agree with the claimed MCSEs at p ≥ 0.001. The threshold is nominal: under an idealised Gaussian null the test refused 0.48 % of correct models with the correlations of eight_schools_noncentered and 0.16 % with those of hier_2pl (BENCH.md, rule 1, after the table of thresholds).
 
@@ -73,10 +73,10 @@ Before the statistical tests, a rep is wrong for:
 - a non-finite draw, or a non-finite lp__ (a draw outside the support, or one the model rejects);
 - a reference variable the run did not write;
 - a variable that never moves;
-- a reference constant the run does not reproduce to 1e-6;
+- a reference constant the run does not reproduce to 1e-6 (relative, for constants above 1);
 - a function whose reference value is exact and which the run misses by more than 1e-6, when the halves of the reference agree on it. Where they disagree, the reference saw something one half did not, and the miss makes the rep unproven instead.
 
-The verdict is cached in `gate.json` next to the rep. It is recomputed when the rep's chain files, the reference, the number of reps or the code the verdict comes from changes. The key holds a sha256 of that code (`gate.py`, `ess.py`, `reference.py`, `cmdstan.py` and `score.py`), so a cache written by an older gate is never reused.
+The verdict is cached in `gate.json` next to the rep. It is recomputed when the rep's chain files, the reference, the number of reps or the code the verdict comes from changes. The key holds a sha256 of that code (`gate.py`, `ess.py`, `reference.py`, `cmdstan.py` and `score.py`), so a cache written by an older gate is not reused. The key does not cover the Stan model, its data or the BridgeStan build that compute lp__: after a change to those, delete the `gate.json` files.
 
 ## Deviation from the old campaign
 
@@ -131,12 +131,12 @@ The contract:
 - The submission may import only numpy, scipy and the standard modules math, typing, dataclasses, functools, itertools, collections and `__future__`, and may not name the builtins `open`, `exec`, `eval`, `compile`, `__import__`, `breakpoint`, `input`, `globals` or `vars`. An AST check enforces both before the run. It is a lint, not a sandbox (see BENCH.md).
 - The submission runs in a child process, `python -m harness.logdensity spec.json`, with `OMP_NUM_THREADS=1`. Its stdout and stderr go to `submission.log` in the rep directory.
 
-`timing.wall_s` runs from loading the submission file to converting what `sample()` returns into an array. Loading the model and constraining the draws are excluded. The chains share one process, so each `chain_s` entry is `wall_s / chains` and `ess_per_s` is ESS per second of the single core the submission ran on. `ess_per_s_wall` of a CmdStan run uses 4 cores in parallel, so compare `ess_per_s` (chain time) or `ess_per_eval` between a submission and CmdStan, never a wall time. `timing.evaluations` holds the count, and `timing.extra` holds the density and gradient counts apart and the limits in force.
+`timing.wall_s` runs from loading the submission file to converting what `sample()` returns into an array. Loading the model and constraining the draws are excluded. The chains share one process, so each `chain_s` entry is `wall_s / chains` and `ess_per_s` is ESS per second of the single core the submission ran on. A CmdStan run's `wall_s` covers 4 chains on 4 cores in parallel, so compare `ess_per_s` (chain time) or `ess_per_eval` between a submission and CmdStan, never a wall time. `timing.evaluations` holds the count, and `timing.extra` holds the density and gradient counts apart and the limits in force.
 
 CmdStan's gradient count (`adapters/cmdstan.py`, `gradients`) follows the CmdStan 2.39 source in `stan/src/stan/mcmc/hmc`:
 
 - One gradient per leapfrog step (`n_leapfrog__`), and one at the start of every transition, warmup and sampling (`base_nuts.hpp`, `hamiltonian_.init`). `n_leapfrog__` leaves the second out.
-- 2k + 4 gradients per step-size search (`base_hmc.hpp`, `init_stepsize`), where k is the number of times the search halved or doubled the step size. There is one search before warmup and one after each metric update, six in all at 1000 warmup iterations. CmdStan does not report k. The adapter finds it by replaying the dual averaging (`stepsize_adaptation.hpp`) from `accept_stat__` and `stepsize__` of the warmup rows. Every replayed step size of the kept runs matches CmdStan's to 3e-7 in log2. A trace that does not replay to 1e-4 leaves the run uncounted.
+- 2k + 4 gradients per step-size search (`base_hmc.hpp`, `init_stepsize`), where k is the number of times the search halved or doubled the step size. There is one search before warmup and one after each metric update, six in all at 1000 warmup iterations. CmdStan does not report k. The adapter finds it by replaying the dual averaging (`stepsize_adaptation.hpp`) from `accept_stat__` and `stepsize__` of the warmup rows. A trace that does not replay to 1e-4 in log2 leaves the run uncounted. `tests/test_adapters.py` checks the rebuilt k against a CmdStan chain.
 - Not counted: the initialisation attempts (`services/util/initialize.hpp`). Each costs one density and, if that is finite, one gradient. There are at most 100, so 2 to 200 evaluations per chain. The rest of a chain costs at least 2 × (warmup + draws), 12 000 at the bench budget.
 
 `examples/samplers/` holds two submissions: `hmc.py`, HMC with a diagonal metric, a step size tuned by dual averaging in warmup and a jittered number of steps, and `ula_wrong.py`, the unadjusted Langevin algorithm with a large step, which is wrong on purpose. Run one with
@@ -149,7 +149,7 @@ The first run of each model builds a BridgeStan library, which takes one to two 
 
 ## Runner output schema
 
-Every adapter writes the same layout, so `apin score` never knows which sampler ran:
+Every adapter writes the same layout, so `apin score` reads every rep from the same files:
 
 ```
 runs/<label>/<model>/rep<r>/
@@ -188,13 +188,13 @@ The old campaign lost the most time to these. They apply to any compiled upstrea
 
 - Stale objects. Make and CMake builds can keep an object compiled from an old header or with old flags and link it into a new binary. After a change to flags, compiler or a submodule commit, clean the build (`make clean-all` for CmdStan, delete `bridgestan.o` for BridgeStan, `--clean-first` for CMake). The bit-identity canary catches the rest.
 - A new option wired in one place. A new command-line option must reach every dispatch site. In the old campaign a flag was parsed, accepted and ignored by one sampler template, and a whole experiment (W-71) ran with it doing nothing. Test that the option changes the output before measuring.
-- Shared state across threads. A library that evaluates a model may not be thread-safe. A BridgeStan model built without `STAN_THREADS=true` corrupts memory when several threads call it.
+- Shared state across threads. A library that evaluates a model may not be thread-safe. A BridgeStan model built without `STAN_THREADS=true` is not safe when several threads call it (`upstream/bridgestan.md`).
 - One random stream per object. Each chain needs its own generator, and each distribution object must draw from one generator only. Sharing a distribution object between streams makes results depend on thread timing.
 - Argument lists. Pass a command as a list of separate tokens (`["method=sample", "num_warmup=1000"]`), never as one string with spaces.
 - Ragged output. A chain can stop early or write a partial last line. `apin score` calls such a rep wrong, since its draws fall short of the budget; rerun it.
 - Large output in git. `runs/`, `build/` and `.cache/` are in `.gitignore`. Add files by name, never with `git add -A`. The old repository once committed 44 GB of run output.
-- Load from other work. Another process on the machine changes wall times by 10 to 25 percent. Compare arms that ran under the same load, or use `ess_per_s` and `ess_per_eval`, which depend less on it.
+- Load from other work. Other work on the machine changes wall times: in the old campaign, the cost per gradient rose 10 to 25 percent under 4-way concurrency (REPORT.md). Compare arms that ran under the same load, or use `ess_per_s` and `ess_per_eval`, which depend less on it.
 
 ## Using a patched build
 
-Point the harness at a patched build with `--cmdstan` or the `CMDSTAN`, `BRIDGESTAN` and `WALNUTPIE_CLI` variables. The build notes for each upstream are in `upstream/<name>.md`. Give each build its own `--label`. The model cache in `build/` is keyed by the model source, the flags, the path of the CmdStan or BridgeStan tree and the stanc version. It cannot see a change inside a tree at the same path, such as a new branch checked out in `upstream/math`. After you switch a submodule branch, delete `build/` or pass a new `--build` directory per arm.
+Point the harness at a patched build with `--cmdstan` or the `CMDSTAN`, `BRIDGESTAN` and `WALNUTPIE_CLI` variables. The build notes for each upstream are in `upstream/<name>.md`. Give each build its own `--label`. The model cache in `build/` is keyed by the model source, the flags and the path of the tree, and for CmdStan also by the stanc version. It cannot see other changes inside a tree at the same path, such as a new branch checked out in `upstream/math`. After you switch a submodule branch, delete `build/` or pass a new `--build` directory per arm.
