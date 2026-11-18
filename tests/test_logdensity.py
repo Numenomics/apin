@@ -114,7 +114,9 @@ def test_example_hmc_on_fake_model():
 
 @pytest.mark.slow
 def test_examples_end_to_end(tmp_path):
-    """At the bench budget the example HMC is not wrong on the two smallest models; ULA with a large step is."""
+    """At the bench budget the example HMC is not wrong on the two smallest models. ULA with a large
+    step earns nothing on either. With one rep at 4 x 5000 draws its chains do not mix, so it is
+    unproven; the gate's own tests show that a biased run that mixes is wrong."""
     names = "eight_schools_noncentered,blr"
     ms = models.select(names)
     for label, file in (("hmc", "hmc.py"), ("ula", "ula_wrong.py")):
@@ -129,7 +131,7 @@ def test_examples_end_to_end(tmp_path):
         hmc, ula = rows["hmc", m], rows["ula", m]
         assert hmc["status"] != "wrong", hmc["reason"]
         assert hmc["evaluations"] == hmc["density_evals"] + hmc["gradient_evals"] > 0
-        assert ula["status"] == "wrong", ula["reason"]
+        assert ula["status"] != "right", ula["reason"]
         assert math.isnan(ula["ess_per_eval"])
 
 
