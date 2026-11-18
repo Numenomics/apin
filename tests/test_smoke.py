@@ -18,9 +18,8 @@ def test_smoke_grid(tmp_path):
     ms = models.select("eight_schools_noncentered,blr")
     done = grid.run_grid(s, ms, reps=1, runs_dir=tmp_path / "runs", log=lambda *_: None)
     assert len(done) == 2
-    out = score.score(tmp_path / "runs", tmp_path / "scores", log=lambda *_: None)
+    g = score.declared("eight_schools_noncentered,blr", reps=1, build_dir=tmp_path / "build")
+    out = score.score(tmp_path / "runs", tmp_path / "scores", g, log=lambda *_: None)
     for row in out["per_run"]:
-        assert row["ess_bulk_min"] > 400, row
-        assert row["rhat_max"] < 1.01, row
-        assert row["grads_sampling"] > 4000
-        assert row["ess_per_s_wall"] > 0
+        assert row["status"] != "wrong", row
+        assert row["evaluations"] > 4000 and row["gradient_evals"] == row["evaluations"]

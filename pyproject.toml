@@ -5,6 +5,7 @@ description = "A workbench for measuring patches to MCMC samplers"
 requires-python = ">=3.12"
 license = "BSD-3-Clause"
 dependencies = [
+    "bridgestan==2.9.0",
     "numpy==2.5.5",
     "scipy==1.18.1",
 ]
@@ -27,5 +28,5 @@ packages = ["harness"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: runs CmdStan end to end (needs CMDSTAN); deselect with -m 'not slow'"]
+markers = ["slow: builds or runs real models end to end (CmdStan or BridgeStan); select with -m slow"]
 addopts = "-m 'not slow'"

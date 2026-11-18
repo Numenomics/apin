@@ -1,153 +1,436 @@
-"""Score finished runs: ESS, R-hat and cost, per run, per model and per label.
+"""Score finished runs over a declared grid of models and reps (BENCH.md, rules 1, 2 and 4).
 
-Outputs (in the scores directory):
-  per_run.csv    one row per rep
-  per_model.csv  median over reps, per label and model
-  summary.csv    per label: geometric means over models, R-hat failures
-  ratios.csv     with --baseline: per-model ratios of ESS/s against the baseline label
+    score(runs_dir, out_dir, grid, baseline) -> per_run, per_model, ranking, table
 
-Two wall conventions are reported (PROTOCOL.md):
-  ess_per_s_wall   ESS_bulk_min / wall_s (chains in parallel, batch wall clock)
-  ess_per_s_chain  ESS_bulk_min / sum of per-chain sampler time
+The grid is every model with a reference posterior and its budget (models/manifest.json), times
+`reps` reps whose seeds follow from the base seed. A rep that is missing, failed, or was run with
+another seed or budget is wrong. So is a rep that recorded other evaluation or time limits than
+the grid's, or used more than them; a rep from a sampler the harness does not meter (CmdStan)
+records no limits and is checked on its usage only. A model is right only when every rep is right and the reps pass
+the calibration test (gate.judge); only a right model earns speed credit.
+
+Outputs, in out_dir:
+  per_run.csv    one row per rep of the grid: verdict, credited ESS, evaluations, cost
+  per_model.csv  one row per label and model: verdict and mean cost over the reps
+  ranking.csv    per label: models right, then speed against the baseline
+  table.md       the ranking and the per-model table
+
+Cost: `ess` is gate.Verdict.ess, the smallest bulk or tail ESS over every series the gate checks
+(variables, projections and lp__). ess_per_eval divides it by every density and gradient
+evaluation, warmup included; ess_per_s by the sum of the chains' seconds (one core).
 """
 
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
-import statistics
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
-from . import cmdstan, ess
+from . import cmdstan, gate, grid as grid_mod, models as models_mod, reference
+from .reference import LP, Reference
 
-RHAT_BAD = 1.01
+BOOTSTRAP = 2000
 
 
-def chain_draws(rep_dir: Path) -> dict[str, np.ndarray]:
-    """Variables as (draws, chains) arrays. Ragged chains are cut to the shortest."""
-    files = sorted(rep_dir.glob("chain_*.csv"), key=lambda p: int(p.stem.split("_")[1]))
-    if not files:
-        raise FileNotFoundError(f"no chain CSVs in {rep_dir}")
-    csvs = [cmdstan.read_csv(f) for f in files]
-    cols = [c for c in csvs[0].columns if not c.endswith("__")]
+@dataclass(frozen=True)
+class Entry:
+    """One model of the grid: its reference, its budget, and lp__ of constrained draws."""
+
+    model: str
+    ref: Reference
+    chains: int
+    warmup: int
+    draws: int
+    lp: Callable[[dict], np.ndarray]
+
+    @property
+    def max_evaluations(self) -> int:
+        return grid_mod.max_evaluations(self.chains, self.warmup, self.draws)
+
+    @property
+    def max_seconds(self) -> float:
+        return grid_mod.MAX_SECONDS
+
+
+@dataclass(frozen=True)
+class Grid:
+    entries: dict[str, Entry]
+    reps: int
+    base_seed: int = grid_mod.BASE_SEED
+
+
+def declared(spec: str = "all", reps: int = 5, base_seed: int = grid_mod.BASE_SEED,
+             build_dir: Path = models_mod.ROOT / "build") -> Grid:
+    """The benchmark's grid: the selected models that have a reference, at their manifest budget."""
+    entries = {}
+    for m in models_mod.select(spec):
+        ref = reference.load(m.name)
+        if ref is None:
+            continue  # no reference, so not in the grid (BENCH.md, "Models without a reference")
+        entries[m.name] = Entry(m.name, ref, m.chains, m.warmup, m.draws,
+                                lambda d, m=m: reference.log_density(m, d, build_dir, strict=False))
+    return Grid(entries, reps, base_seed)
+
+
+def chain_files(rep_dir: Path) -> list[Path]:
+    return sorted(rep_dir.glob("chain_*.csv"), key=lambda p: int(p.stem.split("_")[1]))
+
+
+def chain_draws(rep_dir: Path, names: list[str] | None = None, csvs: list | None = None) -> dict[str, np.ndarray]:
+    """The named columns (default: all but the sampler's `__` columns) as (draws, chains) arrays.
+    A name missing from a chain is left out. Ragged chains are cut to the shortest; the score
+    checks the budget's shape first (`read_rep`)."""
+    if csvs is None:
+        files = chain_files(rep_dir)
+        if not files:
+            raise FileNotFoundError(f"no chain CSVs in {rep_dir}")
+        csvs = [cmdstan.read_csv(f) for f in files]
     n = min(f.values.shape[0] for f in csvs)
-    return {c: np.column_stack([f.values[:n, f.columns.index(c)] for f in csvs]) for c in cols}
+    if names is None:
+        names = [c for c in csvs[0].columns if not c.endswith("__")]
+    return {c: np.column_stack([f.values[:n, f.columns.index(c)] for f in csvs])
+            for c in names if all(c in f.columns for f in csvs)}
 
 
-def score_rep(rep_dir: Path) -> dict:
-    cache = rep_dir / "ess.json"
-    if cache.exists() and cache.stat().st_mtime >= (rep_dir / "DONE").stat().st_mtime:
-        summary = json.loads(cache.read_text())
-    else:
-        summary = ess.summarise(chain_draws(rep_dir))
-        cache.write_text(json.dumps(summary, indent=1))
-    rec = json.loads((rep_dir / "run.json").read_text())
+# The sha256 of the code a verdict comes from: the gate with its constants, the ESS and R-hat, the
+# reference's functions, the CSV reader and this module. Any edit to them misses every cached
+# verdict, so no version number has to be bumped by hand.
+GATE_SOURCE = hashlib.sha256(b"".join(Path(m.__file__).read_bytes()
+                                      for m in (gate, gate.ess, reference, cmdstan))
+                             + Path(__file__).read_bytes()).hexdigest()
+
+
+def _key(entry: Entry, reps: int) -> dict:
+    """What a cached verdict depends on besides the draws."""
+    halves = entry.ref.halves_json() if entry.ref.halves else ""
+    return {"reps": reps, "reference": hashlib.sha256((entry.ref.to_json() + halves).encode()).hexdigest(),
+            "gate": GATE_SOURCE}
+
+
+def read_rep(rep_dir: Path, chains: int, draws: int, names: list[str] | None = None) -> tuple[list, dict[str, str]]:
+    """The chain CSVs of a rep (only the `names` columns, if given), which must be exactly the
+    budget: `chains` files of `draws` rows, and the sha256 of each file by name. Each file is read
+    once, and the hash is of the bytes that were parsed. Raises ValueError naming what is missing
+    or unreadable (rule 4: missing is failing)."""
+    files = chain_files(rep_dir)
+    if len(files) != chains:
+        raise ValueError(f"{len(files)} chains, the budget is {chains}")
+    csvs, hashes = [], {}
+    for f in files:
+        try:
+            data = f.read_bytes()
+            csvs.append(cmdstan.read_csv(f, columns=names, data=data))
+        except (OSError, ValueError, cmdstan.CmdStanError) as e:
+            raise ValueError(f"{f.name} unreadable: {e}") from None
+        hashes[f.name] = hashlib.sha256(data).hexdigest()
+        if len(csvs[-1].values) != draws:
+            raise ValueError(f"{f.name} has {len(csvs[-1].values)} draws, the budget is {draws}")
+    return csvs, hashes
+
+
+def verdict(rep_dir: Path, entry: Entry, reps: int) -> gate.Verdict:
+    """The gate's verdict on a finished rep, cached in rep_dir/gate.json. lp__ is computed by the
+    harness from the constrained draws; a column of that name written by the sampler is ignored.
+    A rep whose files fall short of the budget is wrong; that check runs on every call. The cache
+    holds only for the chain files it was computed from (their sha256, of the bytes the gate
+    parses) and for the gate's code (GATE_SOURCE); an unreadable cache is recomputed."""
+    ref = entry.ref
+    names = list(ref.names) + list(ref.constants)
+    try:
+        csvs, hashes = read_rep(rep_dir, entry.chains, entry.draws, names)
+    except ValueError as e:
+        return gate.Verdict("wrong", str(e))
+    key = {**_key(entry, reps), "chains": hashes}
+    cache = rep_dir / "gate.json"
+    try:
+        c = json.loads(cache.read_text())
+        if c.get("key") == key:
+            return gate.Verdict.from_dict(c["verdict"])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    draws = chain_draws(rep_dir, names, csvs)
+    if ref.has_lp and all(n in draws for n in ref.names):
+        draws[LP] = entry.lp(draws)
+    v = gate.check(draws, ref, reps=reps)
+    cache.write_text(json.dumps({"key": key, "verdict": v.to_dict()}))
+    return v
+
+
+def evaluation_counts(t: dict) -> tuple[int | None, int | None, int | None]:
+    """(all evaluations, density calls, gradient calls), None where unknown."""
+    if t.get("uncounted"):
+        return None, None, None
+    extra = t.get("extra") or {}
+    total = t.get("evaluations")
+    if total is None and t.get("grads_sampling") is not None and t.get("grads_warmup") is not None:
+        total = t["grads_sampling"] + t["grads_warmup"]
+    dens, grad = extra.get("density_evals"), extra.get("gradient_evals")
+    if total is not None and dens is None and grad is None and t.get("evaluations") is None:
+        dens, grad = 0, total  # a gradient-only sampler (CmdStan NUTS)
+    return total, dens, grad
+
+
+METERED_KEYS = ("density_evals", "gradient_evals", "max_evaluations", "max_seconds")
+
+
+def metered(rec: dict) -> bool:
+    """Whether the harness counted the rep's evaluations against the grid's limits (the logdensity
+    adapter). Such a rep must record both limits and a total equal to its density plus gradient
+    calls; a record that keeps any sign of the meter and drops the rest is wrong, not unmetered."""
+    t = rec.get("timing") or {}
+    extra = t.get("extra") or {}
+    return (rec.get("sampler") == "logdensity" or t.get("evaluations") is not None
+            or any(extra.get(k) is not None for k in METERED_KEYS))
+
+
+COUNT_KEYS = ("evaluations", "grads_sampling", "grads_warmup")
+
+
+def count_problem(rec: dict, entry: Entry) -> str | None:
+    """Why a rep's evaluation counts make it wrong, or None. Every recorded count is a
+    non-negative integer. A metered rep records the grid's limits, a total equal to its density
+    plus gradient calls, and no `uncounted` reason: the harness counted every call, and only an
+    adapter that cannot count (CmdStan with thin, Pathfinder, nutpie) may say it left some out.
+    The cap is checked on the validated total; for a rep that is not metered, on the calls it
+    reports, even when that count is incomplete."""
     t = rec["timing"]
-    chain_sum = sum(t["chain_s"])
-    row = {
-        "label": rec["label"], "sampler": rec["sampler"], "model": rec["model"], "rep": rec["rep"],
-        "wall_s": t["wall_s"], "chain_s_sum": chain_sum,
-        "grads_sampling": t["grads_sampling"], "grads_warmup": t["grads_warmup"], "divergences": t["divergences"],
-        **{k: summary[k] for k in ("ess_bulk_min", "ess_bulk_geomean", "ess_tail_min", "rhat_max", "n_variables")},
-        "worst_variable": (summary["worst_variables"] or [""])[0],
-    }
-    eb = row["ess_bulk_min"]
-    row["ess_per_s_wall"] = eb / t["wall_s"] if t["wall_s"] else math.nan
-    row["ess_per_s_chain"] = eb / chain_sum if chain_sum else math.nan
-    row["ess_per_grad"] = eb / t["grads_sampling"] if t["grads_sampling"] else math.nan
+    extra = t.get("extra") or {}
+    for name, v in [(k, t.get(k)) for k in COUNT_KEYS] + [(k, extra.get(k)) for k in METERED_KEYS[:2]]:
+        if v is not None and (type(v) is not int or v < 0):
+            return f"recorded {name} {v!r}, not a non-negative integer"
+    if metered(rec):
+        limits = (entry.max_evaluations, entry.max_seconds)
+        recorded = (extra.get("max_evaluations"), extra.get("max_seconds"))
+        if recorded != limits:
+            return f"limits {recorded} (evaluations, s), the grid's are {limits}"
+        if t.get("uncounted"):
+            return f"was metered by the harness, so it may not be uncounted ({t['uncounted']!r})"
+        total, dens, grad = t.get("evaluations"), extra.get("density_evals"), extra.get("gradient_evals")
+        if None in (total, dens, grad) or total != dens + grad:
+            return f"counted {total} evaluations, not its {dens} density plus {grad} gradient calls"
+    else:  # the counts present, a lower bound on the total when one is missing
+        present = [t[k] for k in ("grads_sampling", "grads_warmup") if t.get(k) is not None]
+        total = sum(present) if present else None
+    if total is not None and total > entry.max_evaluations:
+        return f"used {total} evaluations, the limit is {entry.max_evaluations}"
+    return None
+
+
+def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid, digest: str | None = None) -> dict:
+    """The row of one grid cell. `digest`, when given, is the sha256 of the label's submission
+    file, which the rep must have recorded."""
+    d = label_dir / entry.model / f"rep{rep}"
+    row = {"label": label_dir.name, "model": entry.model, "rep": rep, "status": "wrong", "reason": "",
+           "identity": "", "ess": math.nan, "evaluations": None, "density_evals": None, "gradient_evals": None,
+           "seconds": math.nan, "ess_per_eval": math.nan, "ess_per_s": math.nan, "verdict": None}
+
+    def wrong(reason):
+        row.update(reason=reason, verdict=gate.Verdict("wrong", reason))
+        return row
+
+    if (d / "FAILED").is_file():
+        err = (d / "FAILED").read_text().strip().splitlines()
+        return wrong(f"rep{rep} failed: {err[-1][:120] if err else ''}")
+    if not (d / "DONE").is_file():
+        return wrong(f"rep{rep} missing")
+    rec = json.loads((d / "run.json").read_text())
+    row["identity"] = identity_digest(rec.get("identity", {}))
+    for what, got, want in (("model", rec.get("model"), entry.model), ("rep", rec.get("rep"), rep),
+                            ("base seed", rec.get("base_seed"), g.base_seed)):
+        if got != want:
+            return wrong(f"rep{rep} recorded {what} {got!r}, the grid cell's is {want!r}")
+    if digest is not None and (rec.get("identity") or {}).get("submission_sha256") != digest:
+        return wrong(f"rep{rep} submission digest {(rec.get('identity') or {}).get('submission_sha256')}, "
+                     f"not the submission file's {digest}")
+    want_seed = grid_mod.seed_for(rep, g.base_seed)
+    if rec.get("seed") != want_seed:
+        return wrong(f"rep{rep} seed {rec.get('seed')}, the grid's is {want_seed}")
+    got = (rec.get("chains"), rec.get("warmup"), rec.get("draws"))
+    want = (entry.chains, entry.warmup, entry.draws)
+    if got != want:
+        return wrong(f"rep{rep} budget {got} (chains, warmup, draws), the grid's is {want}")
+    t = rec["timing"]
+    problem = count_problem(rec, entry)
+    if problem:
+        return wrong(f"rep{rep} {problem}")
+    total, dens, grad = evaluation_counts(t)
+    if t.get("wall_s") is not None and t["wall_s"] > entry.max_seconds:
+        return wrong(f"rep{rep} took {t['wall_s']:.0f} s, the limit is {entry.max_seconds:.0f} s")
+    v = verdict(d, entry, g.reps)
+    secs = float(sum(t["chain_s"]))
+    row.update(status=v.status, reason=v.label(), ess=v.ess, evaluations=total, density_evals=dens,
+               gradient_evals=grad, seconds=secs, verdict=v)
+    if v.status == "right":
+        row["ess_per_eval"] = v.ess / total if total else math.nan
+        row["ess_per_s"] = v.ess / secs if secs > 0 else math.nan
     return row
 
 
-NUMERIC = ("wall_s", "chain_s_sum", "grads_sampling", "divergences", "ess_bulk_min", "ess_bulk_geomean",
-           "ess_tail_min", "rhat_max", "ess_per_s_wall", "ess_per_s_chain", "ess_per_grad")
+def identity_digest(identity: dict) -> str:
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def _median(vals):
-    vals = [v for v in vals if v is not None and not (isinstance(v, float) and math.isnan(v))]
-    return statistics.median(vals) if vals else math.nan
-
-
-def _geomean(vals):
-    vals = [v for v in vals if isinstance(v, (int, float)) and math.isfinite(v) and v > 0]
-    return math.exp(sum(math.log(v) for v in vals) / len(vals)) if vals else math.nan
-
-
-def per_model(rows: list[dict]) -> list[dict]:
-    groups: dict[tuple, list[dict]] = {}
-    for r in rows:
-        groups.setdefault((r["label"], r["model"]), []).append(r)
+def per_model(rows: list[dict], g: Grid) -> list[dict]:
     out = []
-    for (label, model), g in sorted(groups.items()):
-        out.append({"label": label, "model": model, "reps": len(g), **{k: _median([r[k] for r in g]) for k in NUMERIC}})
+    for (label, model) in dict.fromkeys((r["label"], r["model"]) for r in rows):
+        reps = sorted((r for r in rows if r["label"] == label and r["model"] == model), key=lambda r: r["rep"])
+        m = gate.judge([r["verdict"] for r in reps], g.entries[model].ref, g.reps)
+        right = m.status == "right"
+        out.append({"label": label, "model": model, "status": m.status, "reason": m.reason,
+                    "calibration": m.calibration, "calibration_p": m.calibration_p,
+                    "eval": [r["ess_per_eval"] for r in reps] if right else [],
+                    "sec": [r["ess_per_s"] for r in reps] if right else [],
+                    "ess_per_eval": _mean([r["ess_per_eval"] for r in reps]) if right else math.nan,
+                    "ess_per_s": _mean([r["ess_per_s"] for r in reps]) if right else math.nan})
     return out
 
 
-def summary(models: list[dict]) -> list[dict]:
+def _mean(v) -> float:
+    return float(np.mean(v)) if v and all(isinstance(x, (int, float)) and math.isfinite(x) for x in v) else math.nan
+
+
+def rank(models: list[dict], baseline: str | None, names: list[str], seed: int = 0) -> list[dict]:
+    """Labels ranked by models right (over every model of the grid), then by speed against the
+    baseline: the geometric mean over the models where both are right of the ratio of mean cost.
+    The 95 % interval resamples the reps of the label and of the baseline. A right model whose
+    cost is unavailable leaves the speed undefined (S12)."""
+    by = {(m["label"], m["model"]): m for m in models}
+    labels = list(dict.fromkeys(m["label"] for m in models))
     out = []
-    for label in sorted({m["label"] for m in models}):
-        g = [m for m in models if m["label"] == label]
-        out.append({
-            "label": label, "n_models": len(g),
-            "geo_ess_per_s_wall": _geomean([m["ess_per_s_wall"] for m in g]),
-            "geo_ess_per_s_chain": _geomean([m["ess_per_s_chain"] for m in g]),
-            "geo_ess_per_grad": _geomean([m["ess_per_grad"] for m in g]),
-            "geo_ess_bulk_min": _geomean([m["ess_bulk_min"] for m in g]),
-            "n_models_rhat_bad": sum(1 for m in g if m["rhat_max"] > RHAT_BAD),
-        })
+    for lab in labels:
+        right = [n for n in names if by.get((lab, n), {}).get("status") == "right"]
+        row = {"label": lab, "right": len(right), "of": len(names), "note": ""}
+        for unit in ("eval", "sec"):
+            key = "speed_eval" if unit == "eval" else "speed_s"
+            row.update({key: math.nan, f"{key}_lo": math.nan, f"{key}_hi": math.nan})
+            if baseline is None:
+                continue
+            both = [n for n in right if by.get((baseline, n), {}).get("status") == "right"]
+            row["compared"] = len(both)
+            pairs = [(by[(lab, n)][unit], by[(baseline, n)][unit]) for n in both]
+            bad = [n for n, (a, b) in zip(both, pairs) if not _finite(a) or not _finite(b)]
+            if bad:
+                if unit == "eval":
+                    row["note"] = f"cost unavailable on {', '.join(bad)}"
+                continue
+            if not pairs:
+                continue
+            if lab == baseline:
+                row[key] = 1.0  # by definition; an interval against itself means nothing
+                continue
+            row[key] = _geo([np.mean(a) / np.mean(b) for a, b in pairs])
+            row[f"{key}_lo"], row[f"{key}_hi"] = _bootstrap(pairs, seed)
+        out.append(row)
+    out.sort(key=lambda r: (-r["right"], -(r["speed_eval"] if math.isfinite(r["speed_eval"]) else -math.inf)))
+    for i, r in enumerate(out):
+        r["rank"] = i + 1
     return out
 
 
-def ratios(models: list[dict], baseline: str) -> list[dict]:
-    base = {m["model"]: m for m in models if m["label"] == baseline}
-    if not base:
-        raise KeyError(f"baseline label {baseline!r} has no scored runs")
-    out = []
-    for m in models:
-        if m["label"] == baseline or m["model"] not in base:
-            continue
-        b = base[m["model"]]
-        out.append({"label": m["label"], "baseline": baseline, "model": m["model"],
-                    **{f"ratio_{k}": (m[k] / b[k] if b[k] else math.nan)
-                       for k in ("ess_per_s_wall", "ess_per_s_chain", "ess_per_grad", "ess_bulk_min", "wall_s")}})
-    return out
+def _finite(v) -> bool:
+    return len(v) > 0 and all(isinstance(x, (int, float)) and math.isfinite(x) and x > 0 for x in v)
 
 
-def _write(path: Path, rows: list[dict]) -> None:
+def _geo(v) -> float:
+    return float(math.exp(np.mean(np.log(v))))
+
+
+def _bootstrap(pairs, seed: int) -> tuple[float, float]:
+    rng = np.random.default_rng(seed)
+    logs = np.zeros(BOOTSTRAP)
+    for a, b in pairs:
+        a, b = np.asarray(a, float), np.asarray(b, float)
+        ma = a[rng.integers(0, len(a), (BOOTSTRAP, len(a)))].mean(axis=1)
+        mb = b[rng.integers(0, len(b), (BOOTSTRAP, len(b)))].mean(axis=1)
+        logs += np.log(ma / mb)
+    lo, hi = np.percentile(logs / len(pairs), [2.5, 97.5])
+    return float(math.exp(lo)), float(math.exp(hi))
+
+
+def table(ranking: list[dict], models: list[dict], baseline: str | None, names: list[str]) -> str:
+    labels = [r["label"] for r in ranking]
+    lines = ["| rank | label | models right | speed per evaluation [95 %] | speed per second [95 %] | note |",
+             "|---|---|---|---|---|---|"]
+    for r in ranking:
+        lines.append(f"| {r['rank']} | {r['label']} | {r['right']} of {r['of']} | {_speed(r, 'speed_eval')} | "
+                     f"{_speed(r, 'speed_s')} | {r['note']} |")
+    lines += ["", f"Rank by models right, then by speed: the geometric mean, over the models where the label "
+              f"and {baseline or 'the baseline'} are both right, of the ratio of ESS per evaluation (per second "
+              f"of one core in the next column).", ""]
+    by = {(m["label"], m["model"]): m for m in models}
+    lines += ["| model | " + " | ".join(labels) + " |", "|---|" + "---|" * len(labels)]
+    for n in names:
+        cells = []
+        for lab in labels:
+            m = by.get((lab, n))
+            if m is None:
+                cells.append("")
+            elif m["status"] == "right":
+                cells.append(f"right: {m['ess_per_eval']:.3g}/eval, {m['ess_per_s']:.3g}/s")
+            else:
+                cells.append(f"{m['status']}: {m['reason']}" if not m["reason"].startswith(m["status"])
+                             else m["reason"])
+        lines.append(f"| {n} | " + " | ".join(c.replace("|", "/") for c in cells) + " |")
+    lines += ["", "Cells: mean over reps of credited ESS (the smallest bulk or tail ESS over every checked "
+              "series) per density or gradient evaluation, warmup included, and per second of chain time; "
+              "or the verdict and the reason."]
+    return "\n".join(lines) + "\n"
+
+
+def _speed(r, key) -> str:
+    if not math.isfinite(r[key]):
+        return ""
+    if not math.isfinite(r[key + "_lo"]):
+        return f"{r[key]:.3g}"
+    return f"{r[key]:.3g} [{r[key + '_lo']:.3g}, {r[key + '_hi']:.3g}]"
+
+
+def _write(path: Path, rows: list[dict], drop=("verdict", "eval", "sec")) -> None:
     if not rows:
         return
+    fields = list(dict.fromkeys(k for r in rows for k in r if k not in drop))
     with open(path, "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        w = csv.DictWriter(fh, fieldnames=fields, restval="")
         w.writeheader()
-        w.writerows(rows)
+        w.writerows({k: v for k, v in r.items() if k not in drop} for r in rows)
 
 
-def score(runs_dir: Path, out_dir: Path, labels: list[str] | None = None, baseline: str | None = None,
-          log=print) -> dict:
-    reps = sorted(p.parent for p in runs_dir.glob("*/*/rep*/DONE"))
-    if labels:
-        reps = [r for r in reps if r.parent.parent.name in labels]
-    if not reps:
-        raise FileNotFoundError(f"no finished runs under {runs_dir}")
-    rows = [score_rep(r) for r in reps]
-    models = per_model(rows)
-    summ = summary(models)
+def score(runs_dir: Path, out_dir: Path, g: Grid, baseline: str | None = None, labels: list[str] | None = None,
+          log=print, submissions: dict[str, Path] | None = None) -> dict:
+    """Score every label under runs_dir over the grid g. A label whose reps record different
+    sampler identities (another submission, other options) is refused. `submissions` maps a label
+    to its submission file; each rep of that label must record the file's sha256. A submission for a
+    label that is not scored is refused."""
+    digests = {k: hashlib.sha256(Path(p).read_bytes()).hexdigest() for k, p in (submissions or {}).items()}
+    label_dirs = sorted(p for p in Path(runs_dir).iterdir() if p.is_dir() and (not labels or p.name in labels))
+    unknown = sorted(set(digests) - {ld.name for ld in label_dirs})
+    if unknown:
+        raise ValueError(f"--submission names {', '.join(map(repr, unknown))}, which is not among the scored labels "
+                         f"({', '.join(ld.name for ld in label_dirs) or 'none'}); its digest would not be checked")
+    if baseline and baseline not in [p.name for p in label_dirs]:
+        raise KeyError(f"baseline label {baseline!r} has no runs under {runs_dir}")
+    names = list(g.entries)
+    rows = []
+    for ld in label_dirs:
+        lab = [score_rep(ld, g.entries[n], r, g, digests.get(ld.name)) for n in names for r in range(g.reps)]
+        ids = {r["identity"] for r in lab if r["identity"]}
+        if len(ids) > 1:
+            raise ValueError(f"label {ld.name!r} mixes {len(ids)} sampler identities (submission or options); "
+                             "give each its own label")
+        rows += lab
+    models = per_model(rows, g)
+    ranking = rank(models, baseline, names)
+    tab = table(ranking, models, baseline, names)
     out_dir.mkdir(parents=True, exist_ok=True)
     _write(out_dir / "per_run.csv", rows)
     _write(out_dir / "per_model.csv", models)
-    _write(out_dir / "summary.csv", summ)
-    result = {"per_run": rows, "per_model": models, "summary": summ}
-    if baseline:
-        rat = ratios(models, baseline)
-        _write(out_dir / "ratios.csv", rat)
-        result["ratios"] = rat
-        for label in sorted({r["label"] for r in rat}):
-            g = [r["ratio_ess_per_s_wall"] for r in rat if r["label"] == label]
-            log(f"{label} vs {baseline}: geomean ESS/s ratio {_geomean(g):.3f} over {len(g)} models")
-    for s in summ:
-        log(f"{s['label']}: {s['n_models']} models, geo ESS/s {s['geo_ess_per_s_wall']:.3g} (wall) "
-            f"{s['geo_ess_per_s_chain']:.3g} (chain sum), geo ESS/grad {s['geo_ess_per_grad']:.3g}, "
-            f"R-hat > {RHAT_BAD}: {s['n_models_rhat_bad']}")
-    return result
+    _write(out_dir / "ranking.csv", ranking)
+    (out_dir / "table.md").write_text(tab)
+    log(tab)
+    return {"per_run": rows, "per_model": models, "ranking": ranking, "table": tab}

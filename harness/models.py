@@ -14,7 +14,7 @@ import json
 import os
 import urllib.request
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -30,10 +30,23 @@ class Model:
     data_name: str
     data_sha256: str
     data_shipped: bool
+    reference: str = "none"  # "posteriordb", "local" or "none" (harness/reference.py)
+    reference_stan: str | None = None  # a local reference is built from this file under models/ if set
+    reference_settings: dict = field(default_factory=dict, hash=False)  # over reference.LOCAL for this model
+    bench: str = ""  # "public" or "held-out" (BENCH.md)
+    chains: int = 4  # the benchmark budget of one rep (BENCH.md, "The budget")
+    warmup: int = 1000
+    draws: int = 1000  # per chain; raised per model where NUTS cannot be proven right with fewer
 
     @property
     def stan_file(self) -> Path:
         return ROOT / "models" / f"{self.name}.stan"
+
+    @property
+    def reference_stan_file(self) -> Path:
+        """The model a local reference is sampled from: the model itself, or an equivalent
+        reparameterisation with the same posterior and the same parameter names."""
+        return ROOT / "models" / self.reference_stan if self.reference_stan else self.stan_file
 
     def data_file(self, fetch: bool = True) -> Path:
         """Path to the JSON data, fetching it first when it is not shipped."""
@@ -73,19 +86,24 @@ def _fetch(name: str, sha256: str, dest: Path) -> None:
 def load() -> dict[str, Model]:
     entries = json.loads((ROOT / "models" / "manifest.json").read_text())
     return {
-        e["model"]: Model(e["model"], e["family"], e["posterior"], e["data"], e["data_sha256"], e["data_shipped"])
+        e["model"]: Model(e["model"], e["family"], e["posterior"], e["data"], e["data_sha256"], e["data_shipped"],
+                          e.get("reference", {}).get("source", "none"), e.get("reference", {}).get("stan"),
+                          e.get("reference", {}).get("settings", {}),
+                          e.get("bench", ""), **e.get("budget", {}))
         for e in entries
     }
 
 
 def select(spec: str | None) -> list[Model]:
-    """'all', a family name, or a comma list of model names."""
+    """'all', a family name, a benchmark split ('public' or 'held-out'), or a comma list of model names."""
     allm = load()
     if not spec or spec == "all":
         return list(allm.values())
     families = {m.family for m in allm.values()}
     if spec in families:
         return [m for m in allm.values() if m.family == spec]
+    if spec in ("public", "held-out"):
+        return [m for m in allm.values() if m.bench == spec]
     out = []
     for name in spec.split(","):
         name = name.strip()

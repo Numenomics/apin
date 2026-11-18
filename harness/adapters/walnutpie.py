@@ -13,13 +13,11 @@ Settings (option, else environment variable):
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
-import subprocess
 from pathlib import Path
 
-from .. import cmdstan
+from .. import cmdstan, stan_library
 from ..models import ROOT
 from ..sampler import RunRequest, Sampler, Timing
 
@@ -64,22 +62,7 @@ class Adapter(Sampler):
         return {"cli": str(self.cli), "bridgestan": str(self.bridgestan), "flags": self.opt("flags", "")}
 
     def build(self, stan_file: Path) -> Path:
-        """Build <name>_model.so with BridgeStan's makefile directly, keyed by
-        source and BridgeStan tree (bridgestan.compile_model caches by path
-        only and can hand back a stale library)."""
-        src = stan_file.read_bytes()
-        key = hashlib.sha256(src + b"\0" + str(self.bridgestan).encode()).hexdigest()[:16]
-        bdir = (self.settings.build_dir / f"bs-{stan_file.stem}-{key}").resolve()
-        so = bdir / f"{stan_file.stem}_model.so"
-        if so.is_file():
-            return so
-        bdir.mkdir(parents=True, exist_ok=True)
-        (bdir / stan_file.name).write_bytes(src)
-        r = subprocess.run(["make", "-C", str(self.bridgestan), str(so)], capture_output=True, text=True,
-                           env={**os.environ, "MAKEFLAGS": "-j4"})
-        if r.returncode != 0 or not so.is_file():
-            raise RuntimeError(f"BridgeStan build failed:\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
-        return so
+        return stan_library.build(self.bridgestan, stan_file, self.settings.build_dir)
 
     def argv(self, so: Path, req: RunRequest, c: int) -> list[str]:
         return [str(self.cli), str(so), str(req.data_file), "--seed", str(req.seed + c),

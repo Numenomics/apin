@@ -59,3 +59,12 @@ def test_ragged_chains_are_trimmed(tmp_path):
         (tmp_path / f"chain_{c}.csv").write_text("\n".join(lines) + "\n")
     d = score.chain_draws(tmp_path)
     assert d["x"].shape == (10, 2)
+
+
+def test_rhat_parts_keeps_the_defined_part():
+    # Chains frozen at -2, -2, +2, +2: the folded draws |x - median| are all 2, so the folded R-hat is
+    # undefined, but the bulk R-hat is not, and it says the chains disagree (S10).
+    x = np.column_stack([np.full(100, -2.0)] * 2 + [np.full(100, 2.0)] * 2)
+    bulk, folded = ess.rhat_parts(x)
+    assert math.isnan(folded) and bulk > 1.01
+    assert math.isnan(ess.rhat(x))  # rhat itself keeps parity with posterior

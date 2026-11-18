@@ -8,6 +8,7 @@ variable. It can be a release install or the patched build in
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import re
 import subprocess
@@ -86,11 +87,12 @@ def parameter_names(root: Path, stan_file: Path) -> list[str]:
 @dataclass
 class StanCsv:
     columns: list[str]
-    values: np.ndarray  # (rows, columns)
+    values: np.ndarray  # (rows, columns), post-warmup draws only
     warmup_s: float | None = None
     sampling_s: float | None = None
     total_s: float | None = None
     comments: list[str] = field(default_factory=list)
+    warmup_values: np.ndarray | None = None  # rows written before "Adaptation terminated" (save_warmup=1)
 
     def column(self, name: str) -> np.ndarray | None:
         try:
@@ -98,30 +100,66 @@ class StanCsv:
         except ValueError:
             return None
 
+    def warmup_column(self, name: str) -> np.ndarray | None:
+        if self.warmup_values is None or name not in self.columns:
+            return None
+        return self.warmup_values[:, self.columns.index(name)]
+
+    @property
+    def config(self) -> dict[str, str]:
+        """The `key = value` lines of the CmdStan header, without "(Default)"; the first of a repeated key."""
+        out = {}
+        for c in self.comments:
+            k, eq, v = c.lstrip("# ").partition(" = ")
+            if eq:
+                out.setdefault(k.strip(), v.replace("(Default)", "").strip())
+        return out
+
 
 _ELAPSED = re.compile(r"#\s*Elapsed Time:\s*([\d.eE+-]+) seconds \(Warm-up\)")
 _SAMPLING = re.compile(r"#\s*([\d.eE+-]+) seconds \(Sampling\)")
 _TOTAL = re.compile(r"#\s*([\d.eE+-]+) seconds \(Total\)")
 
 
-def read_csv(path: Path) -> StanCsv:
-    """Read a CmdStan output CSV (or any CSV with a header row and '#' comments)."""
-    comments, header, rows = [], None, []
-    with open(path) as fh:
+def read_csv(path: Path, columns: list[str] | None = None, data: bytes | None = None) -> StanCsv:
+    """Read a CmdStan output CSV (or any CSV with a header row and '#' comments).
+
+    With save_warmup=1, CmdStan writes the warmup draws first and then a
+    comment "# Adaptation terminated". Rows before that comment go to
+    `warmup_values`; `values` holds only the draws after it. A file without
+    the comment (save_warmup=0, or not from CmdStan) has no warmup rows. A row without a line end
+    or with a different number of fields than the header raises CmdStanError: the file was cut short.
+    With `columns`, only those of them in the file are kept, in file order. With `data`, those
+    bytes are parsed as the file's content and the file is not opened (the scorer hashes the
+    bytes it parses).
+    """
+    comments, header, rows, warm, keep = [], None, [], None, None
+    with (open(path) if data is None else io.TextIOWrapper(io.BytesIO(data))) as fh:
         for line in fh:
             if line.startswith("#"):
                 comments.append(line.rstrip("\n"))
+                if warm is None and "Adaptation terminated" in line:
+                    warm, rows = rows, []
                 continue
-            line = line.strip()
-            if not line:
+            if not line.strip():
                 continue
+            if not line.endswith("\n"):
+                raise CmdStanError(f"{path.name}: the last row is cut short (no line end)")
+            fields = line.strip().split(",")
             if header is None:
-                header = line.split(",")
+                header = fields
+                wanted = set(header if columns is None else columns)
+                keep = [i for i, h in enumerate(header) if h in wanted]
+            elif len(fields) != len(header):
+                raise CmdStanError(f"{path.name}: a row has {len(fields)} fields, the header {len(header)}")
             else:
-                rows.append([float(v) for v in line.split(",")])
+                rows.append(np.array([fields[i] for i in keep], dtype=float))
     if header is None:
         raise CmdStanError(f"{path} has no header row")
-    out = StanCsv(header, np.array(rows, dtype=float).reshape(len(rows), len(header)), comments=comments)
+    def mat(r):
+        return np.array(r, dtype=float).reshape(len(r), len(keep))
+
+    out = StanCsv([header[i] for i in keep], mat(rows), comments=comments, warmup_values=mat(warm) if warm is not None else None)
     for c in comments:
         if m := _ELAPSED.match(c):
             out.warmup_s = float(m.group(1))
@@ -152,7 +190,8 @@ def run_chains(argv_for_chain, chains: int) -> float:
 def sample_argv(exe: Path, data: Path | None, seed: int, chain: int, out_csv: Path, warmup: int, draws: int,
                 init: Path | None = None, extra: list[str] | None = None) -> list[str]:
     """CmdStan NUTS command for one chain. All chains share the seed and differ
-    by id, so their RNG streams are distinct and reproducible."""
+    by id, so their RNG streams are distinct and reproducible. Warmup draws are
+    saved so that their gradient count is known; `read_csv` keeps them apart."""
     argv = [str(exe), f"id={chain + 1}"]
     if data is not None:
         argv += ["data", f"file={data}"]
@@ -160,5 +199,5 @@ def sample_argv(exe: Path, data: Path | None, seed: int, chain: int, out_csv: Pa
     if init is not None:
         argv += [f"init={init}"]
     argv += ["output", f"file={out_csv}", "method=sample", f"num_warmup={warmup}", f"num_samples={draws}",
-             "save_warmup=0"]
+             "save_warmup=1"]
     return argv + list(extra or [])

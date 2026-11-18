@@ -1,55 +1,442 @@
-"""Aggregation from per-rep rows to models, labels and baseline ratios."""
+"""The scorer: a declared grid, three verdicts per model, the rank (BENCH.md, rules 1, 2 and 4)."""
 
 import json
 import math
-import shutil
-from pathlib import Path
+import zlib
 
+import numpy as np
 import pytest
 
-from harness import score
+from harness import gate, reference, score
+from harness.adapters.nutpie import write_csv
 
-FIX = Path(__file__).parent / "fixtures"
-
-
-def _row(label, model, rep, ess_min, wall, chain_sum, grads, rhat=1.0):
-    return {"label": label, "model": model, "rep": rep, "wall_s": wall, "chain_s_sum": chain_sum,
-            "grads_sampling": grads, "divergences": 0, "ess_bulk_min": ess_min, "ess_bulk_geomean": ess_min,
-            "ess_tail_min": ess_min, "rhat_max": rhat, "ess_per_s_wall": ess_min / wall,
-            "ess_per_s_chain": ess_min / chain_sum, "ess_per_grad": ess_min / grads}
+MU = np.array([0.0, 3.0, -1.0])
+SIGMA = np.array([1.0, 0.5, 2.0])
+NAMES = ["a", "b.1", "b.2"]
 
 
-def test_median_over_reps_then_geomean_over_models():
-    rows = [_row("base", "m1", r, e, 1.0, 4.0, 1000) for r, e in enumerate((100, 300, 200))]
-    rows += [_row("base", "m2", 0, 400, 2.0, 8.0, 1000, rhat=1.05)]
-    models = score.per_model(rows)
-    m1 = next(m for m in models if m["model"] == "m1")
-    assert m1["ess_bulk_min"] == 200 and m1["reps"] == 3
-    (s,) = score.summary(models)
-    assert s["geo_ess_per_s_wall"] == pytest.approx(math.sqrt(200 * 200))
-    assert s["n_models_rhat_bad"] == 1
+def lp(draws: dict) -> np.ndarray:
+    return -0.5 * sum(((draws[n] - m) / s) ** 2 for n, m, s in zip(NAMES, MU, SIGMA))
 
 
-def test_ratios_against_baseline():
-    rows = [_row("base", "m1", 0, 100, 1.0, 4.0, 1000), _row("patched", "m1", 0, 150, 0.5, 2.0, 1000)]
-    (r,) = score.ratios(score.per_model(rows), "base")
-    assert r["ratio_ess_per_s_wall"] == pytest.approx(3.0)
-    assert r["ratio_ess_per_grad"] == pytest.approx(1.5)
-    with pytest.raises(KeyError):
-        score.ratios(score.per_model(rows), "missing")
+@pytest.fixture(scope="module")
+def grid():
+    rng = np.random.default_rng(5)
+    x = MU + SIGMA * rng.standard_normal((1000, 10, 3))
+    d = {n: x[..., i] for i, n in enumerate(NAMES)}
+    ref = reference.summarise(d, lp=lp(d), model="sim")
+    entries = {m: score.Entry(m, ref, chains=4, warmup=10, draws=4000, lp=lp) for m in ("m1", "m2")}
+    return score.Grid(entries, reps=2, base_seed=100)
 
 
-def test_score_end_to_end_on_fixture(tmp_path):
-    rep = tmp_path / "runs" / "demo" / "tiny" / "rep0"
-    shutil.copytree(FIX / "tiny", rep)
-    timing = {"wall_s": 2.0, "chain_s": [1.0] * 4, "warmup_s": [0.5] * 4, "sampling_s": [0.5] * 4,
-              "grads_sampling": 4 * 101 * 7, "grads_warmup": None, "divergences": 0, "extra": {}}
-    (rep / "run.json").write_text(json.dumps({"label": "demo", "sampler": "fixture", "model": "tiny", "rep": 0,
-                                              "timing": timing}))
-    (rep / "DONE").touch()
-    out = score.score(tmp_path / "runs", tmp_path / "scores", log=lambda *_: None)
-    (row,) = out["per_run"]
-    assert row["ess_per_s_wall"] == pytest.approx(row["ess_bulk_min"] / 2.0)
-    assert row["ess_per_s_chain"] == pytest.approx(row["ess_bulk_min"] / 4.0)
-    assert row["ess_per_grad"] == pytest.approx(row["ess_bulk_min"] / (4 * 101 * 7))
-    assert (tmp_path / "scores" / "summary.csv").is_file()
+def write_rep(runs, label, model, rep, grid, *, shift=0.0, evaluations=10**5, seconds=2.0, identity=None,
+              seed=None, draws=None, seed_rng=None, limits="grid", sampler="fake"):
+    """A finished rep. A rep with `evaluations` is metered and records the grid's limits unless
+    `limits` says otherwise (None: none recorded)."""
+    d = runs / label / model / f"rep{rep}"
+    d.mkdir(parents=True)
+    e = grid.entries[model]
+    n = draws or e.draws
+    rng = np.random.default_rng(seed_rng if seed_rng is not None else zlib.crc32(f"{label}/{model}/{rep}".encode()))
+    x = MU + SIGMA * rng.standard_normal((e.chains, n, 3))
+    x[..., 0] += shift
+    for c in range(e.chains):
+        write_csv(d / f"chain_{c}.csv", NAMES, x[c])
+    timing = {"wall_s": seconds, "chain_s": [seconds / e.chains] * e.chains, "warmup_s": [None] * e.chains,
+              "sampling_s": [None] * e.chains, "grads_sampling": None, "grads_warmup": None, "divergences": None,
+              "evaluations": evaluations,
+              "extra": {} if evaluations is None else {"density_evals": evaluations // 4,
+                                                       "gradient_evals": evaluations - evaluations // 4}}
+    if limits == "grid":
+        limits = None if evaluations is None else (e.max_evaluations, e.max_seconds)
+    if limits is not None:
+        timing["extra"].update(max_evaluations=limits[0], max_seconds=limits[1])
+    rec = {"label": label, "sampler": sampler, "model": model, "rep": rep,
+           "seed": grid.base_seed + 1000 * rep if seed is None else seed, "base_seed": grid.base_seed,
+           "chains": e.chains, "warmup": e.warmup, "draws": n, "identity": identity or {"name": label},
+           "timing": timing}
+    (d / "run.json").write_text(json.dumps(rec))
+    (d / "DONE").touch()
+    return d
+
+
+def test_omitting_a_model_ranks_below_attempting_it(tmp_path, grid):
+    """S7: the old score was 3 for a candidate three times as fast on m1 with no rows on m2."""
+    for r in range(2):
+        for m in ("m1", "m2"):
+            write_rep(tmp_path, "base", m, r, grid)
+        write_rep(tmp_path, "cand", "m1", r, grid, evaluations=10**5 // 3)
+    out = score.score(tmp_path, tmp_path / "scores", grid, baseline="base", log=lambda *_: None)
+    ranking = {r["label"]: r for r in out["ranking"]}
+    assert ranking["base"]["right"] == 2 and ranking["cand"]["right"] == 1
+    assert [r["label"] for r in out["ranking"]] == ["base", "cand"]
+    assert ranking["cand"]["speed_eval"] == pytest.approx(3.0, rel=0.05)
+    m2 = next(m for m in out["per_model"] if m["label"] == "cand" and m["model"] == "m2")
+    assert m2["status"] == "wrong" and "missing" in m2["reason"]
+
+
+def test_a_missing_rep_makes_the_model_wrong(tmp_path, grid):
+    write_rep(tmp_path, "x", "m1", 0, grid)
+    out = score.score(tmp_path, tmp_path / "s", grid, log=lambda *_: None)
+    m1 = next(m for m in out["per_model"] if m["model"] == "m1")
+    assert m1["status"] == "wrong" and "rep1" in m1["reason"]
+
+
+def test_a_rep_with_the_wrong_seed_or_budget_is_wrong(tmp_path, grid):
+    """Rule 4: a saved rep counts only for the seed and budget the grid declares."""
+    write_rep(tmp_path, "x", "m1", 0, grid)
+    write_rep(tmp_path, "x", "m1", 1, grid, seed=7)
+    write_rep(tmp_path, "x", "m2", 0, grid)
+    write_rep(tmp_path, "x", "m2", 1, grid, draws=2000)
+    out = score.score(tmp_path, tmp_path / "s", grid, log=lambda *_: None)
+    reasons = {(r["model"], r["rep"]): r["reason"] for r in out["per_run"]}
+    assert "seed" in reasons[("m1", 1)] and "budget" in reasons[("m2", 1)]
+    assert all(m["status"] == "wrong" for m in out["per_model"])
+
+
+def test_a_label_mixing_submissions_is_refused(tmp_path, grid):
+    write_rep(tmp_path, "x", "m1", 0, grid, identity={"submission_sha256": "aa"})
+    write_rep(tmp_path, "x", "m1", 1, grid, identity={"submission_sha256": "bb"})
+    with pytest.raises(ValueError, match="identit"):
+        score.score(tmp_path, tmp_path / "s", grid, log=lambda *_: None)
+
+
+def test_a_biased_sampler_is_wrong_and_ranks_last(tmp_path, grid):
+    for r in range(2):
+        for m in ("m1", "m2"):
+            write_rep(tmp_path, "base", m, r, grid)
+            write_rep(tmp_path, "fast", m, r, grid, shift=0.5, evaluations=10**3)
+    out = score.score(tmp_path, tmp_path / "s", grid, baseline="base", log=lambda *_: None)
+    fast = next(r for r in out["ranking"] if r["label"] == "fast")
+    assert fast["right"] == 0 and math.isnan(fast["speed_eval"]) and out["ranking"][-1]["label"] == "fast"
+    assert "wrong" in out["table"]
+
+
+def test_costs_per_evaluation_and_per_second_and_both_counts(tmp_path, grid):
+    for r in range(2):
+        for m in ("m1", "m2"):
+            write_rep(tmp_path, "base", m, r, grid, evaluations=10**5, seconds=1.0)
+            write_rep(tmp_path, "cand", m, r, grid, evaluations=5 * 10**4, seconds=4.0)
+    out = score.score(tmp_path, tmp_path / "s", grid, baseline="base", log=lambda *_: None)
+    row = next(r for r in out["per_run"] if r["label"] == "cand")
+    assert row["density_evals"] + row["gradient_evals"] == row["evaluations"] == 5 * 10**4
+    assert row["ess_per_eval"] == pytest.approx(row["ess"] / 5e4)
+    assert row["ess_per_s"] == pytest.approx(row["ess"] / 4.0)
+    cand = next(r for r in out["ranking"] if r["label"] == "cand")
+    assert cand["speed_eval"] == pytest.approx(2.0, rel=0.1) and cand["speed_s"] == pytest.approx(0.25, rel=0.1)
+    assert cand["speed_eval_lo"] <= cand["speed_eval"] <= cand["speed_eval_hi"]
+    assert (tmp_path / "s" / "ranking.csv").is_file() and (tmp_path / "s" / "table.md").is_file()
+
+
+def test_an_unavailable_cost_earns_no_speed(tmp_path, grid):
+    """S12: a rep that cannot count its evaluations is not credited per evaluation."""
+    for r in range(2):
+        for m in ("m1", "m2"):
+            write_rep(tmp_path, "base", m, r, grid)
+            write_rep(tmp_path, "cand", m, r, grid, evaluations=None if m == "m2" else 10**4)
+    out = score.score(tmp_path, tmp_path / "s", grid, baseline="base", log=lambda *_: None)
+    cand = next(r for r in out["ranking"] if r["label"] == "cand")
+    assert cand["right"] == 2 and math.isnan(cand["speed_eval"]) and "m2" in cand["note"]
+
+
+def test_the_interval_resamples_the_baseline():
+    """S15: with the candidate's reps all equal, the interval still shows the baseline's spread."""
+    rows = [{"label": "base", "model": "m", "status": "right", "eval": [1.0, 2.0, 4.0], "sec": [1.0] * 3},
+            {"label": "cand", "model": "m", "status": "right", "eval": [2.0] * 3, "sec": [1.0] * 3}]
+    (b, c) = score.rank(rows, "base", names=["m"])
+    assert c["speed_eval_lo"] < c["speed_eval"] < c["speed_eval_hi"]
+
+
+def test_the_baseline_row_is_1_with_no_interval():
+    """T10: resampling the baseline against itself gave an interval around 1 that means nothing."""
+    rows = [{"label": "base", "model": "m", "status": "right", "eval": [1.0, 2.0, 4.0], "sec": [1.0, 3.0, 2.0]},
+            {"label": "cand", "model": "m", "status": "right", "eval": [2.0] * 3, "sec": [1.0] * 3}]
+    b = next(r for r in score.rank(rows, "base", names=["m"]) if r["label"] == "base")
+    assert b["speed_eval"] == b["speed_s"] == 1
+    assert all(math.isnan(b[k]) for k in ("speed_eval_lo", "speed_eval_hi", "speed_s_lo", "speed_s_hi"))
+    assert score._speed(b, "speed_eval") == "1"
+
+
+def test_rank_orders_by_models_right_then_speed():
+    def rows(label, status, v):
+        return [{"label": label, "model": m, "status": s, "eval": [x] * 2, "sec": [x] * 2}
+                for m, s, x in zip(("m1", "m2", "m3"), status, v)]
+
+    allrows = (rows("base", ["right", "right", "unproven"], [1, 1, 1])
+               + rows("slow3", ["right", "right", "right"], [0.5, 0.5, 0.5])
+               + rows("fast2", ["right", "right", "wrong"], [4, 4, 4]))
+    out = score.rank(allrows, "base", names=["m1", "m2", "m3"])
+    assert [r["label"] for r in out] == ["slow3", "fast2", "base"]
+    assert out[0]["speed_eval"] == pytest.approx(0.5) and out[1]["speed_eval"] == pytest.approx(4)
+
+
+def test_verdicts_are_cached_by_reference_and_reps(tmp_path, grid):
+    d = write_rep(tmp_path, "x", "m1", 0, grid)
+    write_rep(tmp_path, "x", "m1", 1, grid)
+    score.score(tmp_path, tmp_path / "s", grid, log=lambda *_: None)
+    cached = json.loads((d / "gate.json").read_text())
+    assert cached["key"]["reps"] == 2 and cached["verdict"]["status"] in gate.STATUSES
+
+
+def _reasons(tmp_path, grid):
+    out = score.score(tmp_path, tmp_path / "s", grid, log=lambda *_: None)
+    return {(r["model"], r["rep"]): (r["status"], r["reason"]) for r in out["per_run"]}
+
+
+def test_a_rep_short_of_its_chains_or_draws_is_wrong(tmp_path, grid):
+    """Rule 4: the files must hold the budget run.json declares. A lost chain or a chain cut short
+    (a crash, a full disk) is missing draws, so the rep is wrong rather than gated on what is left."""
+    write_rep(tmp_path, "x", "m1", 0, grid)
+    (write_rep(tmp_path, "x", "m1", 1, grid) / "chain_3.csv").unlink()
+    d = write_rep(tmp_path, "x", "m2", 0, grid)
+    lines = (d / "chain_1.csv").read_text().splitlines()
+    (d / "chain_1.csv").write_text("\n".join(lines[:-100]) + "\n")
+    reasons = _reasons(tmp_path, grid)
+    assert reasons[("m1", 0)][0] != "wrong"
+    assert reasons[("m1", 1)][0] == "wrong" and "3 chains" in reasons[("m1", 1)][1]
+    assert reasons[("m2", 0)][0] == "wrong" and "draws" in reasons[("m2", 0)][1]
+
+
+def test_a_truncated_chain_file_is_wrong_not_a_crash(tmp_path, grid):
+    d = write_rep(tmp_path, "x", "m1", 0, grid)
+    text = (d / "chain_0.csv").read_text()
+    (d / "chain_0.csv").write_text(text[: len(text) - 7])  # the last row loses its last fields
+    status, reason = _reasons(tmp_path, grid)[("m1", 0)]
+    assert status == "wrong" and "chain_0.csv" in reason
+
+
+def test_a_corrupt_verdict_cache_is_recomputed(tmp_path, grid):
+    d = write_rep(tmp_path, "x", "m1", 0, grid)
+    write_rep(tmp_path, "x", "m1", 1, grid)
+    first = _reasons(tmp_path, grid)[("m1", 0)]
+    (d / "gate.json").write_text('{"key": {"reps": 2, "refer')
+    assert _reasons(tmp_path, grid)[("m1", 0)] == first
+    assert json.loads((d / "gate.json").read_text())["verdict"]["status"] == first[0]
+
+
+def test_a_cached_verdict_holds_only_for_the_files_it_was_computed_from(tmp_path, grid):
+    """T1: a cached `right` must not outlive its chain files. Deleting, truncating or replacing a
+    chain after scoring is a cache miss, and the missing and short checks run every time."""
+    write_rep(tmp_path, "x", "m1", 1, grid)
+    d = write_rep(tmp_path, "x", "m1", 0, grid)
+    assert _reasons(tmp_path, grid)[("m1", 0)][0] == "right"
+    text = (d / "chain_1.csv").read_text()
+    (d / "chain_0.csv").unlink()
+    status, reason = _reasons(tmp_path, grid)[("m1", 0)]
+    assert status == "wrong" and "3 chains" in reason
+    write_rep(tmp_path / "fresh", "x", "m1", 0, grid)  # restore chain_0 from an identical rep
+    (d / "chain_0.csv").write_bytes((tmp_path / "fresh" / "x" / "m1" / "rep0" / "chain_0.csv").read_bytes())
+    assert _reasons(tmp_path, grid)[("m1", 0)][0] == "right"
+    lines = text.splitlines()
+    (d / "chain_1.csv").write_text("\n".join(lines[:-100]) + "\n")
+    status, reason = _reasons(tmp_path, grid)[("m1", 0)]
+    assert status == "wrong" and "chain_1.csv" in reason and "draws" in reason
+    shifted = [lines[0]] + [",".join(f"{float(v) + 5:.6g}" if i == 0 else v for i, v in enumerate(l.split(",")))
+                            for l in lines[1:]]
+    (d / "chain_1.csv").write_text("\n".join(shifted) + "\n")  # same shape, other draws
+    assert _reasons(tmp_path, grid)[("m1", 0)][0] != "right"  # recomputed: one chain off by 5
+
+
+def test_a_rep_run_with_other_limits_or_over_them_is_wrong(tmp_path, grid):
+    """T2: the grid carries the evaluation and time limits. A rep that recorded other limits, or
+    used more than the grid's, is wrong."""
+    e = grid.entries["m1"]
+    cap, secs = e.max_evaluations, e.max_seconds
+    assert (cap, secs) == (e.chains * (e.warmup + e.draws) * 1023, 1800.0)
+    write_rep(tmp_path, "x", "m1", 0, grid, limits=(cap, secs))
+    write_rep(tmp_path, "x", "m1", 1, grid, evaluations=cap + 1)
+    write_rep(tmp_path, "x", "m2", 0, grid, limits=(10**9, 9000.0))
+    write_rep(tmp_path, "x", "m2", 1, grid, seconds=secs + 1)
+    got = _reasons(tmp_path, grid)
+    assert got[("m1", 0)][0] == "right"
+    assert got[("m1", 1)][0] == "wrong" and "evaluations" in got[("m1", 1)][1]
+    assert got[("m2", 0)][0] == "wrong" and "limits" in got[("m2", 0)][1]
+    assert got[("m2", 1)][0] == "wrong" and " s" in got[("m2", 1)][1]
+
+
+def _rewrite(d, change):
+    rec = json.loads((d / "run.json").read_text())
+    change(rec["timing"])
+    (d / "run.json").write_text(json.dumps(rec))
+
+
+def test_a_metered_rep_must_record_its_limits_and_consistent_counts(tmp_path, grid):
+    """U2: a metered rep (counted by the harness: it records evaluations, density or gradient
+    calls, or a limit, or it is a logdensity rep) that dropped a limit, or whose total is not its
+    density plus gradient calls, was scored right, at whatever ESS per evaluation its total gave."""
+    def drop(*keys):
+        return lambda t: [t["extra"].pop(k) for k in keys]
+
+    cases = {
+        ("m1", 0): None,
+        ("m1", 1): drop("max_seconds"),
+        ("m2", 0): drop("max_evaluations", "max_seconds"),
+        ("m2", 1): lambda t: t.update(evaluations=1),
+    }
+    for (m, r), change in cases.items():
+        d = write_rep(tmp_path, "x", m, r, grid)
+        if change:
+            _rewrite(d, change)
+    got = _reasons(tmp_path, grid)
+    assert got[("m1", 0)][0] == "right"
+    for k in cases.keys() - {("m1", 0)}:
+        assert got[k][0] == "wrong", (k, got[k])
+    assert "limits" in got[("m1", 1)][1] and "limits" in got[("m2", 0)][1]
+    assert "density" in got[("m2", 1)][1]
+
+
+def test_counts_are_non_negative_integers_and_a_metered_rep_is_never_uncounted(tmp_path, grid):
+    """U2 remainder: a metered rep one call over the cap kept its model point once it was marked
+    `uncounted`, and a negative density count made a consistent total of 1 (14 871 ESS per
+    evaluation). Counts must be non-negative integers, the cap is checked on the validated total,
+    and only an adapter that cannot count, which the harness does not meter, may be uncounted."""
+    cap = grid.entries["m1"].max_evaluations
+
+    def negative_density(t):
+        t["extra"]["density_evals"] = 1 - t["extra"]["gradient_evals"]
+        t["evaluations"] = 1
+
+    def unmetered(t, **counts):
+        t.update(evaluations=None, extra={}, **counts)
+
+    cases = {
+        ("m1", 0): (cap + 1, lambda t: t.update(uncounted="unknown")),
+        ("m1", 1): (10**5, negative_density),
+        ("m2", 0): (None, lambda t: unmetered(t, grads_sampling=-5, grads_warmup=10)),
+        ("m2", 1): (None, lambda t: unmetered(t, grads_sampling=cap, grads_warmup=1, uncounted="thin")),
+    }
+    for (m, r), (evaluations, change) in cases.items():
+        _rewrite(write_rep(tmp_path, "x", m, r, grid, evaluations=evaluations), change)
+    got = _reasons(tmp_path, grid)
+    assert all(v[0] == "wrong" for v in got.values()), got
+    assert "uncounted" in got[("m1", 0)][1]
+    assert "non-negative" in got[("m1", 1)][1] and "non-negative" in got[("m2", 0)][1]
+    assert "limit" in got[("m2", 1)][1]
+
+
+def test_the_cap_is_checked_on_the_counts_an_unmetered_rep_reports(tmp_path, grid):
+    """U2 remainder: a CmdStan record with its sampling gradients above the cap and its warmup
+    gradients unknown kept its model point, because the cap was checked only when both were
+    present. The cap is checked on the sum of the counts present, a lower bound on the total."""
+    cap = grid.entries["m1"].max_evaluations
+
+    def unmetered(**counts):
+        return lambda t: t.update(evaluations=None, extra={}, **counts)
+
+    _rewrite(write_rep(tmp_path, "x", "m1", 0, grid, evaluations=None),
+             unmetered(grads_sampling=cap + 1, grads_warmup=None))
+    _rewrite(write_rep(tmp_path, "x", "m1", 1, grid, evaluations=None),
+             unmetered(grads_sampling=10**5, grads_warmup=None))
+    rows = {r["rep"]: r for r in score.score(tmp_path, tmp_path / "s", grid, log=lambda *_: None)["per_run"]
+            if r["model"] == "m1"}
+    assert rows[0]["status"] == "wrong" and f"used {cap + 1} evaluations" in rows[0]["reason"], rows[0]
+    assert rows[1]["status"] == "right", rows[1]
+    assert math.isnan(rows[1]["ess_per_eval"])
+
+
+def test_a_logdensity_rep_without_counts_is_wrong(tmp_path, grid):
+    """A logdensity rep is metered whatever its record says, so one that records no counts and
+    no limits is wrong too."""
+    write_rep(tmp_path, "x", "m1", 0, grid, evaluations=None, sampler="logdensity")
+    write_rep(tmp_path, "x", "m1", 1, grid, evaluations=None)  # not metered: scored, no per-evaluation speed
+    got = _reasons(tmp_path, grid)
+    assert got[("m1", 0)][0] == "wrong" and "limits" in got[("m1", 0)][1]
+    assert got[("m1", 1)][0] == "right"
+
+
+def test_a_rep_recorded_for_another_cell_is_wrong(tmp_path, grid):
+    """U3: a run.json that names another model, rep or base seed than the grid cell it sits in
+    was scored for that cell."""
+    edits = {0: ("model", "m2"), 1: ("rep", 0)}
+    for r, (k, v) in edits.items():
+        d = write_rep(tmp_path, "x", "m1", r, grid)
+        rec = json.loads((d / "run.json").read_text())
+        rec[k] = v
+        (d / "run.json").write_text(json.dumps(rec))
+    d = write_rep(tmp_path, "x", "m2", 0, grid)
+    rec = json.loads((d / "run.json").read_text())
+    rec["base_seed"] = grid.base_seed + 1
+    (d / "run.json").write_text(json.dumps(rec))
+    write_rep(tmp_path, "x", "m2", 1, grid)
+    got = _reasons(tmp_path, grid)
+    assert got[("m1", 0)][0] == "wrong" and "model" in got[("m1", 0)][1]
+    assert got[("m1", 1)][0] == "wrong" and "rep" in got[("m1", 1)][1]
+    assert got[("m2", 0)][0] == "wrong" and "base seed" in got[("m2", 0)][1]
+    assert got[("m2", 1)][0] == "right"
+
+
+def test_the_score_can_check_the_submission_digest(tmp_path, grid):
+    """U3: given the submission file of a label, every rep must record its sha256."""
+    import hashlib
+    sub = tmp_path / "sub.py"
+    sub.write_text("def sample(problem, budget, rng): ...\n")
+    good = {"name": "x", "submission_sha256": hashlib.sha256(sub.read_bytes()).hexdigest()}
+    runs = tmp_path / "runs"
+    for m in ("m1", "m2"):
+        for r in range(2):
+            write_rep(runs, "x", m, r, grid, identity=good)
+    out = score.score(runs, tmp_path / "s", grid, submissions={"x": sub}, log=lambda *_: None)
+    assert all(r["status"] == "right" for r in out["per_run"])
+    sub.write_text("def sample(problem, budget, rng): return None\n")
+    out = score.score(runs, tmp_path / "s", grid, submissions={"x": sub}, log=lambda *_: None)
+    assert all(r["status"] == "wrong" and "digest" in r["reason"] for r in out["per_run"])
+
+
+def test_a_submission_for_a_label_not_scored_is_refused(tmp_path, grid):
+    """V3: `--submission hcm=current.py`, a typo for hmc, skipped the digest check in silence."""
+    sub = tmp_path / "current.py"
+    sub.write_text("def sample(problem, budget, rng): return None\n")
+    runs = tmp_path / "runs"
+    write_rep(runs, "hmc", "m1", 0, grid, identity={"submission_sha256": "old"})
+    write_rep(runs, "other", "m1", 0, grid)
+    with pytest.raises(ValueError, match="hcm"):
+        score.score(runs, tmp_path / "s", grid, submissions={"hcm": sub}, log=lambda *_: None)
+    with pytest.raises(ValueError, match="other"):
+        score.score(runs, tmp_path / "s", grid, labels=["hmc"], submissions={"other": sub}, log=lambda *_: None)
+
+
+def test_a_verdict_cached_by_another_gate_is_recomputed(tmp_path, grid, monkeypatch):
+    """U1 remainder: a gate.json written before 42417d4 kept its `wrong: exact` for a run the new
+    gate calls unproven, because the key named the gate's constants and not its code. A cache
+    whose key lacks the gate's source digest, or names another, is a miss."""
+    d = write_rep(tmp_path, "x", "m1", 0, grid)
+    write_rep(tmp_path, "x", "m1", 1, grid)
+    assert _reasons(tmp_path, grid)[("m1", 0)][0] == "right"
+    cache = json.loads((d / "gate.json").read_text())
+    old = {k: cache["key"][k] for k in ("reps", "reference", "chains")}
+    old["gate"] = {k: getattr(gate, k) for k in ("TOLERANCE", "ALPHA_WRONG", "ALPHA_RIGHT", "RHAT_MAX", "MIN_ESS",
+                                                 "EXACT", "COPY_DISTANCE", "COPY_FRACTION", "COPY_SERIES", "SPLIT_Z")}
+    stale = {**cache["verdict"], "status": "wrong", "reason": "exact"}
+    for key in (old, cache["key"]):
+        (d / "gate.json").write_text(json.dumps({"key": key, "verdict": stale}))
+        if key is cache["key"]:
+            monkeypatch.setattr(score, "GATE_SOURCE", "another gate")
+        assert _reasons(tmp_path, grid)[("m1", 0)][0] == "right"
+
+
+def test_the_cache_key_hashes_the_bytes_the_gate_read(tmp_path, monkeypatch):
+    """U4: the chain files were parsed, then hashed in a second read. Files replaced between the
+    two reads left a cache whose key named the new files and whose verdict was on the old ones,
+    so the replaced, shifted files were then called right from the cache."""
+    rng = np.random.default_rng(31)
+    ref = reference.summarise({"x": rng.normal(size=(5000, 4))})
+    entry = score.Entry("x", ref, 4, 1000, 5000, None)
+    d = tmp_path / "rep0"
+    d.mkdir()
+
+    def put(mean):
+        for i in range(4):
+            np.savetxt(d / f"chain_{i}.csv", rng.normal(mean, 1, size=5000), header="x", comments="")
+
+    put(0.0)
+    orig = score.read_rep
+
+    def read_then_replace(*args, **kw):
+        out = orig(*args, **kw)
+        put(0.8)
+        return out
+
+    monkeypatch.setattr(score, "read_rep", read_then_replace)
+    assert score.verdict(d, entry, 1).status == "right"  # the old files
+    monkeypatch.setattr(score, "read_rep", orig)
+    assert score.verdict(d, entry, 1).status == "wrong"  # the new files, not the cached verdict

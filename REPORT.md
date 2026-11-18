@@ -196,7 +196,7 @@ To add a sampler, write one file in `harness/adapters/` that writes the chain CS
 
 - Models are Stan programs. A sampler written in Julia, Rust or JAX reaches them through BridgeStan's bindings, which compile the same `.stan` file into a library with a log density and gradient. A sampler that needs its own model language needs a model translation as well, and the core set has none.
 - `Settings.cmdstan` is a Stan-specific field in the generic settings. It is there because two of the four adapters need it. Other adapters take their paths through `--opt` and environment variables.
-- The score is ESS and cost only. Agreement with the reference posteriors in posteriordb is not measured (PROTOCOL.md). A sampler that is fast and biased scores well.
+- The score was ESS and cost only when this report was written. The correctness gate (PROTOCOL.md, "The correctness gate") now compares every rep with a reference posterior, and a sampler that is fast and biased is marked wrong.
 
 ## 10. Open questions
 

@@ -2,6 +2,8 @@
 
 Runs CmdStan's multi-path Pathfinder once per run, picks one approximate draw
 per chain, and starts each NUTS chain there. Wall time includes Pathfinder.
+CmdStan does not report how many gradients Pathfinder used, so the run's
+evaluation count is incomplete and it earns no per-evaluation score.
 
 The seed for Pathfinder and for the draw choice is the run seed, so each rep
 gets its own inits. The original campaign ran Pathfinder once per model at
@@ -42,6 +44,7 @@ class Adapter(CmdStanAdapter):
         timing = super().run(req, inits=inits)
         timing.wall_s += pf_s
         timing.extra["pathfinder_s"] = pf_s
+        timing.uncounted = "; ".join(filter(None, ["pathfinder gradients are not reported", timing.uncounted]))
         return timing
 
 
