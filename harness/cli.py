@@ -4,7 +4,7 @@
   apin fetch-data                   download the data files that are not shipped
   apin run --sampler S [--models M] [--reps N] [--label L] [--cmdstan DIR] [--opt k=v ...]
   apin score [--runs DIR] [--out DIR] [--baseline LABEL]
-  apin reference build [--models M] [--cmdstan DIR] [--adapt-delta X]
+  apin reference build [--models M] [--cmdstan DIR] [--adapt-delta X] [--rerun]
                                     write models/reference/<model>.json (summaries, no draws)
 """
 
@@ -64,6 +64,8 @@ def main(argv: list[str] | None = None) -> int:
     rb.add_argument("--build", type=Path, default=ROOT / "build")
     rb.add_argument("--adapt-delta", type=float, help=f"default {reference.LOCAL['adapt_delta']}")
     rb.add_argument("--keep-going", action="store_true", help="continue after a model fails")
+    rb.add_argument("--rerun", action="store_true",
+                    help="rerun CmdStan for local references even when complete chain CSVs are in build/reference")
 
     a = ap.parse_args(argv)
     if a.cmd == "list":
@@ -92,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         failed = []
         for m in models.select(a.models):
             try:
-                reference.build(m, m.reference, a.cmdstan, a.build, settings=settings)
+                reference.build(m, m.reference, a.cmdstan, a.build, settings=settings, rerun=a.rerun)
             except Exception as e:
                 if not a.keep_going:
                     raise
