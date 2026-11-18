@@ -33,6 +33,9 @@ class Model:
     reference: str = "none"  # "posteriordb", "local" or "none" (harness/reference.py)
     reference_stan: str | None = None  # a local reference is built from this file under models/ if set
     bench: str = ""  # "public" or "held-out" (BENCH.md)
+    chains: int = 4  # the benchmark budget of one rep (BENCH.md, "The budget")
+    warmup: int = 1000
+    draws: int = 1000  # per chain; raised per model where NUTS cannot be proven right with fewer
 
     @property
     def stan_file(self) -> Path:
@@ -84,7 +87,7 @@ def load() -> dict[str, Model]:
     return {
         e["model"]: Model(e["model"], e["family"], e["posterior"], e["data"], e["data_sha256"], e["data_shipped"],
                           e.get("reference", {}).get("source", "none"), e.get("reference", {}).get("stan"),
-                          e.get("bench", ""))
+                          e.get("bench", ""), **e.get("budget", {}))
         for e in entries
     }
 

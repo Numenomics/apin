@@ -52,6 +52,7 @@ from scipy.stats import chi2
 from . import ess
 from .reference import FUNCTIONS, LP, Reference
 
+STATUSES = ("right", "wrong", "unproven")
 TOLERANCE = 0.1  # reference SDs of the function
 ALPHA_WRONG = 0.01  # false-wrong rate per model for a correct sampler whose chains have mixed
 ALPHA_RIGHT = 0.05  # false-right rate per rep for a sampler whose error is at the tolerance

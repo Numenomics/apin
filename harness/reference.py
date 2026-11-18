@@ -282,11 +282,13 @@ def from_posteriordb(model: Model, build_dir: Path = ROOT / "build") -> Referenc
 LP_CONVENTION = "BridgeStan log_density(propto=True, jacobian=True) on the benchmark model, as CmdStan's lp__"
 
 
-def log_density(model: Model, draws: dict[str, np.ndarray], build_dir: Path) -> np.ndarray:
+def log_density(model: Model, draws: dict[str, np.ndarray], build_dir: Path, strict: bool = True) -> np.ndarray:
     """lp__ of the benchmark model at each draw (draws, chains), the way CmdStan writes it.
 
     Computed with BridgeStan from the constrained parameters, so a reference sampled from a
-    reparameterisation (reference_stan) gets the benchmark model's lp__."""
+    reparameterisation (reference_stan) gets the benchmark model's lp__, and a run's lp__ does not
+    depend on what its sampler wrote. With strict=False a draw that is non-finite, outside the
+    support or rejected by the model gets NaN, which the gate reads as a hard failure."""
     import bridgestan
 
     from . import stan_library
@@ -301,7 +303,14 @@ def log_density(model: Model, draws: dict[str, np.ndarray], build_dir: Path) -> 
     x = np.stack([np.asarray(full[n], dtype=float) for n in names], axis=-1)
     out = np.empty(x.shape[:2])
     for i, j in np.ndindex(out.shape):
-        out[i, j] = sm.log_density(sm.param_unconstrain(x[i, j]), propto=True, jacobian=True)
+        try:
+            if not np.all(np.isfinite(x[i, j])):
+                raise ValueError("non-finite draw")
+            out[i, j] = sm.log_density(sm.param_unconstrain(x[i, j]), propto=True, jacobian=True)
+        except (RuntimeError, ValueError):
+            if strict:
+                raise
+            out[i, j] = math.nan
     return out
 
 

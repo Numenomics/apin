@@ -3,7 +3,7 @@
   apin list                         samplers and models
   apin fetch-data                   download the data files that are not shipped
   apin run --sampler S [--models M] [--reps N] [--label L] [--cmdstan DIR] [--opt k=v ...]
-  apin score [--runs DIR] [--out DIR] [--baseline LABEL]
+  apin score [--runs DIR] [--out DIR] [--models M] [--reps N] [--baseline LABEL]
   apin reference build [--models M] [--cmdstan DIR] [--adapt-delta X] [--rerun]
                                     write models/reference/<model>.json (summaries, no draws)
 """
@@ -44,9 +44,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--opt", action="append", default=[], metavar="KEY=VALUE", help="adapter option")
     r.add_argument("--runs", type=Path, default=ROOT / "runs")
     r.add_argument("--build", type=Path, default=ROOT / "build")
-    r.add_argument("--chains", type=int, default=4)
-    r.add_argument("--warmup", type=int, default=1000)
-    r.add_argument("--draws", type=int, default=1000)
+    r.add_argument("--chains", type=int, help="default: the model's budget in models/manifest.json")
+    r.add_argument("--warmup", type=int, help="default: the model's budget")
+    r.add_argument("--draws", type=int, help="draws per chain; default: the model's budget")
     r.add_argument("--base-seed", type=int, default=grid.BASE_SEED,
                    help="rep r uses BASE_SEED + 1000 r; the benchmark's scorer keeps its own secret (BENCH.md)")
 
@@ -54,7 +54,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--runs", type=Path, default=ROOT / "runs")
     s.add_argument("--out", type=Path, default=ROOT / "scores")
     s.add_argument("--labels", help="comma list of labels to include")
-    s.add_argument("--baseline", help="label to compute ratios against")
+    s.add_argument("--baseline", help="label to compute speed against")
+    s.add_argument("--models", default="all", help="the grid: models with a reference among these")
+    s.add_argument("--reps", type=int, default=3, help="reps in the grid; a rep that is not there is wrong")
+    s.add_argument("--base-seed", type=int, default=grid.BASE_SEED)
+    s.add_argument("--build", type=Path, default=ROOT / "build")
 
     ref = sub.add_parser("reference", help="reference posteriors for the correctness gate")
     ref_sub = ref.add_subparsers(dest="ref_cmd", required=True)
@@ -87,7 +91,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{len(done)} reps done, {len(failed)} failed")
         return 1 if failed else 0
     if a.cmd == "score":
-        score.score(a.runs, a.out, a.labels.split(",") if a.labels else None, a.baseline)
+        g = score.declared(a.models, a.reps, a.base_seed, a.build)
+        score.score(a.runs, a.out, g, a.baseline, a.labels.split(",") if a.labels else None)
         return 0
     if a.cmd == "reference":
         settings = {"adapt_delta": a.adapt_delta} if a.adapt_delta else None
