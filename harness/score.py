@@ -214,10 +214,9 @@ def count_problem(rec: dict, entry: Entry) -> str | None:
         total, dens, grad = t.get("evaluations"), extra.get("density_evals"), extra.get("gradient_evals")
         if None in (total, dens, grad) or total != dens + grad:
             return f"counted {total} evaluations, not its {dens} density plus {grad} gradient calls"
-    elif t.get("grads_sampling") is not None and t.get("grads_warmup") is not None:
-        total = t["grads_sampling"] + t["grads_warmup"]
-    else:
-        total = None
+    else:  # the counts present, a lower bound on the total when one is missing
+        present = [t[k] for k in ("grads_sampling", "grads_warmup") if t.get(k) is not None]
+        total = sum(present) if present else None
     if total is not None and total > entry.max_evaluations:
         return f"used {total} evaluations, the limit is {entry.max_evaluations}"
     return None

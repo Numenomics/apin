@@ -314,6 +314,26 @@ def test_counts_are_non_negative_integers_and_a_metered_rep_is_never_uncounted(t
     assert "limit" in got[("m2", 1)][1]
 
 
+def test_the_cap_is_checked_on_the_counts_an_unmetered_rep_reports(tmp_path, grid):
+    """U2 remainder: a CmdStan record with its sampling gradients above the cap and its warmup
+    gradients unknown kept its model point, because the cap was checked only when both were
+    present. The cap is checked on the sum of the counts present, a lower bound on the total."""
+    cap = grid.entries["m1"].max_evaluations
+
+    def unmetered(**counts):
+        return lambda t: t.update(evaluations=None, extra={}, **counts)
+
+    _rewrite(write_rep(tmp_path, "x", "m1", 0, grid, evaluations=None),
+             unmetered(grads_sampling=cap + 1, grads_warmup=None))
+    _rewrite(write_rep(tmp_path, "x", "m1", 1, grid, evaluations=None),
+             unmetered(grads_sampling=10**5, grads_warmup=None))
+    rows = {r["rep"]: r for r in score.score(tmp_path, tmp_path / "s", grid, log=lambda *_: None)["per_run"]
+            if r["model"] == "m1"}
+    assert rows[0]["status"] == "wrong" and f"used {cap + 1} evaluations" in rows[0]["reason"], rows[0]
+    assert rows[1]["status"] == "right", rows[1]
+    assert math.isnan(rows[1]["ess_per_eval"])
+
+
 def test_a_logdensity_rep_without_counts_is_wrong(tmp_path, grid):
     """A logdensity rep is metered whatever its record says, so one that records no counts and
     no limits is wrong too."""
