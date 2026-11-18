@@ -41,7 +41,7 @@ ESS measures how fast a sampler forgets where it was. It says nothing about whet
 
 ### References
 
-A reference holds summary statistics only, never draws: for every variable of the parameters block, the mean and sd of x, of x², and of (x − mean)², and the Monte Carlo standard error (MCSE) of each mean. Each file is under 140 KB; the limit is 1 MB.
+A reference holds summary statistics only, never draws: for every variable of the parameters block, the mean and sd of x, of x², and of (x − mean)², and the Monte Carlo standard error (MCSE) of each mean. The largest, bym2_offset_only, is 516 KB; the limit is 1 MB.
 
 - 12 models use posteriordb's reference draws (`posterior_database/reference_posteriors/`). posteriordb builds them with Stan: 10 chains, thin 10, 10 000 draws, no divergences and R-hat below 1.01 (`doc/REFERENCE_POSTERIOR_DEFINITION.md` in posteriordb). eight_schools_centered uses the reference that posteriordb lists for it, the one of the non-centred model, which has the same posterior.
 - The other 9 have no posteriordb reference. `apin reference build` builds them with posteriordb's recipe in CmdStan: 10 chains, 2000 warmup and 10 000 sampling iterations each, thin 10, adapt delta 0.95. It refuses a result with a divergence or an R-hat of 1.01 or more. A model can name an equivalent reparameterisation to sample from instead (`reference.stan` in the manifest). pilots does this: NUTS diverges on its centred funnel, so its reference comes from `models/reference/pilots.stan`, the same model non-centred.
