@@ -224,12 +224,12 @@ Each rep gives the submission the budget of its model in `models/manifest.json`:
 | chains | 4 | R-hat needs several chains |
 | warmup | 1000 | as CmdStan; it sets the evaluation limit |
 | draws | 5000 per chain; 10 000 for lsat_model, 20 000 for accel_gp | enough for stock NUTS to be proven right at a tolerance of 0.1 where a budget can do it (see below) |
-| evaluations | 4 × (warmup + draws) × 1023 | the most NUTS can spend at tree depth 10 |
+| evaluations | 4 × (warmup + draws) × 1023 | a chosen cap: 1023 is the number of leapfrog steps in a full tree of depth 10 (see below) |
 | time | 1800 s on one core | `OMP_NUM_THREADS=1` and the BLAS equivalents; the process is killed 300 s later |
 
 A density call and a gradient call count the same. Both counts are recorded (`density_evals`, `gradient_evals`).
 
-The evaluation limit stops a submission that thins by a factor of thousands. The time limit stops one that spends its time in numpy between evaluations.
+The evaluation cap is a choice, not the most NUTS can spend. A NUTS transition that reaches depth 10 makes 1024 gradients (its 1023 leapfrog steps and one at its start), before any step-size search, so a NUTS chain that hits the depth limit on every iteration would exceed the cap. The evaluation limit stops a submission that thins by a factor of thousands. The time limit stops one that spends its time in numpy between evaluations.
 
 ### Stock NUTS at the bench budget
 

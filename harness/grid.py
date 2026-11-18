@@ -24,7 +24,7 @@ from . import models as models_mod
 from .sampler import RunRequest, Sampler
 
 BASE_SEED = 20260819
-TREEDEPTH_CEILING = 1023  # leapfrog steps of one NUTS transition at CmdStan's default max_depth 10
+TREEDEPTH_CEILING = 1023  # leapfrog steps in a full NUTS tree of depth 10 (CmdStan's max_depth); the cap is a choice
 MAX_SECONDS = 1800.0  # wall time of one rep
 
 
