@@ -20,7 +20,7 @@ import numpy as np
 from scipy.special import ndtri
 from scipy.stats import rankdata
 
-__all__ = ["ess_bulk", "ess_tail", "ess_mean", "mcse_mean", "rhat", "summarise"]
+__all__ = ["ess_bulk", "ess_tail", "ess_mean", "mcse_mean", "rhat", "rhat_parts", "summarise"]
 
 
 def _is_degenerate(x: np.ndarray) -> bool:
@@ -154,13 +154,21 @@ def ess_tail(x: np.ndarray) -> float:
     return min(q05, q95)
 
 
-def rhat(x: np.ndarray) -> float:
+def rhat_parts(x: np.ndarray) -> tuple[float, float]:
+    """The bulk and folded (tail) rank-normalized split R-hat; either is NaN where undefined.
+
+    Not part of posterior's interface: the gate uses it to keep the bulk R-hat when the folded
+    draws are constant (a variable that takes two values symmetric about its median)."""
     x = np.asarray(x, dtype=float)
     if _is_degenerate(x):
-        return math.nan
+        return math.nan, math.nan
     bulk = _rhat_basic(_z_scale(_split_chains(x)))
     folded = np.abs(x - np.median(x))
-    tail = _rhat_basic(_z_scale(_split_chains(folded)))
+    return bulk, _rhat_basic(_z_scale(_split_chains(folded)))
+
+
+def rhat(x: np.ndarray) -> float:
+    bulk, tail = rhat_parts(x)
     if math.isnan(bulk) or math.isnan(tail):
         return math.nan
     return max(bulk, tail)
