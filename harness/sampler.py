@@ -57,6 +57,8 @@ class Timing:
     evaluations: every density and gradient evaluation, warmup included, when the
         harness counts them itself (the logdensity adapter); else None, and the
         scorer uses grads_sampling + grads_warmup.
+    uncounted: why the counts above leave out some evaluations ("" when they
+        are complete). A run with a reason earns no per-evaluation score.
     """
 
     wall_s: float
@@ -68,6 +70,7 @@ class Timing:
     divergences: int | None
     extra: dict = field(default_factory=dict)
     evaluations: int | None = None
+    uncounted: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)

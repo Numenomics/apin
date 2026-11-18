@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from harness import cmdstan, models, sampler
+from harness import cmdstan, models, sampler, score
 from harness.adapters import cmdstan as cmdstan_adapter
 from harness.adapters import nutpie as nutpie_adapter
 from harness.adapters import pathfinder, walnutpie
@@ -116,3 +116,43 @@ def test_nutpie_check_explains_missing_extra():
             nutpie_adapter.Adapter(sampler.Settings()).check()
     else:
         pytest.skip("nutpie is installed")
+
+
+def _csv(path, thin=None, leapfrog=True):
+    head = "# method = sample\n" + (f"#     thin = {thin}\n" if thin else "#     thin = 1 (Default)\n")
+    cols = "lp__,n_leapfrog__,x" if leapfrog else "lp__,x"
+    row = (lambda a, b: f"-1,{a},{b}") if leapfrog else (lambda a, b: f"-1,{b}")
+    path.write_text(head + cols + "\n" + row(7, 0.1) + "\n# Adaptation terminated\n" + row(3, 0.3) + "\n")
+    return path
+
+
+def test_thinned_cmdstan_runs_have_no_evaluation_count(tmp_path):
+    """S12: with thin=10 only every tenth transition's leapfrogs are written."""
+    t = cmdstan_adapter.timing_from_csvs([_csv(tmp_path / "a.csv", thin=10)], 1.0)
+    assert score.evaluation_counts(t.to_dict()) == (None, None, None) and "thin" in t.uncounted
+    t1 = cmdstan_adapter.timing_from_csvs([_csv(tmp_path / "b.csv")], 1.0)
+    assert score.evaluation_counts(t1.to_dict()) == (10, 0, 10) and t1.uncounted == ""
+
+
+def test_a_csv_without_leapfrogs_has_no_evaluation_count(tmp_path):
+    t = cmdstan_adapter.timing_from_csvs([_csv(tmp_path / "a.csv", leapfrog=False)], 1.0)
+    assert score.evaluation_counts(t.to_dict())[0] is None
+
+
+def test_pathfinder_cost_is_unavailable(tmp_path, monkeypatch):
+    """S12: the NUTS leapfrogs leave out Pathfinder's own gradients."""
+    from harness.sampler import Settings, Timing
+
+    monkeypatch.setattr(cmdstan_adapter.Adapter, "run",
+                        lambda self, req, inits=None: Timing(1.0, [1.0], [0.5], [0.5], 100, 50, 0))
+    monkeypatch.setattr(cmdstan_adapter.Adapter, "build", lambda self, req: tmp_path / "exe")
+    monkeypatch.setattr(cmdstan_adapter.Adapter, "root", tmp_path)
+    monkeypatch.setattr(pathfinder.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0, "stderr": ""})())
+    monkeypatch.setattr(pathfinder.cmdstan, "parameter_names", lambda *a: ["x"])
+    monkeypatch.setattr(pathfinder.cmdstan, "read_csv", lambda p: None)
+    monkeypatch.setattr(pathfinder, "pathfinder_inits", lambda *a: [])
+    req = type("Req", (), {"out_dir": tmp_path, "data_file": tmp_path / "d.json", "seed": 1, "chains": 1,
+                           "model": type("M", (), {"stan_file": tmp_path / "m.stan"})()})()
+    t = pathfinder.Adapter(Settings()).run(req)
+    assert "pathfinder" in t.uncounted and score.evaluation_counts(t.to_dict())[0] is None

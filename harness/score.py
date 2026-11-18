@@ -109,6 +109,8 @@ def verdict(rep_dir: Path, entry: Entry, reps: int) -> gate.Verdict:
 
 def evaluation_counts(t: dict) -> tuple[int | None, int | None, int | None]:
     """(all evaluations, density calls, gradient calls), None where unknown."""
+    if t.get("uncounted"):
+        return None, None, None
     extra = t.get("extra") or {}
     total = t.get("evaluations")
     if total is None and t.get("grads_sampling") is not None and t.get("grads_warmup") is not None:
