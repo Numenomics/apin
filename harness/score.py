@@ -107,41 +107,40 @@ def _key(entry: Entry, reps: int) -> dict:
             "gate": consts}
 
 
-def read_rep(rep_dir: Path, chains: int, draws: int, names: list[str] | None = None) -> list:
+def read_rep(rep_dir: Path, chains: int, draws: int, names: list[str] | None = None) -> tuple[list, dict[str, str]]:
     """The chain CSVs of a rep (only the `names` columns, if given), which must be exactly the
-    budget: `chains` files of `draws` rows. Raises ValueError naming what is missing or unreadable (rule 4: missing is failing)."""
+    budget: `chains` files of `draws` rows, and the sha256 of each file by name. Each file is read
+    once, and the hash is of the bytes that were parsed. Raises ValueError naming what is missing
+    or unreadable (rule 4: missing is failing)."""
     files = chain_files(rep_dir)
     if len(files) != chains:
         raise ValueError(f"{len(files)} chains, the budget is {chains}")
-    csvs = []
+    csvs, hashes = [], {}
     for f in files:
         try:
-            csvs.append(cmdstan.read_csv(f, columns=names))
+            data = f.read_bytes()
+            csvs.append(cmdstan.read_csv(f, columns=names, data=data))
         except (OSError, ValueError, cmdstan.CmdStanError) as e:
             raise ValueError(f"{f.name} unreadable: {e}") from None
+        hashes[f.name] = hashlib.sha256(data).hexdigest()
         if len(csvs[-1].values) != draws:
             raise ValueError(f"{f.name} has {len(csvs[-1].values)} draws, the budget is {draws}")
-    return csvs
-
-
-def fingerprint(rep_dir: Path) -> dict[str, str]:
-    """The sha256 of each chain file, by name: the draws a cached verdict was computed from."""
-    return {f.name: hashlib.sha256(f.read_bytes()).hexdigest() for f in chain_files(rep_dir)}
+    return csvs, hashes
 
 
 def verdict(rep_dir: Path, entry: Entry, reps: int) -> gate.Verdict:
     """The gate's verdict on a finished rep, cached in rep_dir/gate.json. lp__ is computed by the
     harness from the constrained draws; a column of that name written by the sampler is ignored.
     A rep whose files fall short of the budget is wrong; that check runs on every call. The cache
-    holds only for the chain files it was computed from (`fingerprint`); an unreadable cache is
-    recomputed."""
+    holds only for the chain files it was computed from (their sha256, of the bytes the gate
+    parses); an unreadable cache is recomputed."""
     ref = entry.ref
     names = list(ref.names) + list(ref.constants)
     try:
-        csvs = read_rep(rep_dir, entry.chains, entry.draws, names)
+        csvs, hashes = read_rep(rep_dir, entry.chains, entry.draws, names)
     except ValueError as e:
         return gate.Verdict("wrong", str(e))
-    key = {**_key(entry, reps), "chains": fingerprint(rep_dir)}
+    key = {**_key(entry, reps), "chains": hashes}
     cache = rep_dir / "gate.json"
     try:
         c = json.loads(cache.read_text())

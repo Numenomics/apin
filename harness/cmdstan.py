@@ -8,6 +8,7 @@ variable. It can be a release install or the patched build in
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import re
 import subprocess
@@ -120,7 +121,7 @@ _SAMPLING = re.compile(r"#\s*([\d.eE+-]+) seconds \(Sampling\)")
 _TOTAL = re.compile(r"#\s*([\d.eE+-]+) seconds \(Total\)")
 
 
-def read_csv(path: Path, columns: list[str] | None = None) -> StanCsv:
+def read_csv(path: Path, columns: list[str] | None = None, data: bytes | None = None) -> StanCsv:
     """Read a CmdStan output CSV (or any CSV with a header row and '#' comments).
 
     With save_warmup=1, CmdStan writes the warmup draws first and then a
@@ -128,10 +129,12 @@ def read_csv(path: Path, columns: list[str] | None = None) -> StanCsv:
     `warmup_values`; `values` holds only the draws after it. A file without
     the comment (save_warmup=0, or not from CmdStan) has no warmup rows. A row without a line end
     or with a different number of fields than the header raises CmdStanError: the file was cut short.
-    With `columns`, only those of them in the file are kept, in file order.
+    With `columns`, only those of them in the file are kept, in file order. With `data`, those
+    bytes are parsed as the file's content and the file is not opened (the scorer hashes the
+    bytes it parses).
     """
     comments, header, rows, warm, keep = [], None, [], None, None
-    with open(path) as fh:
+    with (open(path) if data is None else io.TextIOWrapper(io.BytesIO(data))) as fh:
         for line in fh:
             if line.startswith("#"):
                 comments.append(line.rstrip("\n"))

@@ -331,3 +331,31 @@ def test_the_score_can_check_the_submission_digest(tmp_path, grid):
     sub.write_text("def sample(problem, budget, rng): return None\n")
     out = score.score(runs, tmp_path / "s", grid, submissions={"x": sub}, log=lambda *_: None)
     assert all(r["status"] == "wrong" and "digest" in r["reason"] for r in out["per_run"])
+
+
+def test_the_cache_key_hashes_the_bytes_the_gate_read(tmp_path, monkeypatch):
+    """U4: the chain files were parsed, then hashed in a second read. Files replaced between the
+    two reads left a cache whose key named the new files and whose verdict was on the old ones,
+    so the replaced, shifted files were then called right from the cache."""
+    rng = np.random.default_rng(31)
+    ref = reference.summarise({"x": rng.normal(size=(5000, 4))})
+    entry = score.Entry("x", ref, 4, 1000, 5000, None)
+    d = tmp_path / "rep0"
+    d.mkdir()
+
+    def put(mean):
+        for i in range(4):
+            np.savetxt(d / f"chain_{i}.csv", rng.normal(mean, 1, size=5000), header="x", comments="")
+
+    put(0.0)
+    orig = score.read_rep
+
+    def read_then_replace(*args, **kw):
+        out = orig(*args, **kw)
+        put(0.8)
+        return out
+
+    monkeypatch.setattr(score, "read_rep", read_then_replace)
+    assert score.verdict(d, entry, 1).status == "right"  # the old files
+    monkeypatch.setattr(score, "read_rep", orig)
+    assert score.verdict(d, entry, 1).status == "wrong"  # the new files, not the cached verdict
