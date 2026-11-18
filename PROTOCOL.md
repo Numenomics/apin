@@ -8,7 +8,7 @@ The core set is the 21 posteriordb models in `models/manifest.json`. Each has a 
 
 Each cell is one sampler, one model and one rep:
 
-- 4 chains, 1000 warmup iterations, and the draws per chain in the model's `budget` in `models/manifest.json`: 5000 for most models, 10 000 for lsat_model. These budgets are what stock NUTS needs to be proven right at the gate's tolerance (BENCH.md, "The budget"). `--chains`, `--warmup` and `--draws` override them for experiments, but the scorer marks a rep with another budget wrong. CmdStan saves its warmup draws so that their gradient count is known. `read_csv` keeps them apart, and they are never scored.
+- 4 chains, 1000 warmup iterations, and the draws per chain in the model's `budget` in `models/manifest.json`: 5000 for most models, 10 000 for lsat_model and 20 000 for accel_gp. These budgets are what stock NUTS needs to be proven right at the gate's tolerance (BENCH.md, "The budget"). `--chains`, `--warmup` and `--draws` override them for experiments, but the scorer marks a rep with another budget wrong. CmdStan saves its warmup draws so that their gradient count is known. `read_csv` keeps them apart, and they are never scored.
 - 3 reps for development, 5 for a benchmark result. Rep r uses seed BASE + 1000·r, with BASE 20260819 unless `--base-seed` says otherwise. Chains inside a rep get the chain id or seed offset that their sampler uses (CmdStan `id=c+1`; walnutpie `seed+c`).
 - At most 4 cores in use for the whole grid. The old campaign ran on a 12-core Ryzen 9 5900X and kept to 4 cores so that memory bandwidth and turbo states were comparable between arms. A rep's 4 chains run in parallel. Run one grid at a time.
 
@@ -16,7 +16,7 @@ A rep that finishes gets a `DONE` marker; a rep that raises gets `FAILED` with t
 
 ## The score
 
-`apin score --models M --reps R` scores the grid of the models in M that have a reference, with R reps each. It walks that grid, not the run directories: a rep the grid declares and a label lacks is wrong, and so is a rep whose run.json names another model, rep, seed or base seed than its cell. `--submission LABEL=PATH` makes every rep of that label match the file's sha256. It computes, for every rep, the rank-normalized bulk and tail ESS and split R-hat of every series the gate checks (Vehtari et al. 2021; `harness/ess.py` reproduces the R package posterior 1.7.0 to 10 significant digits). Columns whose names end in `__` are sampler diagnostics and are not scored; lp__ is recomputed by the harness. Chains of unequal length are cut to the shortest.
+`apin score --models M --reps R` scores the grid of the models in M that have a reference, with R reps each. It walks that grid, not the run directories: a rep the grid declares and a label lacks is wrong, and so is a rep whose run.json names another model, rep, seed or base seed than its cell. `--submission LABEL=PATH` makes every rep of that label match the file's sha256. It computes, for every rep, the rank-normalized bulk and tail ESS and split R-hat of every series the gate checks (Vehtari et al. 2021; `harness/ess.py` reproduces the R package posterior 1.7.0 to 10 significant digits). Columns whose names end in `__` are sampler diagnostics and are not scored; lp__ is recomputed by the harness. A rep whose chains hold another number of draws than the budget, or are cut short, is wrong; the scorer does not cut chains to the shortest.
 
 Every rep gets a verdict from the correctness gate (next section): right, wrong or unproven. The credited ESS of a rep is the smallest bulk or tail ESS over every series. Cost is reported two ways, and only for a rep that is right:
 
@@ -35,10 +35,10 @@ ESS measures how fast a sampler forgets where it was. It says nothing about whet
 
 ### References
 
-A reference holds summary statistics only, never draws (`harness/reference.py`). It has a set of series: every standardised variable, projections on eigenvectors of the reference correlation, and lp__. For each series it stores four functions (the mean, the mean of the square and the fractions below the reference's 5 % and 95 % quantiles), each with its expected value, its SD and its Monte Carlo standard error (MCSE). It also stores the constants of the model and the correlation of the functions, which the calibration test needs. The largest file, bym2_offset_only, is 877 KB; the limit is 1 MB.
+A reference holds summary statistics only, never draws (`harness/reference.py`). It has a set of series: every standardised variable, projections on eigenvectors of the reference correlation, and lp__. For each series it stores four functions (the mean, the mean of the square and the fractions below the reference's 5 % and 95 % quantiles), each with its expected value, its SD and its Monte Carlo standard error (MCSE). It also stores the constants of the model and tr(C²), C the correlation of the functions, which the calibration test needs. Each half's estimate and MCSE of every function are in `models/reference/halves/<model>.json`. The largest file, bym2_offset_only.json, is 886 KB, and its halves file is 520 KB; the limit is 1 MB per file.
 
 - 12 models use posteriordb's reference draws (`posterior_database/reference_posteriors/`). posteriordb builds them with Stan: 10 chains, thin 10, 10 000 draws, no divergences and R-hat below 1.01 (`doc/REFERENCE_POSTERIOR_DEFINITION.md` in posteriordb). eight_schools_centered uses the reference that posteriordb lists for it, the one of the non-centred model, which has the same posterior.
-- The other 9 have no posteriordb reference. For 8 of them, `apin reference build` built one with posteriordb's recipe in CmdStan: 10 chains, 2000 warmup and 10 000 sampling iterations each, thin 10, adapt delta 0.95. It refuses a result with a divergence or an R-hat of 1.01 or more. A model can name an equivalent reparameterisation to sample from instead (`reference.stan` in the manifest). pilots does this: NUTS diverges on its centred funnel, so its reference comes from `models/reference/pilots.stan`, the same model non-centred.
+- The other 9 have no posteriordb reference. For 8 of them, `apin reference build` built one with posteriordb's recipe in CmdStan, but with 20 chains instead of 10: 2000 warmup and 10 000 sampling iterations each, thin 10, adapt delta 0.95. It refuses a result with a divergence or an R-hat of 1.01 or more. A model can name an equivalent reparameterisation to sample from instead (`reference.stan` in the manifest). pilots does this: NUTS diverges on its centred funnel, so its reference comes from `models/reference/pilots.stan`, the same model non-centred.
 - kronecker_gp has no reference. Its build did not finish in 1 hour 50 minutes on a loaded machine. It is not in the benchmark grid and is not scored.
 
 `models/manifest.json` records for each model whether its reference came from posteriordb or was built here, and `apin list` shows it. A local reference stores its CmdStan version, settings and checks in its `meta`; the version is the one named in the chain CSVs it was summarised from. A rebuild reuses the CSVs in `build/reference/<model>` only when every one is complete and its header names the requested settings and the version of the CmdStan it is given; otherwise it samples again.
@@ -155,7 +155,6 @@ runs/<label>/<model>/rep<r>/
     chain_<c>.csv   one file per chain, c = 0..chains-1
     run.json        the request, the sampler identity and the timing
     DONE | FAILED   marker
-    ess.json        score cache, written by apin score
     gate.json       correctness verdict, written by apin score
     spec.json, evaluations.json, submission.log   logdensity adapter only
 ```
@@ -178,7 +177,7 @@ runs/<label>/<model>/rep<r>/
 | `timing.evaluations` | every density and gradient evaluation, when the harness counts them itself (logdensity), else null |
 | `timing.divergences` | summed over chains, or null when the sampler does not report them |
 | `timing.uncounted` | why the counts above leave out some evaluations, or empty when they are complete |
-| `timing.extra` | anything adapter-specific; `density_evals` and `gradient_evals` when the harness counts them |
+| `timing.extra` | anything adapter-specific; `density_evals`, `gradient_evals`, `max_evaluations` and `max_seconds` when the harness counts them |
 
 Use null for an unknown value. The old runners wrote -1, and one aggregation step treated it as a count.
 
@@ -191,7 +190,7 @@ The old campaign lost the most time to these. They apply to any compiled upstrea
 - Shared state across threads. A library that evaluates a model may not be thread-safe. A BridgeStan model built without `STAN_THREADS=true` corrupts memory when several threads call it.
 - One random stream per object. Each chain needs its own generator, and each distribution object must draw from one generator only. Sharing a distribution object between streams makes results depend on thread timing.
 - Argument lists. Pass a command as a list of separate tokens (`["method=sample", "num_warmup=1000"]`), never as one string with spaces.
-- Ragged output. A chain can stop early or write a partial last line. Cut all chains to the shortest complete length before scoring (`apin score` does this).
+- Ragged output. A chain can stop early or write a partial last line. `apin score` calls such a rep wrong, since its draws fall short of the budget; rerun it.
 - Large output in git. `runs/`, `build/` and `.cache/` are in `.gitignore`. Add files by name, never with `git add -A`. The old repository once committed 44 GB of run output.
 - Load from other work. Another process on the machine changes wall times by 10 to 25 percent. Compare arms that ran under the same load, or use `ess_per_s` and `ess_per_eval`, which depend less on it.
 

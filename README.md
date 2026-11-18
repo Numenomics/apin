@@ -10,7 +10,7 @@ BENCH.md turns the same pieces into a benchmark. A sampler written in Python get
 |---|---|
 | `harness/` | The runner and the scorer. `sampler.py` is the interface; `adapters/` has one file per sampler (cmdstan, pathfinder, walnutpie, nutpie, logdensity). `gate.py` is the correctness gate, `reference.py` reads and builds the reference posteriors, `logdensity.py` is the seam a Python sampler runs behind, and `stan_library.py` builds BridgeStan libraries. |
 | `models/` | The 21 core models and `manifest.json` (posteriordb name, family, data file, shipped or fetched, reference source, benchmark split). |
-| `models/reference/` | One reference posterior per model, as summary statistics (`<model>.json`), and the reparameterised programs some references are built from. |
+| `models/reference/` | One reference posterior per model, as summary statistics (`<model>.json`), each half's estimates in `halves/<model>.json`, and the reparameterised programs some references are built from. |
 | `examples/samplers/` | Two submissions for the logdensity adapter: a working HMC and a sampler that is wrong on purpose. |
 | `data/` | The small data files apin ships; `SOURCES.md` says where each data set comes from. |
 | `upstream/` | One submodule per upstream at `upstream/<name>/`, its build notes in `upstream/<name>.md`, and the ledger `upstream/STATUS.md`. |
@@ -53,17 +53,19 @@ uv run apin run --sampler cmdstan --models hierarchical --reps 3 --label patched
 uv run apin score --models hierarchical --reps 3 --baseline stock
 ```
 
-`--models` takes `all`, a family name, `public`, `held-out` or a comma list. Runs go to `runs/<label>/`, scores to `scores/`; both are ignored by git. A rerun skips the reps that finished. Adapter options go through `--opt key=value`; each adapter documents its own at the top of its file. `--base-seed` changes the seeds of every rep. PROTOCOL.md says which budget, seeds and cost column to use.
+`--models` takes `all`, a family name, `public`, `held-out` or a comma list. Runs go to `runs/<label>/`, scores to `scores/`; both are ignored by git. A rerun skips the reps that finished with the same seed, sampler identity and budget, and runs the others again. Adapter options go through `--opt key=value`; each adapter documents its own at the top of its file. `--base-seed` changes the seeds of every rep. PROTOCOL.md says which budget, seeds and cost column to use.
 
-`apin score` scores the grid that `--models` and `--reps` declare, so pass it the same values as `apin run`. A rep the grid declares and the label lacks is wrong. It gates every rep against its reference: right, wrong or unproven (BENCH.md, rule 1). It writes `per_run.csv`, `per_model.csv`, `ranking.csv` and `table.md`. With `--baseline` the ranking has the speed against that label.
+`apin score` scores the grid that `--models` and `--reps` declare, so pass it the same values as `apin run`. A rep the grid declares and the label lacks is wrong, and so is a rep whose `run.json` names another model, rep, seed, base seed or budget. It gates every rep against its reference: right, wrong or unproven (BENCH.md, rule 1). It writes `per_run.csv`, `per_model.csv`, `ranking.csv` and `table.md`. With `--baseline` the ranking has the speed against that label.
 
 Run a Python sampler through the log-density seam, and score it against CmdStan:
 
 ```bash
 uv run apin run --sampler logdensity --label hmc --opt sampler=examples/samplers/hmc.py --models public
 uv run apin run --sampler cmdstan --label cmdstan --models public
-uv run apin score --models public --baseline cmdstan
+uv run apin score --models public --baseline cmdstan --submission hmc=examples/samplers/hmc.py
 ```
+
+`--submission` makes the score check that every rep of `hmc` recorded that file's sha256.
 
 The first logdensity run of each model builds a BridgeStan library, one to two minutes per model.
 
