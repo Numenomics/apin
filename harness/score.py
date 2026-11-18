@@ -98,13 +98,19 @@ def chain_draws(rep_dir: Path, names: list[str] | None = None, csvs: list | None
             for c in names if all(c in f.columns for f in csvs)}
 
 
+# The sha256 of the code a verdict comes from: the gate with its constants, the ESS and R-hat, the
+# reference's functions, the CSV reader and this module. Any edit to them misses every cached
+# verdict, so no version number has to be bumped by hand.
+GATE_SOURCE = hashlib.sha256(b"".join(Path(m.__file__).read_bytes()
+                                      for m in (gate, gate.ess, reference, cmdstan))
+                             + Path(__file__).read_bytes()).hexdigest()
+
+
 def _key(entry: Entry, reps: int) -> dict:
     """What a cached verdict depends on besides the draws."""
-    consts = {k: getattr(gate, k) for k in ("TOLERANCE", "ALPHA_WRONG", "ALPHA_RIGHT", "RHAT_MAX", "MIN_ESS",
-                                            "EXACT", "COPY_DISTANCE", "COPY_FRACTION", "COPY_SERIES", "SPLIT_Z")}
     halves = entry.ref.halves_json() if entry.ref.halves else ""
     return {"reps": reps, "reference": hashlib.sha256((entry.ref.to_json() + halves).encode()).hexdigest(),
-            "gate": consts}
+            "gate": GATE_SOURCE}
 
 
 def read_rep(rep_dir: Path, chains: int, draws: int, names: list[str] | None = None) -> tuple[list, dict[str, str]]:
@@ -133,7 +139,7 @@ def verdict(rep_dir: Path, entry: Entry, reps: int) -> gate.Verdict:
     harness from the constrained draws; a column of that name written by the sampler is ignored.
     A rep whose files fall short of the budget is wrong; that check runs on every call. The cache
     holds only for the chain files it was computed from (their sha256, of the bytes the gate
-    parses); an unreadable cache is recomputed."""
+    parses) and for the gate's code (GATE_SOURCE); an unreadable cache is recomputed."""
     ref = entry.ref
     names = list(ref.names) + list(ref.constants)
     try:

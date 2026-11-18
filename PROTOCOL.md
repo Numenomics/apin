@@ -75,7 +75,7 @@ Before the statistical tests, a rep is wrong for:
 - a reference constant the run does not reproduce to 1e-6;
 - a function whose reference value is exact and which the run misses by more than 1e-6, when the halves of the reference agree on it. Where they disagree, the reference saw something one half did not, and the miss makes the rep unproven instead.
 
-The verdict is cached in `gate.json` next to the rep. It is recomputed when the rep, the reference, the number of reps or a gate constant changes.
+The verdict is cached in `gate.json` next to the rep. It is recomputed when the rep's chain files, the reference, the number of reps or the code the verdict comes from changes. The key holds a sha256 of that code (`gate.py`, `ess.py`, `reference.py`, `cmdstan.py` and `score.py`), so a cache written by an older gate is never reused.
 
 ## Deviation from the old campaign
 

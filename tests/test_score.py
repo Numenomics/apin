@@ -333,6 +333,25 @@ def test_the_score_can_check_the_submission_digest(tmp_path, grid):
     assert all(r["status"] == "wrong" and "digest" in r["reason"] for r in out["per_run"])
 
 
+def test_a_verdict_cached_by_another_gate_is_recomputed(tmp_path, grid, monkeypatch):
+    """U1 remainder: a gate.json written before 42417d4 kept its `wrong: exact` for a run the new
+    gate calls unproven, because the key named the gate's constants and not its code. A cache
+    whose key lacks the gate's source digest, or names another, is a miss."""
+    d = write_rep(tmp_path, "x", "m1", 0, grid)
+    write_rep(tmp_path, "x", "m1", 1, grid)
+    assert _reasons(tmp_path, grid)[("m1", 0)][0] == "right"
+    cache = json.loads((d / "gate.json").read_text())
+    old = {k: cache["key"][k] for k in ("reps", "reference", "chains")}
+    old["gate"] = {k: getattr(gate, k) for k in ("TOLERANCE", "ALPHA_WRONG", "ALPHA_RIGHT", "RHAT_MAX", "MIN_ESS",
+                                                 "EXACT", "COPY_DISTANCE", "COPY_FRACTION", "COPY_SERIES", "SPLIT_Z")}
+    stale = {**cache["verdict"], "status": "wrong", "reason": "exact"}
+    for key in (old, cache["key"]):
+        (d / "gate.json").write_text(json.dumps({"key": key, "verdict": stale}))
+        if key is cache["key"]:
+            monkeypatch.setattr(score, "GATE_SOURCE", "another gate")
+        assert _reasons(tmp_path, grid)[("m1", 0)][0] == "right"
+
+
 def test_the_cache_key_hashes_the_bytes_the_gate_read(tmp_path, monkeypatch):
     """U4: the chain files were parsed, then hashed in a second read. Files replaced between the
     two reads left a cache whose key named the new files and whose verdict was on the old ones,
