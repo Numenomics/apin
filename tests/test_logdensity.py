@@ -206,3 +206,127 @@ def _over_budget_but_caught(problem, budget, rng):
 def test_execute_rejects(fn, error, match):
     with pytest.raises(error, match=match):
         logdensity.execute(FakeModel(), fn, Budget(2, 4, 5, 60), seed=1)
+
+
+# The second review: S5, S8, S9 and S11.
+
+
+def test_the_callbacks_expose_no_counter_or_model():
+    """S5: problem.log_density was a bound method, so __self__ handed the submission the Counter
+    and through it the model, the provenance record and the totals."""
+    seen = {}
+
+    def peek(problem, budget, rng):
+        for name in ("log_density", "log_density_gradient"):
+            f = getattr(problem, name)
+            seen[name] = [a for a in ("__self__", "model", "counter", "budget", "seen") if hasattr(f, a)]
+        return _stay_put(problem, budget, rng)
+
+    logdensity.execute(FakeModel(), peek, Budget(2, 4, 10, 60), seed=1)
+    assert seen == {"log_density": [], "log_density_gradient": []}
+
+
+def test_a_submission_cannot_change_the_limits_or_the_shape():
+    """S5: the same Budget object set the counter's limits and the expected shape; a frozen
+    dataclass can still be changed with object.__setattr__."""
+
+    def loosen(problem, budget, rng):
+        object.__setattr__(budget, "max_evaluations", 10**9)
+        object.__setattr__(budget, "draws", 1)
+        for _ in range(20):
+            problem.log_density(problem.initial_points[0])
+        return np.repeat(problem.initial_points[:, None, :], 1, axis=1)
+
+    with pytest.raises(BudgetExceeded):
+        logdensity.execute(FakeModel(), loosen, Budget(2, 4, 10, 60), seed=1)
+
+    def shrink(problem, budget, rng):
+        object.__setattr__(budget, "draws", 1)
+        return _stay_put(problem, budget, rng)
+
+    with pytest.raises(ValueError, match="shape"):
+        logdensity.execute(FakeModel(), shrink, Budget(2, 4, 10, 60), seed=1)
+
+
+class FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_time_after_the_last_evaluation_is_charged(monkeypatch):
+    """S8: the deadline was checked only when an oracle call started, so work after the last
+    call, and the conversion of the return value, were free."""
+    clock = FakeClock()
+    monkeypatch.setattr(logdensity, "_now", clock)
+
+    def think(problem, budget, rng):
+        out = _stay_put(problem, budget, rng)
+        clock.t += 2.0  # two seconds of work after the last evaluation
+        return out
+
+    with pytest.raises(BudgetExceeded, match="s"):
+        logdensity.execute(FakeModel(), think, Budget(2, 4, 10, max_seconds=1.0), seed=1)
+
+    class Lazy:
+        def __init__(self, a):
+            self.a = a
+
+        def __array__(self, dtype=None, copy=None):
+            clock.t += 2.0  # work done when the harness converts the return value
+            return self.a
+
+    with pytest.raises(BudgetExceeded):
+        logdensity.execute(FakeModel(), lambda p, b, r: Lazy(_stay_put(p, b, r)), Budget(2, 4, 10, 1.0), seed=1)
+
+
+def test_loading_the_submission_is_timed(monkeypatch, tmp_path):
+    """S8: module-level work ran before the stopwatch started."""
+    clock = FakeClock()
+    monkeypatch.setattr(logdensity, "_now", clock)
+    real = logdensity.load_submission
+
+    def slow_load(path):
+        clock.t += 2.0
+        return real(path)
+
+    monkeypatch.setattr(logdensity, "load_submission", slow_load)
+    f = tmp_path / "s.py"
+    f.write_text("import numpy as np\n\ndef sample(problem, budget, rng):\n"
+                 "    for x in problem.initial_points:\n        problem.log_density(x)\n"
+                 "    return np.repeat(problem.initial_points[:, None, :], budget.draws, axis=1)\n")
+    with pytest.raises(BudgetExceeded):
+        logdensity.execute(FakeModel(), f, Budget(2, 4, 10, 1.0), seed=1)
+    clock.t = 0.0
+    draws, _, seconds = logdensity.execute(FakeModel(), f, Budget(2, 4, 10, 60.0), seed=1)
+    assert seconds == 2.0  # the fake clock: loading is in the window
+
+
+def test_a_rejected_point_is_charged_but_proves_nothing():
+    """S9: a point the model rejects (-inf) was recorded before the rejection, so it could be
+    returned as a draw."""
+
+    def reject(problem, budget, rng):
+        bad = np.array([6.0, 0.0, 0.0])
+        assert problem.log_density(bad) == -math.inf
+        out = _stay_put(problem, budget, rng)
+        out[0, 0] = bad
+        return out
+
+    with pytest.raises(ValueError, match="never evaluated"):
+        logdensity.execute(FakeModel(), reject, Budget(2, 4, 10, 60), seed=1)
+    c = Counter(FakeModel(), Budget(1, 1, 10, 60))
+    c.log_density(np.array([6.0, 0.0, 0.0]))
+    c.log_density_gradient(np.array([6.0, 0.0, 0.0]))
+    assert c.density + c.gradient == 2
+
+
+def test_a_submission_with_dataclasses_and_future_annotations_loads(tmp_path):
+    """S11: dataclasses look the module up in sys.modules, which was not set."""
+    f = tmp_path / "s.py"
+    f.write_text("from __future__ import annotations\nfrom dataclasses import dataclass\n\n\n@dataclass\n"
+                 "class State:\n    x: int\n\n\ndef sample(problem, budget, rng):\n    return State(1)\n")
+    check_imports(f.read_text())
+    assert callable(logdensity.load_submission(f))

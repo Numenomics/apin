@@ -8,13 +8,21 @@ and returns unconstrained draws of shape (budget.chains, budget.draws, problem.d
 BENCH.md gives the rules; PROTOCOL.md, "The log-density seam", the contract.
 
 The harness, not the submission, counts every call to `log_density` and
-`log_density_gradient`. A call past `budget.max_evaluations`, or after
-`budget.max_seconds`, raises BudgetExceeded, and the run fails even if the
-submission catches it. Every returned draw must be a point the submission
-evaluated (the provenance check). A point the model rejects (Stan raises a domain error)
-has log density -inf and a NaN gradient, which is how Stan's own samplers read
-it; the submission never sees the exception. The harness then maps the draws to the constrained
-space with BridgeStan and writes the chain CSVs that the scorer reads.
+`log_density_gradient`, a call at a rejected point too. A call past
+`budget.max_evaluations` raises BudgetExceeded, and the run fails even if the
+submission catches it. The clock runs from loading the submission to converting
+what it returns; a run longer than `budget.max_seconds` fails, at the next call
+or at the end. Every returned draw must be a point the submission evaluated with
+a finite log density (the provenance check). A point the model rejects (Stan
+raises a domain error) has log density -inf and a NaN gradient, which is how
+Stan's own samplers read it; the submission never sees the exception. The
+harness then maps the draws to the constrained space with BridgeStan and writes
+the chain CSVs that the scorer reads.
+
+The submission gets plain functions and its own copy of the budget; the limits
+the harness enforces are copied before the submission runs. This keeps an honest
+submission from changing them by accident. It does not stop one that sets out to
+(BENCH.md, rule 5).
 
 `run(spec)` does one run in the current process; the logdensity adapter calls
 it in a child process (`python -m harness.logdensity spec.json`) so that a
@@ -63,19 +71,42 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
-class Counter:
-    """Wraps a BridgeStan model's log density and enforces the budget."""
+_now = time.perf_counter  # the harness's clock; tests replace it
 
-    def __init__(self, model, budget: Budget):
-        self.model, self.budget = model, budget
+
+class Counter:
+    """Wraps a BridgeStan model's log density and enforces the budget.
+
+    The limits are copied when the counter is made, so changing the Budget object the submission
+    was handed changes nothing. The submission gets plain functions from callbacks(), not this
+    object. Every call is charged, a rejected one too, but only a point with a finite log density
+    is recorded for the provenance check."""
+
+    def __init__(self, model, budget: Budget, started: float | None = None):
+        self._model = model
         self.dim = model.param_unc_num()
+        self.max_evaluations, self.max_seconds = int(budget.max_evaluations), float(budget.max_seconds)
         self.density = self.gradient = 0
         self.exceeded = ""
-        self.t0 = time.perf_counter()
-        self.seen = array.array("q")  # hash of every point evaluated, in call order, for the provenance check
+        self.t0 = _now() if started is None else started
+        self.seen = array.array("q")  # hash of every point with a finite density, in call order
+
+    def callbacks(self) -> tuple[Callable, Callable]:
+        """(log_density, log_density_gradient) as plain functions, with no attribute that leads
+        back to the counter or the model. Python's introspection (a closure's cells, the garbage
+        collector, the call stack) still does; BENCH.md says what that means."""
+        density, gradient = self.log_density, self.log_density_gradient
+
+        def log_density(theta) -> float:
+            return density(theta)
+
+        def log_density_gradient(theta) -> tuple[float, np.ndarray]:
+            return gradient(theta)
+
+        return log_density, log_density_gradient
 
     def first_call(self, draws: np.ndarray) -> np.ndarray:
-        """For each draw (..., dim), the index of the first call that evaluated it, or -1 if none did."""
+        """For each draw (..., dim), the index of the first finite evaluation of it, or -1 if none."""
         flat = draws.reshape(-1, self.dim)
         hashes = np.fromiter((hash(np.ascontiguousarray(x).tobytes()) for x in flat), dtype=np.int64,
                              count=len(flat))
@@ -90,39 +121,45 @@ class Counter:
     def _charge(self) -> None:
         if self.exceeded:
             raise BudgetExceeded(self.exceeded)
-        if self.density + self.gradient >= self.budget.max_evaluations:
-            self.exceeded = f"more than {self.budget.max_evaluations} evaluations"
-        elif time.perf_counter() - self.t0 > self.budget.max_seconds:
-            self.exceeded = f"more than {self.budget.max_seconds} s"
+        if self.density + self.gradient >= self.max_evaluations:
+            self.exceeded = f"more than {self.max_evaluations} evaluations"
+        elif _now() - self.t0 > self.max_seconds:
+            self.exceeded = f"more than {self.max_seconds} s"
         if self.exceeded:
             raise BudgetExceeded(self.exceeded)
 
     def log_density(self, theta) -> float:
         self._charge()
         self.density += 1
-        x = self._record(theta)
+        x = self._point(theta)
         try:
-            return float(self.model.log_density(x, propto=False, jacobian=True))
+            lp = float(self._model.log_density(x, propto=False, jacobian=True))
         except RuntimeError:  # Stan rejected the point (a domain error): density zero, as Stan's samplers read it
             return -math.inf
+        self._record(x, lp)
+        return lp
 
     def log_density_gradient(self, theta) -> tuple[float, np.ndarray]:
         self._charge()
         self.gradient += 1
-        x = self._record(theta)
+        x = self._point(theta)
         try:
-            lp, grad = self.model.log_density_gradient(x, propto=False, jacobian=True)
+            lp, grad = self._model.log_density_gradient(x, propto=False, jacobian=True)
         except RuntimeError:
             return -math.inf, np.full(self.dim, math.nan)
-        return float(lp), grad
+        lp = float(lp)
+        self._record(x, lp)
+        return lp, np.array(grad, dtype=float)
 
-
-    def _record(self, theta) -> np.ndarray:
-        x = np.ascontiguousarray(theta, dtype=float)
+    def _point(self, theta) -> np.ndarray:
+        x = np.array(theta, dtype=float)  # a copy: the submission cannot change it after the call
         if x.shape != (self.dim,):
             raise ValueError(f"theta must have shape ({self.dim},), got {x.shape}")
-        self.seen.append(hash(x.tobytes()))
         return x
+
+    def _record(self, x: np.ndarray, lp: float) -> None:
+        if math.isfinite(lp):
+            self.seen.append(hash(x.tobytes()))
 
 
 def check_imports(source: str) -> None:
@@ -145,8 +182,10 @@ def check_imports(source: str) -> None:
 def load_submission(path: Path) -> Callable:
     path = Path(path)
     check_imports(path.read_text())
-    spec = importlib.util.spec_from_file_location("apin_submission", path)
+    name = "apin_submission"
+    spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod  # dataclasses and typing look the module up there (S11)
     spec.loader.exec_module(mod)
     fn = getattr(mod, "sample", None)
     if not callable(fn):
@@ -159,25 +198,35 @@ def initial_points(rng: np.random.Generator, chains: int, dim: int) -> np.ndarra
     return rng.uniform(-2.0, 2.0, size=(chains, dim))
 
 
-def execute(model, fn: Callable, budget: Budget, seed: int) -> tuple[np.ndarray, Counter, float]:
-    """Run the submission fn on a model with the BridgeStan methods used here, and check what it returns.
+def execute(model, submission: Path | Callable, budget: Budget, seed: int) -> tuple[np.ndarray, Counter, float]:
+    """Load the submission (a file, or a function), run it on a model with the BridgeStan methods
+    used here, and check what it returns.
 
-    Returns the draws (chains, draws, dim), the counter and the seconds inside fn. Raises BudgetExceeded
-    when the submission went past the budget, ValueError when the draws have the wrong shape or include
-    a point the submission never evaluated.
+    The clock runs from loading the submission (its module-level code) to converting its return
+    value to an array; an overrun at the end fails the run as one during a call does. Returns the
+    draws (chains, draws, dim), the counter and those seconds. Raises BudgetExceeded when the
+    submission went past the budget, ValueError when the draws have the wrong shape or include a
+    point the submission never evaluated with a finite log density.
     """
+    limits = Budget(int(budget.chains), int(budget.draws), int(budget.max_evaluations), float(budget.max_seconds))
     dim = model.param_unc_num()
     seeds = np.random.SeedSequence(seed).spawn(2)
-    counter = Counter(model, budget)
-    problem = Problem(dim, counter.log_density, counter.log_density_gradient,
-                      initial_points(np.random.default_rng(seeds[0]), budget.chains, dim))
-    counter.t0 = t0 = time.perf_counter()
-    draws = fn(problem, budget, np.random.default_rng(seeds[1]))
-    seconds = time.perf_counter() - t0
+    inits = initial_points(np.random.default_rng(seeds[0]), limits.chains, dim)
+    started = _now()
+    fn = load_submission(submission) if isinstance(submission, (str, Path)) else submission
+    counter = Counter(model, limits, started)
+    log_density, log_density_gradient = counter.callbacks()
+    problem = Problem(dim, log_density, log_density_gradient, inits.copy())
+    raw = fn(problem, Budget(*(getattr(limits, f) for f in ("chains", "draws", "max_evaluations", "max_seconds"))),
+             np.random.default_rng(seeds[1]))
+    draws = np.array(raw, dtype=float)
+    seconds = _now() - started
     if counter.exceeded:
         raise BudgetExceeded(f"the submission went past the budget ({counter.exceeded}) and caught the error")
-    draws = np.asarray(draws, dtype=float)
-    want = (budget.chains, budget.draws, dim)
+    if seconds > limits.max_seconds:
+        raise BudgetExceeded(f"the submission took {seconds:.1f} s, more than {limits.max_seconds} s, counted from "
+                             "loading it to converting its return value")
+    want = (limits.chains, limits.draws, dim)
     if draws.shape != want:
         raise ValueError(f"sample() returned shape {draws.shape}, expected {want}")
     check_provenance(counter.first_call(draws))
@@ -217,8 +266,7 @@ def run(spec: dict) -> dict:
     model = bridgestan.StanModel(spec["library"], spec["data"], seed=spec["seed"], capture_stan_prints=True,
                                  warn=False)
     budget = Budget(spec["chains"], spec["draws"], spec["max_evaluations"], spec["max_seconds"])
-    fn = load_submission(Path(spec["submission"]))
-    draws, counter, seconds = execute(model, fn, budget, spec["seed"])
+    draws, counter, seconds = execute(model, Path(spec["submission"]), budget, spec["seed"])
     t1 = time.perf_counter()
     write_constrained(model, draws, Path(spec["out_dir"]), spec["seed"])
     return {"seconds": seconds, "density_evals": counter.density, "gradient_evals": counter.gradient,
