@@ -1,0 +1,25 @@
+[submodule "upstream/cmdstan"]
+	path = upstream/cmdstan
+	url = https://github.com/sims1253/cmdstan.git
+[submodule "upstream/stan"]
+	path = upstream/stan
+	url = https://github.com/sims1253/stan.git
+[submodule "upstream/math"]
+	path = upstream/math
+	url = https://github.com/sims1253/math.git
+[submodule "upstream/stanc3"]
+	path = upstream/stanc3
+	url = https://github.com/sims1253/stanc3.git
+	branch = gathered-pcm-emit
+[submodule "upstream/bridgestan"]
+	path = upstream/bridgestan
+	url = https://github.com/sims1253/bridgestan.git
+	branch = isa-option
+[submodule "upstream/walnutpie"]
+	path = upstream/walnutpie
+	url = https://github.com/sims1253/walnutpie.git
+	branch = exp/safe-adapt-defaults
+[submodule "upstream/posteriordb"]
+	path = upstream/posteriordb
+	url = https://github.com/stan-dev/posteriordb.git
+	branch = master
