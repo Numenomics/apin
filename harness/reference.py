@@ -58,8 +58,9 @@ LP = "lp__"
 
 # Settings of the local build: posteriordb's own recipe for Stan references
 # (doc/REFERENCE_POSTERIOR_DEFINITION.md: 10 chains, thin 10, 10 000 draws, no
-# divergences, R-hat below 1.01), with 2000 instead of 10 000 warmup iterations.
-LOCAL = {"chains": 10, "warmup": 2000, "samples": 10000, "thin": 10, "adapt_delta": 0.95, "seed": 4711}
+# divergences, R-hat below 1.01), with 2000 instead of 10 000 warmup iterations and
+# 20 chains instead of 10, so the half that summarises the projections has 10 chains.
+LOCAL = {"chains": 20, "warmup": 2000, "samples": 10000, "thin": 10, "adapt_delta": 0.95, "seed": 4711}
 
 # Parameters that a posteriordb reference leaves out but BridgeStan needs to compute lp__,
 # derived from the ones it has.

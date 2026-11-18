@@ -98,7 +98,18 @@ def test_shipped_references_are_small_and_match_the_manifest():
 def test_a_model_can_raise_its_reference_settings_in_the_manifest():
     """A local reference is built with LOCAL, then the model's manifest settings, then the
     command line; so a rebuild from the repository repeats the reference that is shipped."""
-    m = models.load()["radon_variable_intercept_slope_noncentered"]
+    import dataclasses
+    m = dataclasses.replace(models.load()["blr"], reference_settings={"samples": 20000, "adapt_delta": 0.9})
     s = reference.settings_for(m, {"adapt_delta": 0.99})
-    assert s == {**reference.LOCAL, "chains": 20, "adapt_delta": 0.99}
+    assert s == {**reference.LOCAL, "samples": 20000, "adapt_delta": 0.99}
     assert reference.settings_for(models.load()["blr"]) == reference.LOCAL
+
+
+def test_local_references_measure_projections_on_ten_chains():
+    """The projections are chosen on half the chains and summarised on the other half. With 10
+    chains that half was 5, and its error put two models' projections 3 to 5 MCSE away from
+    independent runs, so a correct sampler could not be proven right (BENCH.md, rule 3)."""
+    assert reference.LOCAL["chains"] == 20
+    for m in models.load().values():
+        if m.reference == "local" and reference.path(m.name).is_file():
+            assert reference.load(m.name).meta["settings"]["chains"] >= 20, m.name

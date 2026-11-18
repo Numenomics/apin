@@ -141,8 +141,7 @@
     "reference": {
       "source": "local",
       "posteriordb": null,
-      "settings": {"chains": 20},
-      "note": "posteriordb has no reference posterior; built with `apin reference build`. 20 chains: with 10, the 5 chains that measure the projections put proj.11 about 5 MCSE away from two independent runs (BENCH.md)"
+      "note": "posteriordb has no reference posterior; built with `apin reference build`"
     },
     "budget": {
       "draws": 5000
@@ -243,7 +242,7 @@
       "posteriordb": "mcycle_gp-accel_gp"
     },
     "budget": {
-      "draws": 5000
+      "draws": 20000
     }
   },
   {
