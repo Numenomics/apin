@@ -2,7 +2,7 @@
 
 apin is a workbench for measuring changes to MCMC samplers and the libraries under them. It pins the upstream projects as git submodules, keeps the owner's patches on fork branches, and runs any sampler over a fixed set of 21 posteriordb models with one protocol, so that a patched build and its baseline can be compared in effective samples per second. Every run is checked against a reference posterior, so a sampler that is fast and wrong is marked wrong. It also holds the records of a 2026 campaign on Stan's wall time and a ledger of every patch and where it stands upstream.
 
-BENCH.md turns the same pieces into a benchmark. A sampler written in Python gets a log density and its gradient, and is scored on ESS per evaluation against Stan's NUTS.
+BENCH.md turns the same pieces into a benchmark. A sampler written in Python gets a log density and its gradient, A model counts only when the draws prove the posterior right; ties are broken by ESS per evaluation against Stan's NUTS.
 
 ## Layout
 
@@ -48,26 +48,26 @@ None of the submodules needs its own nested submodules for apin, except as the b
 
 ```bash
 export CMDSTAN=/path/to/cmdstan        # or pass --cmdstan
-uv run apin run --sampler cmdstan --models all --reps 3 --label stock
+uv run apin run --sampler cmdstan --models hierarchical --reps 3 --label stock
 uv run apin run --sampler cmdstan --models hierarchical --reps 3 --label patched --cmdstan /path/to/patched-cmdstan
-uv run apin score --baseline stock
+uv run apin score --models hierarchical --reps 3 --baseline stock
 ```
 
 `--models` takes `all`, a family name, `public`, `held-out` or a comma list. Runs go to `runs/<label>/`, scores to `scores/`; both are ignored by git. A rerun skips the reps that finished. Adapter options go through `--opt key=value`; each adapter documents its own at the top of its file. `--base-seed` changes the seeds of every rep. PROTOCOL.md says which budget, seeds and cost column to use.
 
-`apin score` first gates every rep against its reference. It writes `table.md`, with one row per model and one column per label. With `--baseline` it also writes `bench.csv`, the benchmark score.
+`apin score` scores the grid that `--models` and `--reps` declare, so pass it the same values as `apin run`. A rep the grid declares and the label lacks is wrong. It gates every rep against its reference: right, wrong or unproven (BENCH.md, rule 1). It writes `per_run.csv`, `per_model.csv`, `ranking.csv` and `table.md`. With `--baseline` the ranking has the speed against that label.
 
 Run a Python sampler through the log-density seam, and score it against CmdStan:
 
 ```bash
 uv run apin run --sampler logdensity --label hmc --opt sampler=examples/samplers/hmc.py --models public
 uv run apin run --sampler cmdstan --label cmdstan --models public
-uv run apin score --baseline cmdstan
+uv run apin score --models public --baseline cmdstan
 ```
 
 The first logdensity run of each model builds a BridgeStan library, one to two minutes per model.
 
-posteriordb has no reference for 9 of the models. apin built 8 of them with CmdStan and posteriordb's recipe, and keeps them in git. kronecker_gp has none yet. To rebuild one:
+posteriordb has no reference for 9 of the models. apin built 8 of them with CmdStan and posteriordb's recipe, and keeps them in git. kronecker_gp has none, so it is not in the benchmark grid. To rebuild one:
 
 ```bash
 uv run apin reference build --models pilots   # needs CMDSTAN; minutes to an hour per model
@@ -82,16 +82,13 @@ CMDSTAN=/path/to/cmdstan uv run pytest -m slow  # end to end on real models
 
 The slow tests run CmdStan on a few models, and the two example samplers on two models through BridgeStan. The first run builds a BridgeStan library per model, one to two minutes each. The CmdStan test is skipped when `CMDSTAN` is not set.
 
-```
-```
-
 A smoke run of the command line, about a minute on first build:
 
 ```bash
 export CMDSTAN=/path/to/cmdstan
 uv run apin run --sampler cmdstan --models eight_schools_noncentered,blr --reps 1 --label smoke-cmdstan --runs /tmp/apin-smoke/runs
 uv run apin run --sampler pathfinder --models eight_schools_noncentered,blr --reps 1 --label smoke-pf --runs /tmp/apin-smoke/runs
-uv run apin score --runs /tmp/apin-smoke/runs --out /tmp/apin-smoke/scores --baseline smoke-cmdstan
+uv run apin score --runs /tmp/apin-smoke/runs --out /tmp/apin-smoke/scores --models eight_schools_noncentered,blr --reps 1 --baseline smoke-cmdstan
 ```
 
 ## Run against a patched build

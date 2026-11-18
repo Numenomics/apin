@@ -8,72 +8,74 @@ The core set is the 21 posteriordb models in `models/manifest.json`. Each has a 
 
 Each cell is one sampler, one model and one rep:
 
-- 4 chains, 1000 warmup iterations, 1000 draws per chain. CmdStan saves its warmup draws so that their gradient count is known. `read_csv` keeps them apart, and they are never scored.
-- 3 reps. Rep r uses seed 20260819 + 1000·r. Chains inside a rep get the chain id or seed offset that their sampler uses (CmdStan `id=c+1`; walnutpie `seed+c`).
+- 4 chains, 1000 warmup iterations, and the draws per chain in the model's `budget` in `models/manifest.json`: 5000 for most models, 10 000 for lsat_model. These budgets are what stock NUTS needs to be proven right at the gate's tolerance (BENCH.md, "The budget"). `--chains`, `--warmup` and `--draws` override them for experiments, but the scorer marks a rep with another budget wrong. CmdStan saves its warmup draws so that their gradient count is known. `read_csv` keeps them apart, and they are never scored.
+- 3 reps for development, 5 for a benchmark result. Rep r uses seed BASE + 1000·r, with BASE 20260819 unless `--base-seed` says otherwise. Chains inside a rep get the chain id or seed offset that their sampler uses (CmdStan `id=c+1`; walnutpie `seed+c`).
 - At most 4 cores in use for the whole grid. The old campaign ran on a 12-core Ryzen 9 5900X and kept to 4 cores so that memory bandwidth and turbo states were comparable between arms. A rep's 4 chains run in parallel. Run one grid at a time.
 
-A rep that finishes gets a `DONE` marker; a rep that raises gets `FAILED` with the traceback. A rerun skips reps with `DONE`, so an interrupted grid resumes where it stopped.
+A rep that finishes gets a `DONE` marker; a rep that raises gets `FAILED` with the traceback. A rerun reuses a rep with `DONE` only when its seed, base seed, sampler identity and budget match the new request. Otherwise it deletes the rep and runs it again, so an interrupted grid resumes where it stopped and a changed grid never keeps old rows.
 
 ## The score
 
-`apin score` computes, for every rep, the rank-normalized bulk and tail ESS and split R-hat of every variable (Vehtari et al. 2021; `harness/ess.py` reproduces the R package posterior 1.7.0 to 10 significant digits). Columns whose names end in `__` are sampler diagnostics and are not scored. Chains of unequal length are cut to the shortest before scoring.
+`apin score --models M --reps R` scores the grid of the models in M that have a reference, with R reps each. It walks that grid, not the run directories: a rep the grid declares and a label lacks is wrong. It computes, for every rep, the rank-normalized bulk and tail ESS and split R-hat of every series the gate checks (Vehtari et al. 2021; `harness/ess.py` reproduces the R package posterior 1.7.0 to 10 significant digits). Columns whose names end in `__` are sampler diagnostics and are not scored; lp__ is recomputed by the harness. Chains of unequal length are cut to the shortest.
 
-Before any cost, every rep passes through the correctness gate (next section). A rep that fails it is "wrong" and gets no speed numbers. A model is wrong for a label when more than half of its reps are wrong or failed. The score table then shows "wrong", the worst variable and moment, and that moment's b² in place of the speed.
-
-The quality number of a rep is `ess_bulk_min`, the smallest bulk ESS over all variables. It is a pessimistic number with a large variance between reps, so the per-model value is the median over the reps that passed and the summary over models is a geometric mean of those medians. Apart from the gate, the summary counts the models whose median R-hat is above 1.01.
-
-Cost is reported four ways:
+Every rep gets a verdict from the correctness gate (next section): right, wrong or unproven. The credited ESS of a rep is the smallest bulk or tail ESS over every series. Cost is reported two ways, and only for a rep that is right:
 
 | column | meaning |
 |---|---|
-| `ess_per_s_wall` | `ess_bulk_min` divided by the wall time of the rep, chains in parallel. This is what a user waits for. |
-| `ess_per_s_chain` | `ess_bulk_min` divided by the sum of each chain's own sampler time (warmup plus sampling). This removes the effect of parallel dispatch and machine load. W-109 and W-133 used this convention ("stanza sum"). |
-| `ess_per_grad` | `ess_bulk_min` divided by the gradient evaluations in the sampling phase. It does not depend on the machine. |
-| `ess_per_eval` | min(`ess_bulk_min`, `ess_tail_min`) divided by every density and gradient evaluation, warmup included. It does not depend on the machine and does not let a sampler hide work in warmup. BENCH.md scores this one. It needs the warmup count: CmdStan's `n_leapfrog__` over the saved warmup rows, or the logdensity adapter's own count. |
+| `ess_per_eval` | credited ESS divided by every density and gradient evaluation, warmup included. It does not depend on the machine and does not let a sampler hide work in warmup. It is the primary speed. It needs complete counts: CmdStan's `n_leapfrog__` over every saved warmup and sampling row with thin = 1, or the logdensity adapter's own count. An adapter that cannot count all its evaluations says why in `timing.uncounted`, and the rep has no `ess_per_eval`. |
+| `ess_per_s` | credited ESS divided by the sum of each chain's own time (warmup plus sampling). This removes the effect of parallel dispatch and machine load. W-109 and W-133 used this convention ("stanza sum"). It is the secondary speed. |
 
-Never compare numbers that use different conventions. A report states which one it uses. With `--baseline LABEL`, `apin score` writes per-model ratios against that label and prints their geometric mean.
+Never compare numbers that use different conventions. A report states which one it uses.
 
-`apin score` also writes `table.md`: one row per model, one column per label, with ESS per evaluation and ESS per second of chain time, or the gate's reason for "wrong". With `--baseline` it writes `bench.csv`, the benchmark score of BENCH.md.
+BENCH.md, "The score", defines the ranking: models right first, then the geometric mean of the speed ratio to the baseline over the models where both are right, with a bootstrap interval that resamples both. `apin score` writes `per_run.csv`, `per_model.csv`, `ranking.csv` and `table.md`.
 
 ## The correctness gate
 
-ESS measures how fast a sampler forgets where it was. It says nothing about whether it converges to the right distribution. A sampler that is fast and wrong would win on ESS/s. So `apin score` compares each rep with a reference posterior and fails it when the two disagree. The code is `harness/gate.py`; the references are `models/reference/<model>.json`.
+ESS measures how fast a sampler forgets where it was. It says nothing about whether it converges to the right distribution. A sampler that is fast and wrong would win on ESS per evaluation. So the gate compares each rep with a reference posterior, and a rep earns speed credit only when it is shown to agree. The code is `harness/gate.py`; the references are `models/reference/<model>.json`. BENCH.md, rules 1 to 3, states what the gate decides. This section gives the statistics.
 
 ### References
 
-A reference holds summary statistics only, never draws: for every variable of the parameters block, the mean and sd of x, of x², and of (x − mean)², and the Monte Carlo standard error (MCSE) of each mean. The largest, bym2_offset_only, is 516 KB; the limit is 1 MB.
+A reference holds summary statistics only, never draws (`harness/reference.py`). It has a set of series: every standardised variable, projections on eigenvectors of the reference correlation, and lp__. For each series it stores four functions (the mean, the mean of the square and the fractions below the reference's 5 % and 95 % quantiles), each with its expected value, its SD and its Monte Carlo standard error (MCSE). It also stores the constants of the model and the correlation of the functions, which the calibration test needs. The largest file, bym2_offset_only, is 877 KB; the limit is 1 MB.
 
 - 12 models use posteriordb's reference draws (`posterior_database/reference_posteriors/`). posteriordb builds them with Stan: 10 chains, thin 10, 10 000 draws, no divergences and R-hat below 1.01 (`doc/REFERENCE_POSTERIOR_DEFINITION.md` in posteriordb). eight_schools_centered uses the reference that posteriordb lists for it, the one of the non-centred model, which has the same posterior.
 - The other 9 have no posteriordb reference. For 8 of them, `apin reference build` built one with posteriordb's recipe in CmdStan: 10 chains, 2000 warmup and 10 000 sampling iterations each, thin 10, adapt delta 0.95. It refuses a result with a divergence or an R-hat of 1.01 or more. A model can name an equivalent reparameterisation to sample from instead (`reference.stan` in the manifest). pilots does this: NUTS diverges on its centred funnel, so its reference comes from `models/reference/pilots.stan`, the same model non-centred.
-- kronecker_gp has no reference yet. Its build did not finish in 1 hour 50 minutes on a loaded machine. Its reps get the verdict "no reference": they are scored for speed, and the benchmark leaves the model out.
+- kronecker_gp has no reference. Its build did not finish in 1 hour 50 minutes on a loaded machine. It is not in the benchmark grid and is not scored.
 
 `models/manifest.json` records for each model whether its reference came from posteriordb or was built here, and `apin list` shows it. A local reference stores its CmdStan version, settings and checks in its `meta`.
 
 ### The test
 
-For every reference variable x and each of the three moments f ∈ {x, x², (x − μ_ref)²}, the gate computes the standardised squared bias
+For each checked quantity j (a function of a series), with e_j the error of the run mean in reference SDs of the function and s_j its standard error (run and reference MCSE combined), the gate calls the rep
 
-    b²(f) = (mean_run(f) − E_ref[f])² / Var_ref[f].
+- wrong when some |e_j| − z_w·s_j exceeds the tolerance 0.1, z_w the Bonferroni value for all quantities of all reps at 1 % per model;
+- right when every |e_j| + 1.645·s_j is below 0.1;
+- unproven otherwise.
 
-This is the statistic of Robnik, Cohn-Gordon and Seljak (2025, "Metropolis Adjusted Microcanonical Hamiltonian Monte Carlo", arXiv:2503.01707, section 7, eq. 15), the paper behind BlackJAX's MAMS sampler, who also take the worst parameter. They use x²; apin adds x for location errors and (x − μ)² for scale errors when |μ| is much larger than σ, where x² is dominated by the mean. The statistic is unit-free: b² = 0.01 means the expectation is off by 0.1 posterior standard deviations, the error of about 100 independent draws. The gate's threshold is b² = 0.01 for the worst (variable, moment) pair.
+Both tests trust s_j. So they run only on chains that look mixed: split R-hat below 1.01 and bulk and tail ESS of at least 400 on every series, and no two chains near-identical. Chains that fail this are unproven, not wrong. With strong autocorrelation and few effective draws, the ESS estimate is itself noisy and understates the MCSE. The old gate called such correct runs wrong.
 
-Both expectations in b² are estimates. A correct sampler with few effective draws has b² of order 1/ESS, which can exceed 0.01 by chance. With the naive rule (fail when b² > 0.01), 182 of 300 simulated correct runs with 400 to 2000 draws fail. So the gate tests a lower confidence bound instead. Let s = √(MCSE_run² + MCSE_ref²), where MCSE_run comes from the run's ESS for the mean of f (posterior's `mcse_mean`). With z the two-sided Bonferroni critical value for all m = 3 × (number of variables) tests at family-wise level α = 0.01,
+The rates, from `harness/gate_rates.py` (`results/tables/gate_rates.md`):
 
-    b²_lower = max(0, |mean_run(f) − E_ref[f]| − z·s)² / Var_ref[f],   and the rep fails when b²_lower > 0.01.
+- a correct sampler whose chains have mixed: called wrong in 0 of 1100 runs (design: at most 1 % per model); right in 90 % of reps at an ESS of 4000 per variable and in all reps at 20 000;
+- a sampler with an error of exactly the tolerance: called right in 0 to 4 % of runs (design: at most 5 % per rep);
+- chains that have not mixed (AR(1) at ρ = 0.99 or 0.999 with too few draws): unproven in every run, correct or not.
 
-A correct sampler fails only if some difference exceeds z·s, so its false-fail rate is at most α = 1 % per run, whatever its ESS. `tests/test_gate.py::test_false_fail_rate_is_at_most_alpha` checks this on 300 simulated correct runs (AR(1) chains with autocorrelation 0, 0.5 and 0.9, five variables with means up to 10 standard deviations from zero, against a reference estimated from 10 000 draws). None of the 300 fails; the test allows at most 9. Bonferroni and the maximum over moments make the rate lower than 1 % in practice.
+BENCH.md, "Rule 1: the gate", has the table.
 
-The price is power that depends on ESS. At an ESS of 400 per moment and 15 tests, the gate catches a bias of about 0.27 standard deviations and up; it approaches 0.1 standard deviations as ESS grows. This is the right way round for a speed benchmark: a sampler that claims a high ESS has a small MCSE and is checked tightly.
+The power to call a bias wrong grows with ESS. A rep is wrong once |e| exceeds 0.1 + z_w·s. At an ESS of 400 per quantity s is about 0.05 (√(1/400) plus the reference's share), and z_w is about 4 for a model with 100 quantities and 5 reps, so the gate calls a bias wrong from about 0.3 SD. At an ESS of 4000, s is about 0.02 and the gate calls a bias wrong from about 0.18 SD. Between the two bounds the rep is unproven, which earns nothing. A rep earns credit only when its error is shown to be below 0.1.
+
+The model's verdict is the worst of its reps (wrong, then unproven), and a model whose reps are all right must also pass the calibration test of BENCH.md, rule 2: the realized errors over all quantities and reps must agree with the claimed MCSEs at p ≥ 0.001.
 
 ### The other checks
 
-Before the bias test, the gate fails a rep for:
+Before the statistical tests, a rep is wrong for:
 
-- a non-finite draw in any variable;
+- a non-finite draw, or a non-finite lp__ (a draw outside the support, or one the model rejects);
 - a reference variable the run did not write;
-- split R-hat (Vehtari et al. 2021) above 1.05 on any variable. Chains that disagree make the MCSE unreliable. A stuck chain inflates its MCSE so much that the bias test alone would pass it; R-hat catches it. The threshold is looser than the usual 1.01 because 4 chains of 1000 draws often exceed 1.01 on hard models without being wrong. The summary still counts models above 1.01.
+- a variable that never moves;
+- a reference constant the run does not reproduce to 1e-6;
+- a function whose reference value is exact and which the run misses by more than 1e-6.
 
-The verdict is cached in `gate.json` next to the rep. It is recomputed when the rep or the reference changes.
+The verdict is cached in `gate.json` next to the rep. It is recomputed when the rep, the reference, the number of reps or a gate constant changes.
 
 ## Deviation from the old campaign
 
@@ -121,14 +123,14 @@ The contract:
 
 - The density is on the unconstrained space, with the Jacobian of the constraining transform and all constants (BridgeStan with `jacobian=True, propto=False`). theta must be a float array of shape (dim,).
 - A point the model rejects (Stan raises a domain error) has log density −inf and a NaN gradient. This is how Stan's own samplers treat it. The submission never sees the exception.
-- The harness counts every call. Density and gradient calls count the same, one evaluation each, against one limit. The call that would exceed `max_evaluations`, and any call after `max_seconds`, raises `BudgetExceeded`. From then on every call raises, and the run fails even if the submission catches the error.
+- The harness counts every call. Density and gradient calls count the same, one evaluation each, against one limit. The call that would exceed `max_evaluations`, and any call after `max_seconds`, raises `BudgetExceeded`. From then on every call raises, and the run fails even if the submission catches the error. A run that overruns `max_seconds` after its last call fails at the end.
 - The defaults are `max_evaluations` = chains × (warmup + draws) × 1023, the most NUTS can spend at its default tree depth of 10, and `max_seconds` = 1800. `--opt max_evals=N` and `--opt max_seconds=S` change them. The submission is killed 300 s after `max_seconds`.
 - `initial_points` are uniform on (−2, 2), Stan's default, from a generator seeded by the rep's seed. `rng` is a second, independent generator from the same seed. A submission that needs more streams spawns them from `rng`.
-- The return value must have exactly the shape (chains, draws, dim). Every returned draw must be a point the submission passed to `log_density` or `log_density_gradient`, bit for bit; the harness keeps a hash of every evaluated point, in call order. A chain's draws must keep the order in which they were first evaluated, and no point may appear in two chains. These checks rule out draws the submission did not pay for, shuffled chains, which hide autocorrelation from ESS, and copied chains. They also rule out returning averages of draws. The harness maps every draw to the constrained space with BridgeStan (`param_constrain`, with transformed parameters and generated quantities) and writes one CSV per chain. A draw that cannot be mapped is written as NaN, which fails the gate.
+- The return value must have exactly the shape (chains, draws, dim). Every returned draw must be a point the submission passed to `log_density` or `log_density_gradient`, bit for bit, and whose log density was finite; the harness keeps a hash of every evaluated point, in call order. A chain's draws must keep the order in which they were first evaluated, and no point may appear in two chains. These checks rule out draws the submission did not pay for, shuffled chains, which hide autocorrelation from ESS, and copied chains. They also rule out returning averages of draws. The harness maps every draw to the constrained space with BridgeStan (`param_constrain`, with transformed parameters and generated quantities) and writes one CSV per chain. A draw that cannot be mapped is written as NaN, which fails the gate.
 - The submission may import only numpy, scipy and the standard modules math, typing, dataclasses, functools, itertools, collections and `__future__`, and may not name the builtins `open`, `exec`, `eval`, `compile`, `__import__`, `breakpoint`, `input`, `globals` or `vars`. An AST check enforces both before the run. It is a lint, not a sandbox (see BENCH.md).
 - The submission runs in a child process, `python -m harness.logdensity spec.json`, with `OMP_NUM_THREADS=1`. Its stdout and stderr go to `submission.log` in the rep directory.
 
-`timing.wall_s` is the time inside `sample()`. Loading the model and constraining the draws are excluded. The chains share one process, so each `chain_s` entry is `wall_s / chains` and `ess_per_s_chain` is ESS per second of the single core the submission ran on. `ess_per_s_wall` of a CmdStan run uses 4 cores in parallel, so compare `ess_per_s_chain` or `ess_per_eval` between a submission and CmdStan, never `ess_per_s_wall`. `timing.evaluations` holds the count, and `timing.extra` holds the density and gradient counts apart and the limits in force.
+`timing.wall_s` runs from loading the submission file to converting what `sample()` returns into an array. Loading the model and constraining the draws are excluded. The chains share one process, so each `chain_s` entry is `wall_s / chains` and `ess_per_s` is ESS per second of the single core the submission ran on. `ess_per_s_wall` of a CmdStan run uses 4 cores in parallel, so compare `ess_per_s` (chain time) or `ess_per_eval` between a submission and CmdStan, never a wall time. `timing.evaluations` holds the count, and `timing.extra` holds the density and gradient counts apart and the limits in force.
 
 `examples/samplers/` holds two submissions: `hmc.py`, HMC with a diagonal metric, a step size tuned by dual averaging in warmup and a jittered number of steps, and `ula_wrong.py`, the unadjusted Langevin algorithm with a large step, which is wrong on purpose. Run one with
 
@@ -158,7 +160,7 @@ runs/<label>/<model>/rep<r>/
 
 | field | content |
 |---|---|
-| `label`, `sampler`, `model`, `rep`, `seed` | the cell |
+| `label`, `sampler`, `model`, `rep`, `seed`, `base_seed` | the cell |
 | `chains`, `warmup`, `draws` | the budget |
 | `identity` | the adapter's `describe()`: binary paths, versions, flags |
 | `host` | machine name |
@@ -168,7 +170,8 @@ runs/<label>/<model>/rep<r>/
 | `timing.grads_sampling`, `timing.grads_warmup` | gradient evaluations summed over chains, or null |
 | `timing.evaluations` | every density and gradient evaluation, when the harness counts them itself (logdensity), else null |
 | `timing.divergences` | summed over chains, or null when the sampler does not report them |
-| `timing.extra` | anything adapter-specific |
+| `timing.uncounted` | why the counts above leave out some evaluations, or empty when they are complete |
+| `timing.extra` | anything adapter-specific; `density_evals` and `gradient_evals` when the harness counts them |
 
 Use null for an unknown value. The old runners wrote -1, and one aggregation step treated it as a count.
 
@@ -183,7 +186,7 @@ The old campaign lost the most time to these. They apply to any compiled upstrea
 - Argument lists. Pass a command as a list of separate tokens (`["method=sample", "num_warmup=1000"]`), never as one string with spaces.
 - Ragged output. A chain can stop early or write a partial last line. Cut all chains to the shortest complete length before scoring (`apin score` does this).
 - Large output in git. `runs/`, `build/` and `.cache/` are in `.gitignore`. Add files by name, never with `git add -A`. The old repository once committed 44 GB of run output.
-- Load from other work. Another process on the machine changes wall times by 10 to 25 percent. Compare arms that ran under the same load, or use `ess_per_s_chain` and `ess_per_grad`, which depend less on it.
+- Load from other work. Another process on the machine changes wall times by 10 to 25 percent. Compare arms that ran under the same load, or use `ess_per_s` and `ess_per_eval`, which depend less on it.
 
 ## Using a patched build
 

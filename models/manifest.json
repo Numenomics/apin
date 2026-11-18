@@ -10,6 +10,9 @@
     "reference": {
       "source": "posteriordb",
       "posteriordb": "eight_schools-eight_schools_noncentered"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -23,6 +26,9 @@
     "reference": {
       "source": "posteriordb",
       "posteriordb": "sblrc-blr"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -36,6 +42,9 @@
     "reference": {
       "source": "posteriordb",
       "posteriordb": "kidiq-kidscore_momiq"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -50,6 +59,9 @@
       "source": "local",
       "posteriordb": null,
       "note": "posteriordb has no reference posterior; built with `apin reference build`"
+    },
+    "budget": {
+      "draws": 10000
     }
   },
   {
@@ -63,6 +75,9 @@
     "reference": {
       "source": "posteriordb",
       "posteriordb": "mesquite-logmesquite_logvash"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -77,6 +92,9 @@
       "source": "local",
       "posteriordb": null,
       "note": "posteriordb has no reference posterior; built with `apin reference build`"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -90,6 +108,9 @@
     "reference": {
       "source": "posteriordb",
       "posteriordb": "diamonds-diamonds"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -104,6 +125,9 @@
       "source": "local",
       "posteriordb": null,
       "note": "posteriordb has no reference posterior; built with `apin reference build`"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -118,6 +142,9 @@
       "source": "local",
       "posteriordb": null,
       "note": "posteriordb has no reference posterior; built with `apin reference build`"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -132,6 +159,9 @@
       "source": "local",
       "posteriordb": null,
       "note": "posteriordb has no reference posterior; built with `apin reference build`"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -147,6 +177,9 @@
       "posteriordb": null,
       "stan": "reference/pilots.stan",
       "note": "posteriordb has no reference posterior; built with `apin reference build` from a non-centred version with the same posterior, because NUTS diverges on the centred model"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -161,6 +194,9 @@
       "source": "local",
       "posteriordb": null,
       "note": "posteriordb has no reference posterior; built with `apin reference build`"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -174,6 +210,9 @@
     "reference": {
       "source": "posteriordb",
       "posteriordb": "gp_pois_regr-gp_regr"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -201,6 +240,9 @@
     "reference": {
       "source": "posteriordb",
       "posteriordb": "mcycle_gp-accel_gp"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -215,6 +257,9 @@
       "source": "local",
       "posteriordb": null,
       "note": "posteriordb has no reference posterior; built with `apin reference build`"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -229,6 +274,9 @@
       "source": "posteriordb",
       "posteriordb": "eight_schools-eight_schools_noncentered",
       "note": "posteriordb lists the reference of eight_schools-eight_schools_noncentered for this posterior; the gate compares the variables both share"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -242,6 +290,9 @@
     "reference": {
       "source": "posteriordb",
       "posteriordb": "garch-garch11"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -255,6 +306,9 @@
     "reference": {
       "source": "posteriordb",
       "posteriordb": "hudson_lynx_hare-lotka_volterra"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -268,6 +322,9 @@
     "reference": {
       "source": "posteriordb",
       "posteriordb": "low_dim_gauss_mix-low_dim_gauss_mix"
+    },
+    "budget": {
+      "draws": 5000
     }
   },
   {
@@ -281,6 +338,9 @@
     "reference": {
       "source": "posteriordb",
       "posteriordb": "arma-arma11"
+    },
+    "budget": {
+      "draws": 5000
     }
   }
 ]
