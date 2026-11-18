@@ -16,7 +16,7 @@ A rep that finishes gets a `DONE` marker; a rep that raises gets `FAILED` with t
 
 ## The score
 
-`apin score --models M --reps R` scores the grid of the models in M that have a reference, with R reps each. It walks that grid, not the run directories: a rep the grid declares and a label lacks is wrong. It computes, for every rep, the rank-normalized bulk and tail ESS and split R-hat of every series the gate checks (Vehtari et al. 2021; `harness/ess.py` reproduces the R package posterior 1.7.0 to 10 significant digits). Columns whose names end in `__` are sampler diagnostics and are not scored; lp__ is recomputed by the harness. Chains of unequal length are cut to the shortest.
+`apin score --models M --reps R` scores the grid of the models in M that have a reference, with R reps each. It walks that grid, not the run directories: a rep the grid declares and a label lacks is wrong, and so is a rep whose run.json names another model, rep, seed or base seed than its cell. `--submission LABEL=PATH` makes every rep of that label match the file's sha256. It computes, for every rep, the rank-normalized bulk and tail ESS and split R-hat of every series the gate checks (Vehtari et al. 2021; `harness/ess.py` reproduces the R package posterior 1.7.0 to 10 significant digits). Columns whose names end in `__` are sampler diagnostics and are not scored; lp__ is recomputed by the harness. Chains of unequal length are cut to the shortest.
 
 Every rep gets a verdict from the correctness gate (next section): right, wrong or unproven. The credited ESS of a rep is the smallest bulk or tail ESS over every series. Cost is reported two ways, and only for a rep that is right:
 

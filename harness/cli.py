@@ -59,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--reps", type=int, default=3, help="reps in the grid; a rep that is not there is wrong")
     s.add_argument("--base-seed", type=int, default=grid.BASE_SEED)
     s.add_argument("--build", type=Path, default=ROOT / "build")
+    s.add_argument("--submission", action="append", default=[], metavar="LABEL=PATH",
+                   help="the submission file of a label; every rep of it must record its sha256 (repeatable)")
 
     ref = sub.add_parser("reference", help="reference posteriors for the correctness gate")
     ref_sub = ref.add_subparsers(dest="ref_cmd", required=True)
@@ -92,7 +94,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if failed else 0
     if a.cmd == "score":
         g = score.declared(a.models, a.reps, a.base_seed, a.build)
-        score.score(a.runs, a.out, g, a.baseline, a.labels.split(",") if a.labels else None)
+        subs = dict(x.split("=", 1) for x in a.submission)
+        score.score(a.runs, a.out, g, a.baseline, a.labels.split(",") if a.labels else None,
+                    submissions={k: Path(v) for k, v in subs.items()})
         return 0
     if a.cmd == "reference":
         settings = {"adapt_delta": a.adapt_delta} if a.adapt_delta else None

@@ -293,3 +293,41 @@ def test_a_logdensity_rep_without_counts_is_wrong(tmp_path, grid):
     got = _reasons(tmp_path, grid)
     assert got[("m1", 0)][0] == "wrong" and "limits" in got[("m1", 0)][1]
     assert got[("m1", 1)][0] == "right"
+
+
+def test_a_rep_recorded_for_another_cell_is_wrong(tmp_path, grid):
+    """U3: a run.json that names another model, rep or base seed than the grid cell it sits in
+    was scored for that cell."""
+    edits = {0: ("model", "m2"), 1: ("rep", 0)}
+    for r, (k, v) in edits.items():
+        d = write_rep(tmp_path, "x", "m1", r, grid)
+        rec = json.loads((d / "run.json").read_text())
+        rec[k] = v
+        (d / "run.json").write_text(json.dumps(rec))
+    d = write_rep(tmp_path, "x", "m2", 0, grid)
+    rec = json.loads((d / "run.json").read_text())
+    rec["base_seed"] = grid.base_seed + 1
+    (d / "run.json").write_text(json.dumps(rec))
+    write_rep(tmp_path, "x", "m2", 1, grid)
+    got = _reasons(tmp_path, grid)
+    assert got[("m1", 0)][0] == "wrong" and "model" in got[("m1", 0)][1]
+    assert got[("m1", 1)][0] == "wrong" and "rep" in got[("m1", 1)][1]
+    assert got[("m2", 0)][0] == "wrong" and "base seed" in got[("m2", 0)][1]
+    assert got[("m2", 1)][0] == "right"
+
+
+def test_the_score_can_check_the_submission_digest(tmp_path, grid):
+    """U3: given the submission file of a label, every rep must record its sha256."""
+    import hashlib
+    sub = tmp_path / "sub.py"
+    sub.write_text("def sample(problem, budget, rng): ...\n")
+    good = {"name": "x", "submission_sha256": hashlib.sha256(sub.read_bytes()).hexdigest()}
+    runs = tmp_path / "runs"
+    for m in ("m1", "m2"):
+        for r in range(2):
+            write_rep(runs, "x", m, r, grid, identity=good)
+    out = score.score(runs, tmp_path / "s", grid, submissions={"x": sub}, log=lambda *_: None)
+    assert all(r["status"] == "right" for r in out["per_run"])
+    sub.write_text("def sample(problem, budget, rng): return None\n")
+    out = score.score(runs, tmp_path / "s", grid, submissions={"x": sub}, log=lambda *_: None)
+    assert all(r["status"] == "wrong" and "digest" in r["reason"] for r in out["per_run"])

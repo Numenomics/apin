@@ -184,7 +184,9 @@ def metered(rec: dict) -> bool:
             or any(extra.get(k) is not None for k in METERED_KEYS))
 
 
-def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid) -> dict:
+def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid, digest: str | None = None) -> dict:
+    """The row of one grid cell. `digest`, when given, is the sha256 of the label's submission
+    file, which the rep must have recorded."""
     d = label_dir / entry.model / f"rep{rep}"
     row = {"label": label_dir.name, "model": entry.model, "rep": rep, "status": "wrong", "reason": "",
            "identity": "", "ess": math.nan, "evaluations": None, "density_evals": None, "gradient_evals": None,
@@ -201,6 +203,13 @@ def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid) -> dict:
         return wrong(f"rep{rep} missing")
     rec = json.loads((d / "run.json").read_text())
     row["identity"] = identity_digest(rec.get("identity", {}))
+    for what, got, want in (("model", rec.get("model"), entry.model), ("rep", rec.get("rep"), rep),
+                            ("base seed", rec.get("base_seed"), g.base_seed)):
+        if got != want:
+            return wrong(f"rep{rep} recorded {what} {got!r}, the grid cell's is {want!r}")
+    if digest is not None and (rec.get("identity") or {}).get("submission_sha256") != digest:
+        return wrong(f"rep{rep} submission digest {(rec.get('identity') or {}).get('submission_sha256')}, "
+                     f"not the submission file's {digest}")
     want_seed = grid_mod.seed_for(rep, g.base_seed)
     if rec.get("seed") != want_seed:
         return wrong(f"rep{rep} seed {rec.get('seed')}, the grid's is {want_seed}")
@@ -364,16 +373,18 @@ def _write(path: Path, rows: list[dict], drop=("verdict", "eval", "sec")) -> Non
 
 
 def score(runs_dir: Path, out_dir: Path, g: Grid, baseline: str | None = None, labels: list[str] | None = None,
-          log=print) -> dict:
+          log=print, submissions: dict[str, Path] | None = None) -> dict:
     """Score every label under runs_dir over the grid g. A label whose reps record different
-    sampler identities (another submission, other options) is refused."""
+    sampler identities (another submission, other options) is refused. `submissions` maps a label
+    to its submission file; each rep of that label must record the file's sha256."""
+    digests = {k: hashlib.sha256(Path(p).read_bytes()).hexdigest() for k, p in (submissions or {}).items()}
     label_dirs = sorted(p for p in Path(runs_dir).iterdir() if p.is_dir() and (not labels or p.name in labels))
     if baseline and baseline not in [p.name for p in label_dirs]:
         raise KeyError(f"baseline label {baseline!r} has no runs under {runs_dir}")
     names = list(g.entries)
     rows = []
     for ld in label_dirs:
-        lab = [score_rep(ld, g.entries[n], r, g) for n in names for r in range(g.reps)]
+        lab = [score_rep(ld, g.entries[n], r, g, digests.get(ld.name)) for n in names for r in range(g.reps)]
         ids = {r["identity"] for r in lab if r["identity"]}
         if len(ids) > 1:
             raise ValueError(f"label {ld.name!r} mixes {len(ids)} sampler identities (submission or options); "
