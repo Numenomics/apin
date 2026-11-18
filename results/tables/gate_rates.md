@@ -61,3 +61,10 @@ Correct runs against references that may miss rare excursions:
 | projection | SPLIT_Z 5.0 | 106 | 14 | 0 |
 | variable | none | 18 | 129 | 3 |
 | variable | SPLIT_Z 5.0 | 18 | 129 | 3 |
+
+Calibration test under an idealised Gaussian null with the correlations of a shipped reference (calibration_null): groups of 5 reps, every rep's ESS 20000, cutoff p < 0.001. Only groups in which every rep is right are tested.
+
+| reference | quantities | tr(C^2) | scale of the correlations | groups | all reps right | refused | share |
+|---|---|---|---|---|---|---|---|
+| eight_schools_noncentered | 84 | 331.66 | 0.992 | 100000 | 99951 | 477 | 0.477% |
+| hier_2pl | 2716 | 4725.18 | 0.589 | 20000 | 20000 | 31 | 0.155% |

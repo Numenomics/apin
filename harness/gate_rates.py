@@ -22,18 +22,31 @@ reps whose 4 chains are two pairs of copies 1e-3 SD apart (its power).
 Then the halves of the reference (gate.disputed): how often they disagree by chance on correct
 reference draws, and the false-wrong rate of correct runs against references that missed rare
 excursions, with the rule and without it (SPLIT_Z infinite).
+
+With --null MODEL:GROUPS (repeatable) it prints only the calibration test's false-refusal rate
+under an idealised Gaussian null with the correlations of a shipped reference (calibration_null),
+to be appended to the table:
+
+    uv run python -m harness.gate_rates --null eight_schools_noncentered:100000 \
+        --null hier_2pl:20000 >> results/tables/gate_rates.md
+
+That needs the reference's draws: the posteriordb zip or the kept chain CSVs in
+build/reference/<model>, and the model's BridgeStan library for lp__. It samples nothing.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import zipfile
 from concurrent.futures import ProcessPoolExecutor
+from types import SimpleNamespace
 
 import numpy as np
 from scipy.signal import lfilter
 
-from . import gate, reference
+from . import cmdstan, gate, models, reference
 
 MU = np.array([0.0, 3.0, -1.0, 10.0, 0.5])
 SIGMA = np.array([1.0, 0.5, 2.0, 1.0, 0.1])
@@ -150,13 +163,103 @@ def _excursions(args) -> tuple:
         gate.SPLIT_Z = old
 
 
+RUN_ESS = 20000  # the ESS of every rep and every quantity in this null
+NULL_SEEDS = {"eight_schools_noncentered": 913, "hier_2pl": 2716}
+
+
+def reference_draws(name: str, most: int = 2000) -> dict:
+    """An evenly thinned subset of at most `most` of the draws reference `name` was summarised from,
+    with lp__ from BridgeStan, as the reference computes it. Reads the posteriordb zip or the kept
+    chain CSVs in build/reference/<name>; samples nothing."""
+    model = models.load()[name]
+    ref = reference.load(name)
+    if ref.source == "posteriordb":
+        pdb = ref.meta["posteriordb_reference"]
+        with zipfile.ZipFile(reference.PDB / "reference_posteriors" / "draws" / "draws" / f"{pdb}.json.zip") as z:
+            chains = json.loads(z.read(f"{pdb}.json"))
+        draws = {reference.stan_name(v): np.column_stack([c[v] for c in chains]) for v in chains[0]}
+    else:
+        csvs = sorted((reference.ROOT / "build" / "reference" / name).glob("ref_*.csv"),
+                      key=lambda p: int(p.stem.split("_")[-1]))
+        if len(csvs) != ref.meta["settings"]["chains"]:
+            raise FileNotFoundError(f"{name}: {len(csvs)} chain CSVs kept, the reference used "
+                                    f"{ref.meta['settings']['chains']}")
+        files = [cmdstan.read_csv(p) for p in csvs]
+        draws = {c: np.column_stack([f.column(c) for f in files]) for c in files[0].columns if not c.endswith("__")}
+    n, chains = next(iter(draws.values())).shape
+    take = np.unique(np.linspace(0, n - 1, max(1, most // chains)).astype(int))
+    draws = {k: v[take] for k, v in draws.items()}
+    if ref.has_lp:
+        draws[reference.LP] = reference.log_density(model, draws, reference.ROOT / "build")
+    return draws
+
+
+def calibration_null(name: str, groups: int, chunk: int = 500) -> dict:
+    """Groups of 5 reps under an idealised Gaussian null with the correlations of reference `name`.
+
+    Every rep's error vector is Normal(0, run_se^2 C) plus the shared reference error, Normal(0,
+    ref_se^2 C), with run_se = 1/sqrt(RUN_ESS), ref_se the reference's MCSE in SDs and C the
+    correlation of the checked functions over the reference draws, its off-diagonal part scaled so
+    that tr(C^2) is the reference's trC2 (the raw correlation of 2000 draws overstates it). The
+    reps' claimed MCSEs are exact. Groups in which every rep is right go through gate.calibration;
+    the rest are discarded, as the judge never calls the test on them."""
+    ref = reference.load(name)
+    s = ref.standardise(reference_draws(name))
+    flat = s.reshape(len(s), -1)
+    _, sd, mcse_ref = ref.targets()
+    cols, use = [], np.zeros(sd.shape, dtype=bool)
+    for i in range(len(flat)):
+        for j, f in enumerate(ref.functions(flat[i], i)):
+            if sd[i, j] > 0 and np.ptp(f) > 0:
+                cols.append((f - f.mean()) / f.std())
+                use[i, j] = True
+    F = np.array(cols).T  # (draws, J)
+    n, J = F.shape
+    raw = (F.T @ F) / n
+    target = ref.calibration["trC2"] * J / ref.calibration["functions"]
+    a = math.sqrt(max(target - J, 0.0) / ((raw * raw).sum() - J))
+    if a > 1:
+        raise ValueError(f"{name}: the draws' correlations are weaker than trC2 says (scale {a:.3f})")
+    run_se = 1 / math.sqrt(RUN_ESS)
+    ref_se = (mcse_ref / sd)[use]
+    tot = np.hypot(run_se, ref_se)
+    rng = np.random.default_rng(NULL_SEEDS.get(name, 0))
+    reps, tol, zr = 5, gate.TOLERANCE, gate._z_right()
+    right = refused = done = 0
+    full = np.full(sd.size, math.nan)
+    mc = [run_se] * sd.size
+    while done < groups:
+        m = min(chunk, groups - done)
+        z = rng.standard_normal((m, reps + 1, n))
+        y = math.sqrt(a) * (z @ F) / math.sqrt(n) + math.sqrt(1 - a) * rng.standard_normal((m, reps + 1, J))
+        e = y[:, :reps] * run_se - y[:, reps:] * ref_se
+        ok = (np.abs(e) + zr * tot < tol).all(axis=(1, 2))
+        for g in np.flatnonzero(ok):
+            vs = []
+            for r in range(reps):
+                err = full.copy()
+                err[use.ravel()] = e[g, r]
+                vs.append(SimpleNamespace(errors=err.tolist(), mcse=mc))
+            _, p = gate.calibration(vs, ref)
+            refused += not p >= gate.ALPHA_CALIBRATION
+        right += int(ok.sum())
+        done += m
+    return {"model": name, "functions": J, "trC2": target, "raw trC2": float((raw * raw).sum()), "scale": a,
+            "groups": groups, "all right": right, "refused": refused}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=200, help="runs per setting")
     ap.add_argument("--groups", type=int, default=100, help="groups of 5 reps per calibration setting")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--batch", type=int, default=20, help="runs per reference")
+    ap.add_argument("--null", action="append", default=[], metavar="MODEL:GROUPS",
+                    help="print only the calibration null for these shipped references")
     a = ap.parse_args(argv)
+    if a.null:
+        _print_null([calibration_null(m, int(g)) for m, g in (x.split(":") for x in a.null)])
+        return 0
     jobs = [(1000 * k + 7 * i, rho, n, a.batch) for k, (rho, n) in enumerate(SETTINGS)
             for i in range(a.runs // a.batch)]
     cal_jobs = [(10**6 + 1000 * k + 7 * i, rho, n, 10) for k, (rho, n) in enumerate([(0.0, 5000), (0.5, 15000)])
@@ -203,6 +306,18 @@ def main(argv=None) -> int:
         rule = "none" if math.isinf(z) else f"SPLIT_Z {z}"
         print(f"| {case} | {rule} | {out['right']} | {out['unproven']} | {out['wrong']} |")
     return 0
+
+
+
+def _print_null(rows: list[dict]) -> None:
+    print(f"\nCalibration test under an idealised Gaussian null with the correlations of a shipped reference "
+          f"(calibration_null): groups of 5 reps, every rep's ESS {RUN_ESS}, cutoff p < {gate.ALPHA_CALIBRATION}. "
+          "Only groups in which every rep is right are tested.\n")
+    print("| reference | quantities | tr(C^2) | scale of the correlations | groups | all reps right | refused | share |")
+    print("|---|---|---|---|---|---|---|---|")
+    for r in rows:
+        print(f"| {r['model']} | {r['functions']} | {r['trC2']:.6g} | {r['scale']:.3f} | {r['groups']} | "
+              f"{r['all right']} | {r['refused']} | {r['refused'] / r['all right']:.3%} |")
 
 
 if __name__ == "__main__":

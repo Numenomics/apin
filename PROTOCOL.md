@@ -63,7 +63,7 @@ BENCH.md, "Rule 1: the gate", has the table.
 
 The power to call a bias wrong grows with ESS. A rep is wrong once |e| exceeds 0.1 + z_w·s. At an ESS of 400 per quantity s is about 0.05 (√(1/400) plus the reference's share), and z_w is about 4 for a model with 100 quantities and 5 reps, so the gate calls a bias wrong from about 0.3 SD. At an ESS of 4000, s is about 0.02 and the gate calls a bias wrong from about 0.18 SD. Between the two bounds the rep is unproven, which earns nothing. A rep earns credit only when its error is shown to be below 0.1.
 
-The model's verdict is the worst of its reps (wrong, then unproven), and a model whose reps are all right must also pass the calibration test of BENCH.md, rule 2: the realized errors over all quantities and reps must agree with the claimed MCSEs at p ≥ 0.001.
+The model's verdict is the worst of its reps (wrong, then unproven), and a model whose reps are all right must also pass the calibration test of BENCH.md, rule 2: the realized errors over all quantities and reps must agree with the claimed MCSEs at p ≥ 0.001. The threshold is nominal: under an idealised Gaussian null the test refused 0.48 % of correct models with the correlations of eight_schools_noncentered and 0.16 % with those of hier_2pl (BENCH.md, rule 1, after the table of thresholds).
 
 ### The other checks
 
