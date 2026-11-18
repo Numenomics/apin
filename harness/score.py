@@ -101,8 +101,10 @@ def chain_draws(rep_dir: Path, names: list[str] | None = None, csvs: list | None
 def _key(entry: Entry, reps: int) -> dict:
     """What a cached verdict depends on besides the draws."""
     consts = {k: getattr(gate, k) for k in ("TOLERANCE", "ALPHA_WRONG", "ALPHA_RIGHT", "RHAT_MAX", "MIN_ESS",
-                                            "EXACT", "COPY_DISTANCE", "COPY_FRACTION", "COPY_SERIES")}
-    return {"reps": reps, "reference": hashlib.sha256(entry.ref.to_json().encode()).hexdigest(), "gate": consts}
+                                            "EXACT", "COPY_DISTANCE", "COPY_FRACTION", "COPY_SERIES", "SPLIT_Z")}
+    halves = entry.ref.halves_json() if entry.ref.halves else ""
+    return {"reps": reps, "reference": hashlib.sha256((entry.ref.to_json() + halves).encode()).hexdigest(),
+            "gate": consts}
 
 
 def read_rep(rep_dir: Path, chains: int, draws: int, names: list[str] | None = None) -> list:

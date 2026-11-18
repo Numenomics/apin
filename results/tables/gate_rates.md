@@ -44,3 +44,20 @@ Calibration test, groups of 5 reps (100 groups per row):
 | 0.0 | 5000 | copies | 0.250 | 0.750 | 0.000 | 1.96 |
 | 0.5 | 15000 | correct | 1.000 | 0.000 | 0.000 | 1.02 |
 | 0.5 | 15000 | copies | 0.210 | 0.790 | 0.000 | 2.01 |
+
+Halves of the reference: quantities disputed by chance (SPLIT_Z 5.0), 200 references of 10 chains x 1000 draws per row:
+
+| rho of the reference chains | disputed | of quantities | share |
+|---|---|---|---|
+| 0.0 | 9 | 8800 | 0.1023% |
+| 0.5 | 17 | 8800 | 0.1932% |
+| 0.9 | 54 | 8800 | 0.6136% |
+
+Correct runs against references that may miss rare excursions:
+
+| case | rule | right | unproven | wrong |
+|---|---|---|---|---|
+| projection | none | 106 | 9 | 5 |
+| projection | SPLIT_Z 5.0 | 106 | 14 | 0 |
+| variable | none | 18 | 129 | 3 |
+| variable | SPLIT_Z 5.0 | 18 | 129 | 3 |

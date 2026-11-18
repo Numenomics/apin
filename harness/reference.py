@@ -88,6 +88,9 @@ class Reference:
     constants: dict[str, float] = field(default_factory=dict)
     calibration: dict = field(default_factory=dict)  # {"functions": J, "trC2": tr(C^2)}
     meta: dict = field(default_factory=dict)
+    # each half's estimate and MCSE of every function: {"mean": (2, len(series), len(FUNCTIONS)),
+    # "mcse": same}; empty for a reference built before the halves were kept
+    halves: dict = field(default_factory=dict)
 
     @property
     def has_lp(self) -> bool:
@@ -131,6 +134,11 @@ class Reference:
             "loc": r(self.loc), "scale": r(self.scale),
             "directions": [r(u, 4) for u in self.directions],
             **{k: r(self.stats[k]) for k in SERIES_STATS}}, separators=(",", ":"))
+
+    def halves_json(self) -> str:
+        """The halves, kept beside the reference (halves_path) so that neither file passes 1 MB."""
+        return json.dumps({k: [[[float(x) for x in row] for row in _round(h, 4)] for h in self.halves[k]]
+                           for k in ("mean", "mcse")}, separators=(",", ":"))
 
 
 def _directions(z: np.ndarray) -> np.ndarray:
@@ -178,6 +186,12 @@ def _mcse(f: np.ndarray) -> float:
     return 0.0 if np.ptp(f) == 0 else ess.mcse_mean(f)
 
 
+def _estimates(s: np.ndarray, q05: float, q95: float) -> tuple[list[float], list[float]]:
+    """Estimate and MCSE of each of the FUNCTIONS on the standardised draws s (draws, chains)."""
+    fs = [s, s * s, (s <= q05).astype(float), (s <= q95).astype(float)]
+    return [float(f.mean()) for f in fs], [_mcse(f) for f in fs]
+
+
 def summarise(draws: dict[str, np.ndarray], lp: np.ndarray | None = None, model: str = "", source: str = "",
               meta: dict | None = None) -> Reference:
     """The Reference for reference draws: draws maps name -> (draws, chains); lp is lp__ at the
@@ -198,21 +212,30 @@ def summarise(draws: dict[str, np.ndarray], lp: np.ndarray | None = None, model:
     first, second, axis = _halves(z.shape[2], z.shape[1])
     pick = (lambda a, h: a[:, :, h]) if axis == 2 else (lambda a, h: a[:, h, :])
     directions = _directions(pick(z, first))
-    rows = [_series_stats(z[i], float(loc[i]), float(scale[i])) for i in range(len(names))]
+    rows, halves = [], []  # halves: the (first, second) half of each series' standardised draws
+    for i in range(len(names)):
+        rows.append(_series_stats(z[i], float(loc[i]), float(scale[i])))
+        halves.append((pick(z[i:i + 1], first)[0], pick(z[i:i + 1], second)[0]))
     series = list(names)
     if len(directions):
-        proj = np.einsum("kd,dnc->knc", directions, pick(z, second))
-        for k, p in enumerate(proj):
+        # the second half summarises the projections; the first, which chose them, is the other half
+        proj = [np.einsum("kd,dnc->knc", directions, pick(z, h)) for h in (first, second)]
+        for k, p in enumerate(proj[1]):
             ploc, pscale = (float(v) for v in _round([p.mean(), p.std(ddof=1)]))
             rows.append(_series_stats((p - ploc) / pscale, ploc, pscale))
+            halves.append(((proj[0][k] - ploc) / pscale, (p - ploc) / pscale))
             series.append(f"proj.{k + 1}")
     if lp is not None:
         lp = np.asarray(lp, dtype=float)
         lloc, lscale = (float(v) for v in _round([lp.mean(), lp.std(ddof=1)]))
-        rows.append(_series_stats((lp - lloc) / lscale, lloc, lscale))
+        s = (lp - lloc) / lscale
+        rows.append(_series_stats(s, lloc, lscale))
+        halves.append((pick(s[None], first)[0], pick(s[None], second)[0]))
         series.append(LP)
     stats = {k: _round([r[k] for r in rows]) for k in SERIES_STATS}
-    ref = Reference(model, source, names, loc, scale, directions, series, stats, constants, {}, meta or {})
+    est = [[_estimates(h, stats["q05"][i], stats["q95"][i]) for h in pair] for i, pair in enumerate(halves)]
+    half = {k: np.array([[e[h][n] for e in est] for h in (0, 1)]) for n, k in enumerate(("mean", "mcse"))}
+    ref = Reference(model, source, names, loc, scale, directions, series, stats, constants, {}, meta or {}, half)
     ref.calibration = _calibration(ref, draws, lp)
     return ref
 
@@ -244,15 +267,33 @@ def path(name: str) -> Path:
     return REF_DIR / f"{name}.json"
 
 
+def halves_path(name: str) -> Path:
+    return REF_DIR / "halves" / f"{name}.json"
+
+
 def load(name: str) -> Reference | None:
     p = path(name)
     if not p.is_file():
         return None
     d = json.loads(p.read_text())
     a = lambda v: np.array(v, dtype=float)  # noqa: E731
+    h = halves_path(name)
+    halves = {k: a(v) for k, v in json.loads(h.read_text()).items()} if h.is_file() else {}
     return Reference(d["model"], d["source"], d["names"], a(d["loc"]), a(d["scale"]),
                      a(d["directions"]).reshape(len(d["directions"]), len(d["names"])), d["series"],
-                     {k: a(d[k]) for k in SERIES_STATS}, d["constants"], d["calibration"], d["meta"])
+                     {k: a(d[k]) for k in SERIES_STATS}, d["constants"], d["calibration"], d["meta"], halves)
+
+
+def write(ref: Reference) -> Path:
+    """Write ref and its halves to models/reference; refuse either file over MAX_BYTES."""
+    texts = {path(ref.model): ref.to_json(), halves_path(ref.model): ref.halves_json()}
+    for p, text in texts.items():
+        if len(text.encode()) > MAX_BYTES:
+            raise RuntimeError(f"{ref.model}: {p.name} would be {len(text.encode())} bytes, over the 1 MB limit")
+    for p, text in texts.items():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text + "\n")
+    return path(ref.model)
 
 
 def stan_name(pdb_name: str) -> str:
@@ -402,12 +443,7 @@ def build(model: Model, source: str, cmdstan_root: str | None = None, build_dir:
         ref = from_cmdstan(model, cmdstan.locate(cmdstan_root), build_dir, work, settings, log, rerun)
     else:
         raise ValueError(f"{model.name}: reference source is {source!r}; nothing to build")
-    text = ref.to_json()
-    if len(text.encode()) > MAX_BYTES:
-        raise RuntimeError(f"{model.name}: reference is {len(text.encode())} bytes, over the 1 MB limit")
-    REF_DIR.mkdir(parents=True, exist_ok=True)
-    out = path(model.name)
-    out.write_text(text + "\n")
-    log(f"{model.name}: {len(ref.names)} variables, {len(ref.series)} series, {len(text.encode())} bytes "
+    out = write(ref)
+    log(f"{model.name}: {len(ref.names)} variables, {len(ref.series)} series, {out.stat().st_size} bytes "
         f"from {source} -> {out.relative_to(ROOT)}")
     return out

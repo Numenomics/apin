@@ -63,6 +63,7 @@ EXACT = 1e-6  # agreement asked of a quantity whose reference value is exact
 COPY_DISTANCE = 1e-6  # in reference SDs, max norm
 COPY_FRACTION = 0.01
 COPY_SERIES = 20
+SPLIT_Z = 5.0  # in MCSEs of the more confident half: the reference's halves disagree beyond this
 
 
 @dataclass
@@ -83,6 +84,9 @@ class Verdict:
         """Short text for the score table."""
         if self.status == "right":
             return "right"
+        if self.reason == "disputed":
+            return (f"unproven: the reference's halves disagree on {self.series} {self.function} "
+                    f"e={self.error:+.3g} bound={self.bound:.3g}")
         if self.reason in ("error", "exact", "unproven"):
             return f"{self.status}: {self.series} {self.function} e={self.error:+.3g} bound={self.bound:.3g}"
         if self.reason == "rhat":
@@ -113,6 +117,22 @@ def _z_right() -> float:
 
 def z_wrong(quantities: int, reps: int) -> float:
     return float(-ndtri(ALPHA_WRONG / (2 * max(quantities, 1) * max(reps, 1))))
+
+
+def disputed(ref: Reference) -> np.ndarray:
+    """(len(series), len(FUNCTIONS)) True where the two halves of the reference disagree.
+
+    They disagree on a quantity when their estimates differ by more than SPLIT_Z times the
+    smaller of the two halves' MCSEs: one half's estimate is far outside what the other half
+    claims as its own error. The combined MCSE, hypot of the two, does not do: a half that saw
+    k rare excursions the other half missed differs from it by about sqrt(k) combined MCSEs,
+    since its own MCSE grows with what it saw. A reference without halves cannot show that they
+    agree, so every quantity is disputed."""
+    target, _, _ = ref.targets()
+    if not ref.halves:
+        return np.ones(target.shape, dtype=bool)
+    m, s = ref.halves["mean"], ref.halves["mcse"]
+    return np.abs(m[0] - m[1]) > SPLIT_Z * np.minimum(s[0], s[1])
 
 
 def check(draws: dict[str, np.ndarray], ref: Reference, reps: int = 1, tolerance: float = TOLERANCE) -> Verdict:
@@ -172,14 +192,16 @@ def check(draws: dict[str, np.ndarray], ref: Reference, reps: int = 1, tolerance
         return Verdict("unproven", "near-identical chains (heuristic)", f"chains {pair[0]} and {pair[1]}", **base)
 
     absval = np.abs(np.where(checked, err, 0.0))
-    lower = np.where(checked, absval - z_wrong(q, reps) * se, -math.inf)
+    # a quantity the reference's halves disagree on can keep the run from right, not make it wrong
+    lower = np.where(checked & ~disputed(ref), absval - z_wrong(q, reps) * se, -math.inf)
     i, j = np.unravel_index(int(np.argmax(lower)), lower.shape)
     if lower[i, j] > tolerance:
         return Verdict("wrong", "error", ref.series[i], FUNCTIONS[j], float(err[i, j]), float(lower[i, j]), **base)
     upper = np.where(checked, absval + _z_right() * se, -math.inf)
     i, j = np.unravel_index(int(np.argmax(upper)), upper.shape)
     status = "right" if upper[i, j] < tolerance else "unproven"
-    return Verdict(status, "" if status == "right" else "unproven", ref.series[i], FUNCTIONS[j],
+    reason = "" if status == "right" else "disputed" if disputed(ref)[i, j] else "unproven"
+    return Verdict(status, reason, ref.series[i], FUNCTIONS[j],
                    float(err[i, j]), float(upper[i, j]), **base)
 
 

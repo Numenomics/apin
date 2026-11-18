@@ -171,3 +171,40 @@ def test_a_reference_constant_must_be_reproduced():
 def test_extra_run_variables_are_ignored(ref):
     d = dict(with_lp(ar1(np.random.default_rng(11), 5000, 4, 0.0)), extra=np.full((5000, 4), np.nan))
     assert gate.check(d, ref).status == "right"
+
+
+def _excursions(rng, n, chains, at):
+    """x = z + .002 w, y = z - .002 w, w normal with +200 added at the (draw, chain) pairs `at`:
+    the projection x - y is w alone and shows the rare excursions; x + y never does."""
+    z, w = rng.standard_normal((2, n, chains))
+    for t, c in at:
+        w[t, c] += 200
+    return {"x": z + 0.002 * w, "y": z - 0.002 * w}
+
+
+def test_a_quantity_the_reference_halves_disagree_on_cannot_be_wrong():
+    """T5: the reference is summarised on chains 5-9, which saw none of the rare excursions that
+    chains 0-4 saw, so its x - y projection claims a tiny MCSE. A correct run that sees them at
+    their true rate was called wrong. The halves disagree on that projection, so it can keep the
+    run from right but cannot make it wrong; quantities the halves agree on still can."""
+    rng = np.random.default_rng(5)
+    ref = reference.summarise(_excursions(rng, 1000, 10, [(100, 0), (500, 2), (900, 4)]))
+    assert ref.halves["mean"].shape == ref.halves["mcse"].shape == (2, len(ref.series), 4)
+    disputed = gate.disputed(ref)
+    assert disputed.any() and not disputed[:2].any()  # x and y themselves: the halves agree
+    run = _excursions(rng, 5000, 4, [(t, c) for c in range(4) for t in range(250, 5000, 2000)])
+    v = gate.check(run, ref)
+    assert v.status == "unproven" and v.reason == "disputed", v.label()
+    assert "halves" in v.label()
+    shifted = {k: x + (0.5 if k == "x" else 0.0) for k, x in run.items()}
+    assert gate.check(shifted, ref).status == "wrong"
+
+
+def test_a_reference_without_halves_cannot_make_a_run_wrong(ref):
+    """A reference that does not keep its halves cannot show that they agree."""
+    import dataclasses
+    bare = dataclasses.replace(ref, halves={})
+    assert gate.disputed(bare).all()
+    d = with_lp(ar1(np.random.default_rng(6), 5000, 4, 0.0))
+    d["x.1"] = d["x.1"] + 1.0
+    assert gate.check(d, ref).status == "wrong" and gate.check(d, bare).status == "unproven"

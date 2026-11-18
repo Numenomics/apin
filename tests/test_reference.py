@@ -65,8 +65,10 @@ def test_json_round_trip(tmp_path, monkeypatch):
     monkeypatch.setattr(reference, "REF_DIR", tmp_path)
     ref = _normal_ref(np.random.default_rng(4), rho=0.3)[1]
     ref.model, ref.source = "m", "local"
-    reference.path("m").write_text(ref.to_json())
+    reference.write(ref)
     back = reference.load("m")
+    for k in ("mean", "mcse"):
+        assert back.halves[k] == pytest.approx(ref.halves[k], rel=1e-3, abs=1e-12)
     assert back.names == ["a", "b"] and back.source == "local" and back.series == ref.series
     for k in reference.SERIES_STATS:
         assert back.stats[k] == pytest.approx(ref.stats[k], rel=1e-6, abs=1e-12)
@@ -87,7 +89,9 @@ def test_shipped_references_are_small_and_match_the_manifest():
     ms = models.load()
     for p in reference.REF_DIR.glob("*.json"):
         assert p.stat().st_size < reference.MAX_BYTES
+        assert reference.halves_path(p.stem).stat().st_size < reference.MAX_BYTES, p.stem
         ref = reference.load(p.stem)
+        assert ref.halves["mean"].shape == (2, len(ref.series), len(reference.FUNCTIONS)), p.stem
         assert ref.source == ms[p.stem].reference
         assert ref.names and ref.has_lp, p.stem
         assert np.all(ref.scale > 0) and np.all(ref.stats["scale"] > 0)
