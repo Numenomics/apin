@@ -113,3 +113,46 @@ def test_local_references_measure_projections_on_ten_chains():
     for m in models.load().values():
         if m.reference == "local" and reference.path(m.name).is_file():
             assert reference.load(m.name).meta["settings"]["chains"] >= 20, m.name
+
+
+def _fake_cmdstan_csv(path, s, chain, rng):
+    head = (f"# method = sample (Default)\n#   sample\n#     num_samples = {s['samples']}\n"
+            f"#     num_warmup = {s['warmup']}\n#     thin = {s['thin']}\n#     adapt\n#       delta = {s['adapt_delta']}\n"
+            f"# id = {chain + 1}\n# random\n#   seed = {s['seed']}\n")
+    x = rng.normal(size=s["samples"] // s["thin"])
+    path.write_text(head + "lp__,divergent__,x\n" + "".join(f"{-v * v / 2},0,{v}\n" for v in x))
+
+
+def test_a_rebuild_reuses_only_csvs_made_with_the_requested_settings(tmp_path, monkeypatch):
+    """T9: CSVs made with other settings, or cut short, are a cache miss, and the reference
+    records the settings its draws were made with."""
+    from harness import cmdstan
+    m = models.load()["wells_dist100_model"]
+    base = {"chains": 4, "warmup": 20, "samples": 400, "thin": 1, "adapt_delta": 0.95, "seed": 4711}
+    assert reference.settings_for(m, base) == base
+    rng = np.random.default_rng(3)
+    runs = []
+
+    def build(settings):
+        def run_chains(argv_for_chain, chains):  # stands in for CmdStan: writes chains for `settings`
+            runs.append(chains)
+            for c in range(chains):
+                _fake_cmdstan_csv(tmp_path / f"ref_{c}.csv", settings, c, rng)
+            return 1.0
+        monkeypatch.setattr(cmdstan, "run_chains", run_chains)
+        return reference.from_cmdstan(m, tmp_path, tmp_path, tmp_path, settings=settings, log=lambda *a: None)
+
+    monkeypatch.setattr(cmdstan, "parameter_names", lambda root, f: ["x"])
+    monkeypatch.setattr(cmdstan, "version", lambda root: "stub")
+    monkeypatch.setattr(cmdstan, "compile_model", lambda *a, **k: tmp_path / "exe")
+    monkeypatch.setattr(reference, "log_density", lambda model, draws, build_dir, **k: -draws["x"] ** 2 / 2)
+    for c in range(4):
+        _fake_cmdstan_csv(tmp_path / f"ref_{c}.csv", base, c, rng)
+    assert build(base).meta["settings"] == base and runs == []  # matching CSVs are reused
+
+    other = {**base, "seed": 991, "adapt_delta": 0.99}
+    assert build(other).meta["settings"] == other and runs == [4]  # other settings: sampled again
+
+    text = (tmp_path / "ref_2.csv").read_text()
+    (tmp_path / "ref_2.csv").write_text(text[: len(text) - 7])  # a cut-off last row
+    assert build(other).meta["settings"] == other and runs == [4, 4]

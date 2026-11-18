@@ -319,12 +319,12 @@ def from_cmdstan(model: Model, root: Path, build_dir: Path, work_dir: Path, sett
                  log=print, rerun: bool = False) -> Reference:
     """Long CmdStan runs, summarised. Raises if the result fails posteriordb's checks.
 
-    Reuses the chain CSVs in work_dir when all of them are there and complete, unless rerun."""
+    Reuses the chain CSVs in work_dir when all of them are there, complete and made with these
+    settings (their CmdStan header says so), unless rerun. Any other CSV is sampled again."""
     s = settings_for(model, settings)
     work_dir.mkdir(parents=True, exist_ok=True)
     csvs = [work_dir / f"ref_{c}.csv" for c in range(s["chains"])]
-    rows = s["samples"] // s["thin"]
-    files = None if rerun else _complete(csvs, rows)
+    files = None if rerun else _complete(csvs, s)
     wall = None
     if files is None:
         exe = cmdstan.compile_model(root, model.reference_stan_file, build_dir)
@@ -365,11 +365,40 @@ def settings_for(model: Model, settings: dict | None = None) -> dict:
     return {**LOCAL, **model.reference_settings, **(settings or {})}
 
 
-def _complete(csvs: list[Path], rows: int) -> list | None:
-    if not all(p.is_file() for p in csvs):
-        return None
-    files = [cmdstan.read_csv(p) for p in csvs]
-    return files if all(len(f.values) == rows for f in files) else None
+def _config(comments: list[str]) -> dict[str, str]:
+    """The `key = value` lines of a CmdStan CSV header, without "(Default)"."""
+    out = {}
+    for c in comments:
+        k, eq, v = c.lstrip("# ").partition(" = ")
+        if eq:
+            out.setdefault(k.strip(), v.replace("(Default)", "").strip())
+    return out
+
+
+def _made_with(f: cmdstan.StanCsv, s: dict, chain: int) -> bool:
+    """Whether a chain CSV was made with settings `s` as chain `chain` (CmdStan's id is chain + 1)."""
+    want = {"num_samples": s["samples"], "num_warmup": s["warmup"], "thin": s["thin"], "delta": s["adapt_delta"],
+            "seed": s["seed"], "id": chain + 1}
+    got = _config(f.comments)
+    try:
+        return all(k in got and float(got[k]) == float(v) for k, v in want.items())
+    except ValueError:
+        return False
+
+
+def _complete(csvs: list[Path], s: dict) -> list | None:
+    """The chain CSVs, when every one is there, readable, complete and made with settings `s`;
+    otherwise None (a cache miss)."""
+    files = []
+    for c, p in enumerate(csvs):
+        try:
+            f = cmdstan.read_csv(p)
+        except (OSError, ValueError, cmdstan.CmdStanError):
+            return None
+        if len(f.values) != s["samples"] // s["thin"] or not _made_with(f, s, c):
+            return None
+        files.append(f)
+    return files
 
 
 def build(model: Model, source: str, cmdstan_root: str | None = None, build_dir: Path = ROOT / "build",
