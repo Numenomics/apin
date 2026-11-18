@@ -345,22 +345,22 @@ What the run shows:
 
 ## Ways to game the score
 
-"Prevented" says whether the harness stops the attack. "Not with this interface" means `sample()` gives the harness no way to stop it; results under it are provisional (rules 2 and 5).
+"Prevented" says whether the harness stops the attack. "Yes" is used only where it does. "Partly" means it stops some forms of the attack and not others, and "bounded" means it limits the attack without stopping it. "Not with this interface" means `sample()` gives the harness no way to stop it; results under it are provisional (rules 2 and 5).
 
 | attack | defence | prevented |
 |---|---|---|
 | Return draws from a stored reference, or from a Laplace or variational fit, without paying for them. | Every draw must be a point the submission evaluated with a finite density (provenance). File access is forbidden; the references are not in the problem. | yes |
 | Return points the model rejected. | A rejected point has no finite density, so it fails provenance. Rejected calls are still charged. | yes |
 | Copy one chain four times. | No point may appear in two chains. | yes |
-| Sample each variable well and ignore the correlations. | The projections and lp__ are checked (rule 3). The credited ESS is the worst over them. | yes |
-| Hide a bias behind one extreme draw that inflates the MCSE. | The quantile exceedance fractions are bounded and still show the bias (rule 3). | yes |
+| Sample each variable well and ignore the correlations. | The projections and lp__ are checked (rule 3). The credited ESS is the worst over them. Caught only when the missing correlation moves a checked function by more than the tolerance: five reps that ignored a weak correlation were all right, with bounds of 0.041 to 0.049, and passed the calibration test (p = 1.0). | partly |
+| Hide a bias behind one extreme draw that inflates the MCSE. | The quantile exceedance fractions are bounded, so one draw cannot inflate their MCSE much, and they still show a bias that moves them (rule 3). A bias that leaves the checked tail fractions within the tolerance is not caught this way. | partly |
 | Spend evaluations in warmup and report only the sampling phase. | Every call counts, warmup included. | yes |
-| Thin a long chain by a large factor. | Allowed, and counted: thinning costs evaluations. The evaluation limit bounds it. | yes |
-| Be fast and biased. | The gate calls the bias wrong once the data show it. A small bias the data cannot show leaves the model unproven, which earns nothing. | yes |
+| Thin a long chain by a large factor. | Allowed, and counted: thinning costs evaluations. The evaluation limit bounds it. | bounded, not prevented |
+| Be fast and biased. | The gate calls a bias wrong once its lower bound, error minus z_w standard errors, exceeds the tolerance on a quantity the reference's halves agree on. A bias between the bounds, or on a quantity the halves disagree on, leaves the rep unproven, which earns nothing. A bias below the tolerance plus the reference's own error can be called right, and so can one hidden in rare jumps that the run never shows (rule 1). | partly |
 | Get stuck so the chains do not mix. | R-hat or ESS makes the rep unproven. It earns nothing. | yes |
-| Get stuck in the same mode in every chain. | Caught when the missing mass moves a checked function: the gate calls it wrong once the data show the shift. A mode whose absence leaves every checked function unchanged is not caught (rule 3). | partly |
+| Get stuck in the same mode in every chain. | Caught when the missing mass moves a checked function: the gate calls it wrong once the shift's lower bound exceeds the tolerance on a quantity the halves agree on, and unproven when the shift lies between the bounds or the halves disagree. A mode whose absence moves no checked function by more than the tolerance is not caught (rule 3). | partly |
 | Skip a hard model. | A missing model is wrong (rule 4). | yes |
-| Keep a lucky rep from an old seed or an old version. | A rep is reused only when its seed, submission and budget match. | yes |
+| Keep a lucky rep from an old seed or an old version. | `apin run` reuses a rep only when its seed, submission and budget match. The score checks each rep's seed, base seed, model, rep and budget against its grid cell, and refuses a label whose reps record different submissions. It checks the digest against the submission file only when given the file (`--submission`). | yes for the seed; for the version, only with `--submission` |
 | Change the budget or the shape the harness checks. | The harness copies both before the submission runs. | yes |
 | Keep computing after the last call. | The clock runs to the end of the conversion. | yes |
 | Identify the model by `problem.dim` and look up tuned step sizes. | Forbidden. Not prevented in code; an official round reads the code. | no: an official round reads the code |
