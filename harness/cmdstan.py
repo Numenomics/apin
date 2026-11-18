@@ -105,7 +105,7 @@ _SAMPLING = re.compile(r"#\s*([\d.eE+-]+) seconds \(Sampling\)")
 _TOTAL = re.compile(r"#\s*([\d.eE+-]+) seconds \(Total\)")
 
 
-def read_csv(path: Path) -> StanCsv:
+def read_csv(path: Path, columns: list[str] | None = None) -> StanCsv:
     """Read a CmdStan output CSV (or any CSV with a header row and '#' comments).
 
     With save_warmup=1, CmdStan writes the warmup draws first and then a
@@ -113,8 +113,9 @@ def read_csv(path: Path) -> StanCsv:
     `warmup_values`; `values` holds only the draws after it. A file without
     the comment (save_warmup=0, or not from CmdStan) has no warmup rows. A row without a line end
     or with a different number of fields than the header raises CmdStanError: the file was cut short.
+    With `columns`, only those of them in the file are kept, in file order.
     """
-    comments, header, rows, warm = [], None, [], None
+    comments, header, rows, warm, keep = [], None, [], None, None
     with open(path) as fh:
         for line in fh:
             if line.startswith("#"):
@@ -129,16 +130,18 @@ def read_csv(path: Path) -> StanCsv:
             fields = line.strip().split(",")
             if header is None:
                 header = fields
+                wanted = set(header if columns is None else columns)
+                keep = [i for i, h in enumerate(header) if h in wanted]
             elif len(fields) != len(header):
                 raise CmdStanError(f"{path.name}: a row has {len(fields)} fields, the header {len(header)}")
             else:
-                rows.append([float(v) for v in fields])
+                rows.append(np.array([fields[i] for i in keep], dtype=float))
     if header is None:
         raise CmdStanError(f"{path} has no header row")
     def mat(r):
-        return np.array(r, dtype=float).reshape(len(r), len(header))
+        return np.array(r, dtype=float).reshape(len(r), len(keep))
 
-    out = StanCsv(header, mat(rows), comments=comments, warmup_values=mat(warm) if warm is not None else None)
+    out = StanCsv([header[i] for i in keep], mat(rows), comments=comments, warmup_values=mat(warm) if warm is not None else None)
     for c in comments:
         if m := _ELAPSED.match(c):
             out.warmup_s = float(m.group(1))

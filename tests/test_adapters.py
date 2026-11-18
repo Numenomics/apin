@@ -67,6 +67,19 @@ def test_read_csv_keeps_warmup_rows_apart(tmp_path):
     assert cmdstan_adapter.timing_from_csvs([q], 1.0).grads_warmup is None
 
 
+def test_read_csv_keeps_only_the_columns_asked_for(tmp_path):
+    """A wide model writes thousands of generated quantities the gate never reads; parsing only the
+    columns it needs keeps memory to what it uses. Cut rows are still caught."""
+    p = tmp_path / "c.csv"
+    p.write_text("lp__,n_leapfrog__,x,y\n-1,7,0.1,9\n# Adaptation terminated\n-2,3,0.3,8\n-2,1,0.5,7\n")
+    f = cmdstan.read_csv(p, columns=["x", "n_leapfrog__", "absent"])
+    assert f.columns == ["n_leapfrog__", "x"] and f.values.shape == (2, 2) and f.warmup_values.shape == (1, 2)
+    assert f.column("x").tolist() == [0.3, 0.5] and f.column("y") is None
+    p.write_text("lp__,x\n-1,0.1\n-2\n")
+    with pytest.raises(cmdstan.CmdStanError, match="fields"):
+        cmdstan.read_csv(p, columns=["x"])
+
+
 def test_unflatten_for_pathfinder_inits():
     flat = {"lp__": 0.0, "mu": 1.0, "v.1": 2.0, "v.2": 3.0, "m.1.1": 4.0, "m.2.1": 5.0, "m.1.2": 6.0,
             "m.2.2": 7.0, "tp": 9.0}

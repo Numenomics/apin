@@ -51,7 +51,7 @@ def timing_from_csvs(csvs, wall: float) -> Timing:
     otherwise `uncounted` says why and the run earns no per-evaluation score."""
     warm, samp, chain, grads, grads_w, div, uncounted = [], [], [], 0, 0, 0, []
     for path in csvs:
-        f = cmdstan.read_csv(path)
+        f = cmdstan.read_csv(path, columns=["n_leapfrog__", "divergent__"])
         warm.append(f.warmup_s)
         samp.append(f.sampling_s)
         chain.append((f.warmup_s or 0.0) + (f.sampling_s or 0.0))

@@ -95,16 +95,16 @@ def _key(entry: Entry, reps: int) -> dict:
     return {"reps": reps, "reference": hashlib.sha256(entry.ref.to_json().encode()).hexdigest(), "gate": consts}
 
 
-def read_rep(rep_dir: Path, chains: int, draws: int) -> list:
-    """The chain CSVs of a rep, which must be exactly the budget: `chains` files of `draws` rows.
-    Raises ValueError naming what is missing or unreadable (rule 4: missing is failing)."""
+def read_rep(rep_dir: Path, chains: int, draws: int, names: list[str] | None = None) -> list:
+    """The chain CSVs of a rep (only the `names` columns, if given), which must be exactly the
+    budget: `chains` files of `draws` rows. Raises ValueError naming what is missing or unreadable (rule 4: missing is failing)."""
     files = chain_files(rep_dir)
     if len(files) != chains:
         raise ValueError(f"{len(files)} chains, the budget is {chains}")
     csvs = []
     for f in files:
         try:
-            csvs.append(cmdstan.read_csv(f))
+            csvs.append(cmdstan.read_csv(f, columns=names))
         except (OSError, ValueError, cmdstan.CmdStanError) as e:
             raise ValueError(f"{f.name} unreadable: {e}") from None
         if len(csvs[-1].values) != draws:
@@ -125,12 +125,13 @@ def verdict(rep_dir: Path, entry: Entry, reps: int) -> gate.Verdict:
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         pass
     ref = entry.ref
+    names = list(ref.names) + list(ref.constants)
     try:
-        csvs = read_rep(rep_dir, entry.chains, entry.draws)
+        csvs = read_rep(rep_dir, entry.chains, entry.draws, names)
     except ValueError as e:
         v = gate.Verdict("wrong", str(e))
     else:
-        draws = chain_draws(rep_dir, list(ref.names) + list(ref.constants), csvs)
+        draws = chain_draws(rep_dir, names, csvs)
         if ref.has_lp and all(n in draws for n in ref.names):
             draws[LP] = entry.lp(draws)
         v = gate.check(draws, ref, reps=reps)
