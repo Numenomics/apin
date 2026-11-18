@@ -285,6 +285,35 @@ def test_a_metered_rep_must_record_its_limits_and_consistent_counts(tmp_path, gr
     assert "density" in got[("m2", 1)][1]
 
 
+def test_counts_are_non_negative_integers_and_a_metered_rep_is_never_uncounted(tmp_path, grid):
+    """U2 remainder: a metered rep one call over the cap kept its model point once it was marked
+    `uncounted`, and a negative density count made a consistent total of 1 (14 871 ESS per
+    evaluation). Counts must be non-negative integers, the cap is checked on the validated total,
+    and only an adapter that cannot count, which the harness does not meter, may be uncounted."""
+    cap = grid.entries["m1"].max_evaluations
+
+    def negative_density(t):
+        t["extra"]["density_evals"] = 1 - t["extra"]["gradient_evals"]
+        t["evaluations"] = 1
+
+    def unmetered(t, **counts):
+        t.update(evaluations=None, extra={}, **counts)
+
+    cases = {
+        ("m1", 0): (cap + 1, lambda t: t.update(uncounted="unknown")),
+        ("m1", 1): (10**5, negative_density),
+        ("m2", 0): (None, lambda t: unmetered(t, grads_sampling=-5, grads_warmup=10)),
+        ("m2", 1): (None, lambda t: unmetered(t, grads_sampling=cap, grads_warmup=1, uncounted="thin")),
+    }
+    for (m, r), (evaluations, change) in cases.items():
+        _rewrite(write_rep(tmp_path, "x", m, r, grid, evaluations=evaluations), change)
+    got = _reasons(tmp_path, grid)
+    assert all(v[0] == "wrong" for v in got.values()), got
+    assert "uncounted" in got[("m1", 0)][1]
+    assert "non-negative" in got[("m1", 1)][1] and "non-negative" in got[("m2", 0)][1]
+    assert "limit" in got[("m2", 1)][1]
+
+
 def test_a_logdensity_rep_without_counts_is_wrong(tmp_path, grid):
     """A logdensity rep is metered whatever its record says, so one that records no counts and
     no limits is wrong too."""

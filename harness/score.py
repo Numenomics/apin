@@ -189,6 +189,40 @@ def metered(rec: dict) -> bool:
             or any(extra.get(k) is not None for k in METERED_KEYS))
 
 
+COUNT_KEYS = ("evaluations", "grads_sampling", "grads_warmup")
+
+
+def count_problem(rec: dict, entry: Entry) -> str | None:
+    """Why a rep's evaluation counts make it wrong, or None. Every recorded count is a
+    non-negative integer. A metered rep records the grid's limits, a total equal to its density
+    plus gradient calls, and no `uncounted` reason: the harness counted every call, and only an
+    adapter that cannot count (CmdStan with thin, Pathfinder, nutpie) may say it left some out.
+    The cap is checked on the validated total; for a rep that is not metered, on the calls it
+    reports, even when that count is incomplete."""
+    t = rec["timing"]
+    extra = t.get("extra") or {}
+    for name, v in [(k, t.get(k)) for k in COUNT_KEYS] + [(k, extra.get(k)) for k in METERED_KEYS[:2]]:
+        if v is not None and (type(v) is not int or v < 0):
+            return f"recorded {name} {v!r}, not a non-negative integer"
+    if metered(rec):
+        limits = (entry.max_evaluations, entry.max_seconds)
+        recorded = (extra.get("max_evaluations"), extra.get("max_seconds"))
+        if recorded != limits:
+            return f"limits {recorded} (evaluations, s), the grid's are {limits}"
+        if t.get("uncounted"):
+            return f"was metered by the harness, so it may not be uncounted ({t['uncounted']!r})"
+        total, dens, grad = t.get("evaluations"), extra.get("density_evals"), extra.get("gradient_evals")
+        if None in (total, dens, grad) or total != dens + grad:
+            return f"counted {total} evaluations, not its {dens} density plus {grad} gradient calls"
+    elif t.get("grads_sampling") is not None and t.get("grads_warmup") is not None:
+        total = t["grads_sampling"] + t["grads_warmup"]
+    else:
+        total = None
+    if total is not None and total > entry.max_evaluations:
+        return f"used {total} evaluations, the limit is {entry.max_evaluations}"
+    return None
+
+
 def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid, digest: str | None = None) -> dict:
     """The row of one grid cell. `digest`, when given, is the sha256 of the label's submission
     file, which the rep must have recorded."""
@@ -223,19 +257,10 @@ def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid, digest: str | No
     if got != want:
         return wrong(f"rep{rep} budget {got} (chains, warmup, draws), the grid's is {want}")
     t = rec["timing"]
+    problem = count_problem(rec, entry)
+    if problem:
+        return wrong(f"rep{rep} {problem}")
     total, dens, grad = evaluation_counts(t)
-    limits = (entry.max_evaluations, entry.max_seconds)
-    extra = t.get("extra") or {}
-    recorded = (extra.get("max_evaluations"), extra.get("max_seconds"))
-    if metered(rec):
-        if recorded != limits:
-            return wrong(f"rep{rep} limits {recorded} (evaluations, s), the grid's are {limits}")
-        counts = (t.get("evaluations"), extra.get("density_evals"), extra.get("gradient_evals"))
-        if not all(isinstance(c, int) for c in counts) or counts[0] != counts[1] + counts[2]:
-            return wrong(f"rep{rep} counted {counts[0]} evaluations, not its {counts[1]} density plus "
-                         f"{counts[2]} gradient calls")
-    if total is not None and total > entry.max_evaluations:
-        return wrong(f"rep{rep} used {total} evaluations, the limit is {entry.max_evaluations}")
     if t.get("wall_s") is not None and t["wall_s"] > entry.max_seconds:
         return wrong(f"rep{rep} took {t['wall_s']:.0f} s, the limit is {entry.max_seconds:.0f} s")
     v = verdict(d, entry, g.reps)
