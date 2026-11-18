@@ -197,10 +197,11 @@ def bench_score(rows: list[dict], models: list[dict], label: str, baseline: str)
     median, PENALTY for a wrong or failed rep; median over reps; geometric mean over models.
 
     A model on which the baseline itself is wrong, or has no finite cost, has nothing to compare
-    against; it is left out of the score and listed under "excluded"."""
-    base, excluded = {}, set()
+    against. A model with no reference posterior cannot be gated, so a wrong sampler would score
+    there. Both are left out of the score and listed under "excluded"."""
+    base, excluded = {}, {r["model"] for r in rows if r.get("gate") == "no reference"}
     for m in models:
-        if m["label"] == baseline:
+        if m["label"] == baseline and m["model"] not in excluded:
             b = m.get("ess_per_eval", math.nan)
             if m.get("gate") == "wrong" or not (isinstance(b, (int, float)) and math.isfinite(b) and b > 0):
                 excluded.add(m["model"])
@@ -296,7 +297,7 @@ def score(runs_dir: Path, out_dir: Path, labels: list[str] | None = None, baseli
             log(f"{b['label']} vs {baseline}: benchmark score {b['score']:.3g} "
                 f"[{b['score_lo']:.3g}, {b['score_hi']:.3g}] over {b['n_models']} models "
                 f"(geomean of ESS-per-evaluation ratios, {PENALTY:g} for a wrong or failed model)"
-                + (f"; left out because {baseline} is wrong there: {b['excluded']}" if b["excluded"] else ""))
+                + (f"; left out (no reference, or {baseline} wrong): {b['excluded']}" if b["excluded"] else ""))
         for label in sorted({r["label"] for r in rat}):
             g = [r["ratio_ess_per_s_wall"] for r in rat if r["label"] == label]
             log(f"{label} vs {baseline}: geomean ESS/s ratio {_geomean(g):.3f} over {len(g)} models")

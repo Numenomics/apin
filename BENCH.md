@@ -73,6 +73,8 @@ A score of 1 means "as efficient as NUTS per evaluation". A score of 2 means hal
 
 **Wrong reps.** The gate judges each rep alone, and its power depends on the rep's ESS. A sampler with a small bias can pass in some reps and fail in others. The median over reps then forgives one wrong rep in three, or two in five. The demo run below shows this twice: the wrong ULA passed one rep of garch11, and HMC failed one rep of eight_schools_centered on the mean of tau. Both models still came out right, wrong for ULA and correct for HMC. *Alternative:* a model whose reps include any wrong one scores PENALTY. The gate's false-fail rate is at most 1 % per rep, so a correct sampler would lose a model about once in 20 models of 5 reps. That rule is stricter on samplers that are nearly right, and it would have marked HMC wrong on eight_schools_centered.
 
+**Models without a reference.** The gate cannot check a model that has no reference posterior, so a wrong sampler would score there. Such a model is left out and listed under "excluded". Today this is kronecker_gp, so the held-out score covers 10 models. *Alternative:* score it with the gate's other checks only (R-hat and finiteness). That keeps the model but lets a sampler that is consistently biased through.
+
 **Why per evaluation.** ESS per evaluation does not depend on the machine, on load, or on how well the submission uses numpy. A submission in pure Python competes with C++ NUTS. *Alternative:* `ess_per_s_chain`, ESS per second of one core. That measures what a user waits for, but it mostly measures how well the overhead was vectorised. Both columns are in `table.md`.
 
 **Why min(bulk, tail).** Bulk ESS alone rewards a sampler that mixes the centre and never visits the tails.

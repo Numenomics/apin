@@ -110,3 +110,13 @@ def test_bench_interval_brackets_the_score():
     b = score.bench_score(rows, score.per_model(rows), "cand", "base")
     assert b["score_lo"] <= b["score"] <= b["score_hi"]
     assert b["score_lo"] >= 1.0 - 1e-12 and b["score_hi"] <= 2.0 + 1e-12
+
+
+def test_bench_score_leaves_out_models_without_a_reference():
+    rows = [_gated("base", m, 0, 0.01) for m in ("m1", "m2")]
+    rows += [_gated("cand", "m1", 0, 0.02), _gated("cand", "m2", 0, 0.5)]
+    for r in rows:
+        if r["model"] == "m2":
+            r["gate"] = "no reference"
+    b = score.bench_score(rows, score.per_model(rows), "cand", "base")
+    assert b["per_model"] == {"m1": pytest.approx(2.0)} and b["excluded"] == "m2"

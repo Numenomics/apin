@@ -67,7 +67,7 @@ uv run apin score --baseline cmdstan
 
 The first logdensity run of each model builds a BridgeStan library, one to two minutes per model.
 
-posteriordb has no reference for 9 of the models. apin builds those with CmdStan and posteriordb's recipe, and keeps them in git. To rebuild one:
+posteriordb has no reference for 9 of the models. apin built 8 of them with CmdStan and posteriordb's recipe, and keeps them in git. kronecker_gp has none yet. To rebuild one:
 
 ```bash
 uv run apin reference build --models pilots   # needs CMDSTAN; minutes to an hour per model

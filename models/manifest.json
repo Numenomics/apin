@@ -185,9 +185,9 @@
     "data_sha256": "68498ac82e2e59c244f49cfff6973a4e4bf914270bb6989564df15bb5387a5fe",
     "data_shipped": true,
     "reference": {
-      "source": "local",
+      "source": "none",
       "posteriordb": null,
-      "note": "posteriordb has no reference posterior; built with `apin reference build`"
+      "note": "posteriordb has no reference posterior, and `apin reference build` did not finish in 1 hour 50 minutes on a loaded 12-core machine (posteriordb's recipe, 120 000 iterations of NUTS). The gate cannot check this model, so the benchmark score leaves it out until a reference is built."
     }
   },
   {
