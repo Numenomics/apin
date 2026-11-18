@@ -167,6 +167,8 @@ lp__ is computed by the harness from the constrained draws with BridgeStan. A co
 
 A label whose reps come from more than one submission is refused.
 
+The checks on a record catch stale, damaged and mismatched records: a rep from an old seed or budget, a cut chain file, a cache that outlived its files, a count that does not add up. They do not make a record tamper-proof. Whoever can write `run.json` and the chain files can write a consistent false record, and the scorer cannot tell. An official round is scored only from records the organiser's own harness wrote.
+
 ### Rule 5: the seam and its limits
 
 `harness/logdensity.py` hands the submission two plain functions and a copy of its budget. The limits the harness enforces and the shape it expects are copied before the submission runs.
