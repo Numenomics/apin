@@ -18,7 +18,7 @@ Only `right` earns speed credit. A model is right when every rep is right, wrong
 
 **Rule 3. The posterior is joint.** The gate checks every variable, the log density of the draws, and a fixed set of projections stored with each reference. For each of these it checks the mean, the mean of the square, and the fractions of draws below the reference's 5 % and 95 % quantiles. A fraction is bounded, so a single extreme draw cannot hide an error in it. These are a stated, finite list of functions. A run can differ from the posterior in any function outside the list and still be right.
 
-**Rule 4. Missing is failing.** The score is computed over a declared grid of models and reps. A missing or failed rep makes its model wrong. A saved rep is reused, and scored, only when its seed, its submission and its budget match the grid.
+**Rule 4. Missing is failing.** The score is computed over a declared grid of models and reps. A missing or failed rep makes its model wrong. `apin run` reuses a saved rep only when its seed, its submission and its budget match the request. The score accepts a rep only when its model, rep, seed, base seed and budget match its grid cell; it checks the rep's submission against the submission file only when it is given that file (`--submission`). Without it, a rep with an old digest can score right.
 
 **Rule 5. A submission sees the interface and nothing else, and everything it does is charged.** The interface is `sample(problem, budget, rng)`. Every call is counted. The clock runs from loading the submission to converting what it returns. The interface cannot show that the returned draws are a Markov chain's or that the chains are independent, so results under it are provisional, and no official round runs on it.
 
