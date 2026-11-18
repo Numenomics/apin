@@ -319,7 +319,7 @@ def from_cmdstan(model: Model, root: Path, build_dir: Path, work_dir: Path, sett
     """Long CmdStan runs, summarised. Raises if the result fails posteriordb's checks.
 
     Reuses the chain CSVs in work_dir when all of them are there and complete, unless rerun."""
-    s = {**LOCAL, **(settings or {})}
+    s = settings_for(model, settings)
     work_dir.mkdir(parents=True, exist_ok=True)
     csvs = [work_dir / f"ref_{c}.csv" for c in range(s["chains"])]
     rows = s["samples"] // s["thin"]
@@ -356,6 +356,12 @@ def from_cmdstan(model: Model, root: Path, build_dir: Path, work_dir: Path, sett
             "settings": s, "checks": checks, "wall_s": None if wall is None else round(wall, 1),
             "draws": int(next(iter(draws.values())).size), "variables": "parameters block", "lp": LP_CONVENTION}
     return summarise(draws, log_density(model, draws, build_dir), model.name, "local", meta)
+
+
+def settings_for(model: Model, settings: dict | None = None) -> dict:
+    """The CmdStan settings of a local reference: LOCAL, then the model's manifest settings
+    (reference.settings), then `settings`."""
+    return {**LOCAL, **model.reference_settings, **(settings or {})}
 
 
 def _complete(csvs: list[Path], rows: int) -> list | None:

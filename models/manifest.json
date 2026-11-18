@@ -141,7 +141,8 @@
     "reference": {
       "source": "local",
       "posteriordb": null,
-      "note": "posteriordb has no reference posterior; built with `apin reference build`"
+      "settings": {"chains": 20},
+      "note": "posteriordb has no reference posterior; built with `apin reference build`. 20 chains: with 10, the 5 chains that measure the projections put proj.11 about 5 MCSE away from two independent runs (BENCH.md)"
     },
     "budget": {
       "draws": 5000

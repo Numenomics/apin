@@ -93,3 +93,12 @@ def test_shipped_references_are_small_and_match_the_manifest():
         assert np.all(ref.scale > 0) and np.all(ref.stats["scale"] > 0)
         assert all(np.all(np.isfinite(ref.stats[k])) for k in reference.SERIES_STATS), p.stem
         assert ref.calibration["functions"] > 0
+
+
+def test_a_model_can_raise_its_reference_settings_in_the_manifest():
+    """A local reference is built with LOCAL, then the model's manifest settings, then the
+    command line; so a rebuild from the repository repeats the reference that is shipped."""
+    m = models.load()["radon_variable_intercept_slope_noncentered"]
+    s = reference.settings_for(m, {"adapt_delta": 0.99})
+    assert s == {**reference.LOCAL, "chains": 20, "adapt_delta": 0.99}
+    assert reference.settings_for(models.load()["blr"]) == reference.LOCAL
