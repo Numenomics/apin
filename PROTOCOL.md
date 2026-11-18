@@ -23,7 +23,7 @@ Every rep gets a verdict from the correctness gate (next section): right, wrong 
 | column | meaning |
 |---|---|
 | `ess_per_eval` | credited ESS divided by every density and gradient evaluation, warmup included. It does not depend on load, depends on the machine only through floating-point results, and does not let a sampler hide work in warmup. It is the primary speed. It needs complete counts: for CmdStan, the count read from every saved warmup and sampling row with thin = 1 (see below), or the logdensity adapter's own count. An adapter that cannot count all its evaluations says why in `timing.uncounted`, and the rep has no `ess_per_eval`. |
-| `ess_per_s` | credited ESS divided by the sum of each chain's own time (warmup plus sampling). This removes the effect of parallel dispatch. It does not remove the effect of machine load. W-109 and W-133 used this convention ("stanza sum"). It is the secondary speed. |
+| `ess_per_s` | credited ESS divided by the sum of the record's `chain_s` entries. For CmdStan each entry is that chain's own time (warmup plus sampling), and for adapters that record each chain's own time this removes the effect of parallel dispatch. For a `sample()` submission each entry is `wall_s / chains` (see below). For nutpie every entry is the wall time of the whole batch, so the sum is chains × wall time and does not remove parallel dispatch. It does not remove the effect of machine load. W-109 and W-133 used this convention ("stanza sum"). It is the secondary speed. |
 
 Never compare numbers that use different conventions. A report states which one it uses.
 
