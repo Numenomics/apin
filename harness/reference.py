@@ -362,11 +362,13 @@ def from_cmdstan(model: Model, root: Path, build_dir: Path, work_dir: Path, sett
     """Long CmdStan runs, summarised. Raises if the result fails posteriordb's checks.
 
     Reuses the chain CSVs in work_dir when all of them are there, complete and made with these
-    settings (their CmdStan header says so), unless rerun. Any other CSV is sampled again."""
+    settings and the CmdStan at `root` (their CmdStan header says so), unless rerun. Any other
+    CSV is sampled again. The reference records the version named in the CSVs it summarises."""
     s = settings_for(model, settings)
     work_dir.mkdir(parents=True, exist_ok=True)
     csvs = [work_dir / f"ref_{c}.csv" for c in range(s["chains"])]
-    files = None if rerun else _complete(csvs, s)
+    want = _version(cmdstan.version(root))
+    files = None if rerun else _complete(csvs, s, want)
     wall = None
     if files is None:
         exe = cmdstan.compile_model(root, model.reference_stan_file, build_dir)
@@ -395,7 +397,11 @@ def from_cmdstan(model: Model, root: Path, build_dir: Path, work_dir: Path, sett
         problems.append(f"R-hat {rhat:.4f} >= 1.01")
     if problems:
         raise RuntimeError(f"{model.name}: reference run fails posteriordb's checks: {'; '.join(problems)}")
-    meta = {"cmdstan": cmdstan.version(root), "stan_file": str(model.reference_stan_file.relative_to(ROOT)),
+    made = {f.config.get("stanc_version") for f in files}
+    if len(made) != 1 or _version(next(iter(made))) != want:
+        raise RuntimeError(f"{model.name}: the chain CSVs name stanc {sorted(map(str, made))}, CmdStan at the "
+                           f"requested root is {want}")
+    meta = {"cmdstan": next(iter(made)), "stan_file": str(model.reference_stan_file.relative_to(ROOT)),
             "settings": s, "checks": checks, "wall_s": None if wall is None else round(wall, 1),
             "draws": int(next(iter(draws.values())).size), "variables": "parameters block", "lp": LP_CONVENTION}
     return summarise(draws, log_density(model, draws, build_dir), model.name, "local", meta)
@@ -418,16 +424,23 @@ def _made_with(f: cmdstan.StanCsv, s: dict, chain: int) -> bool:
         return False
 
 
-def _complete(csvs: list[Path], s: dict) -> list | None:
-    """The chain CSVs, when every one is there, readable, complete and made with settings `s`;
-    otherwise None (a cache miss)."""
+def _version(text: str | None) -> str | None:
+    """The x.y.z of a stanc version string ("stanc3 v2.39.0 (Unix)" or a CSV's "stanc3 v2.39.0")."""
+    m = re.search(r"v(\d+\.\d+\.\d+)", text or "")
+    return m.group(1) if m else None
+
+
+def _complete(csvs: list[Path], s: dict, version: str | None) -> list | None:
+    """The chain CSVs, when every one is there, readable, complete and made with settings `s` by
+    stanc `version` (x.y.z); otherwise None (a cache miss)."""
     files = []
     for c, p in enumerate(csvs):
         try:
             f = cmdstan.read_csv(p)
         except (OSError, ValueError, cmdstan.CmdStanError):
             return None
-        if len(f.values) != s["samples"] // s["thin"] or not _made_with(f, s, c):
+        if (len(f.values) != s["samples"] // s["thin"] or not _made_with(f, s, c)
+                or version is None or _version(f.config.get("stanc_version")) != version):
             return None
         files.append(f)
     return files

@@ -119,8 +119,8 @@ def test_local_references_measure_projections_on_ten_chains():
             assert reference.load(m.name).meta["settings"]["chains"] >= 20, m.name
 
 
-def _fake_cmdstan_csv(path, s, chain, rng):
-    head = (f"# method = sample (Default)\n#   sample\n#     num_samples = {s['samples']}\n"
+def _fake_cmdstan_csv(path, s, chain, rng, stanc="stanc3 v2.39.0"):
+    head = (f"# stanc_version = {stanc}\n# method = sample (Default)\n#   sample\n#     num_samples = {s['samples']}\n"
             f"#     num_warmup = {s['warmup']}\n#     thin = {s['thin']}\n#     adapt\n#       delta = {s['adapt_delta']}\n"
             f"# id = {chain + 1}\n# random\n#   seed = {s['seed']}\n")
     x = rng.normal(size=s["samples"] // s["thin"])
@@ -147,7 +147,7 @@ def test_a_rebuild_reuses_only_csvs_made_with_the_requested_settings(tmp_path, m
         return reference.from_cmdstan(m, tmp_path, tmp_path, tmp_path, settings=settings, log=lambda *a: None)
 
     monkeypatch.setattr(cmdstan, "parameter_names", lambda root, f: ["x"])
-    monkeypatch.setattr(cmdstan, "version", lambda root: "stub")
+    monkeypatch.setattr(cmdstan, "version", lambda root: "stanc3 v2.39.0 (Unix)")
     monkeypatch.setattr(cmdstan, "compile_model", lambda *a, **k: tmp_path / "exe")
     monkeypatch.setattr(reference, "log_density", lambda model, draws, build_dir, **k: -draws["x"] ** 2 / 2)
     for c in range(4):
@@ -160,6 +160,39 @@ def test_a_rebuild_reuses_only_csvs_made_with_the_requested_settings(tmp_path, m
     text = (tmp_path / "ref_2.csv").read_text()
     (tmp_path / "ref_2.csv").write_text(text[: len(text) - 7])  # a cut-off last row
     assert build(other).meta["settings"] == other and runs == [4, 4]
+
+
+def test_a_rebuild_with_another_cmdstan_samples_again(tmp_path, monkeypatch):
+    """U7: CSVs made by CmdStan 2.39 were reused for a build with 2.40 and the reference recorded
+    2.40. A CSV whose header names another version than the requested CmdStan is a cache miss,
+    and the reference records the version in the CSVs it was summarised from."""
+    from harness import cmdstan
+    m = models.load()["wells_dist100_model"]
+    s = {"chains": 4, "warmup": 20, "samples": 400, "thin": 1, "adapt_delta": 0.95, "seed": 4711}
+    rng = np.random.default_rng(4)
+    installed, runs = ["stanc3 v2.39.0 (Unix)"], []
+
+    def run_chains(argv_for_chain, chains):
+        runs.append(chains)
+        for c in range(chains):
+            _fake_cmdstan_csv(tmp_path / f"ref_{c}.csv", s, c, rng, stanc=installed[0].removesuffix(" (Unix)"))
+        return 1.0
+
+    monkeypatch.setattr(cmdstan, "run_chains", run_chains)
+    monkeypatch.setattr(cmdstan, "parameter_names", lambda root, f: ["x"])
+    monkeypatch.setattr(cmdstan, "version", lambda root: installed[0])
+    monkeypatch.setattr(cmdstan, "compile_model", lambda *a, **k: tmp_path / "exe")
+    monkeypatch.setattr(reference, "log_density", lambda model, draws, build_dir, **k: -draws["x"] ** 2 / 2)
+    for c in range(4):
+        _fake_cmdstan_csv(tmp_path / f"ref_{c}.csv", s, c, rng)
+
+    def build():
+        return reference.from_cmdstan(m, tmp_path, tmp_path, tmp_path, settings=s, log=lambda *a: None)
+
+    assert build().meta["cmdstan"] == "stanc3 v2.39.0" and runs == []
+    installed[0] = "stanc3 v2.40.0 (Unix)"
+    assert build().meta["cmdstan"] == "stanc3 v2.40.0" and runs == [4]
+    assert build().meta["cmdstan"] == "stanc3 v2.40.0" and runs == [4]
 
 
 def test_to_json_raises_no_numpy_warning():
