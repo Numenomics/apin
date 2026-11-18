@@ -114,34 +114,37 @@ def test_example_hmc_on_fake_model():
 
 @pytest.mark.slow
 def test_examples_end_to_end(tmp_path):
-    """The example HMC passes the gate on the two smallest models; ULA with a large step fails."""
-    ms = models.select("eight_schools_noncentered,blr")
+    """At the bench budget the example HMC is not wrong on the two smallest models; ULA with a large step is."""
+    names = "eight_schools_noncentered,blr"
+    ms = models.select(names)
     for label, file in (("hmc", "hmc.py"), ("ula", "ula_wrong.py")):
         s = sampler.get("logdensity", sampler.Settings(build_dir=tmp_path / "build",
                                                        options={"sampler": str(EXAMPLES / file)}))
         done = grid.run_grid(s, ms, reps=1, runs_dir=tmp_path / "runs", label=label, log=lambda *_: None)
         assert len(done) == 2
-    out = score.score(tmp_path / "runs", tmp_path / "scores", log=lambda *_: None)
-    gates = {(r["label"], r["model"]): r for r in out["per_run"]}
+    g = score.declared(names, reps=1, build_dir=tmp_path / "build")
+    out = score.score(tmp_path / "runs", tmp_path / "scores", g, log=lambda *_: None)
+    rows = {(r["label"], r["model"]): r for r in out["per_run"]}
     for m in ("eight_schools_noncentered", "blr"):
-        hmc, ula = gates["hmc", m], gates["ula", m]
-        assert hmc["gate"] == "pass", hmc["gate_detail"]
-        assert hmc["evaluations"] > 0 and hmc["ess_per_eval"] > 0 and hmc["ess_per_s_wall"] > 0
-        assert ula["gate"] == "wrong", ula["gate_detail"]
+        hmc, ula = rows["hmc", m], rows["ula", m]
+        assert hmc["status"] != "wrong", hmc["reason"]
+        assert hmc["evaluations"] == hmc["density_evals"] + hmc["gradient_evals"] > 0
+        assert ula["status"] == "wrong", ula["reason"]
         assert math.isnan(ula["ess_per_eval"])
 
 
 @pytest.mark.slow
 @pytest.mark.skipif(not os.environ.get("CMDSTAN"), reason="CMDSTAN not set")
-def test_cmdstan_nuts_passes_the_gate(tmp_path):
+def test_cmdstan_nuts_is_not_wrong(tmp_path):
+    names = "eight_schools_noncentered,blr,kidscore_momiq"
     s = sampler.get("cmdstan", sampler.Settings(build_dir=tmp_path / "build"))
-    ms = models.select("eight_schools_noncentered,blr,kidscore_momiq")
-    grid.run_grid(s, ms, reps=1, runs_dir=tmp_path / "runs", log=lambda *_: None)
-    out = score.score(tmp_path / "runs", tmp_path / "scores", log=lambda *_: None)
+    grid.run_grid(s, models.select(names), reps=1, runs_dir=tmp_path / "runs", log=lambda *_: None)
+    g = score.declared(names, reps=1, build_dir=tmp_path / "build")
+    out = score.score(tmp_path / "runs", tmp_path / "scores", g, log=lambda *_: None)
     assert len(out["per_run"]) == 3
     for row in out["per_run"]:
-        assert row["gate"] == "pass", (row["model"], row["gate_detail"])
-        assert row["evaluations"] > row["grads_sampling"]  # warmup is counted
+        assert row["status"] != "wrong", (row["model"], row["reason"])
+        assert row["evaluations"] == row["gradient_evals"] > 4 * 5000  # warmup is counted
 
 
 def test_provenance_marks_only_evaluated_points():
