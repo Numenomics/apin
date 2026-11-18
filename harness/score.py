@@ -171,6 +171,19 @@ def evaluation_counts(t: dict) -> tuple[int | None, int | None, int | None]:
     return total, dens, grad
 
 
+METERED_KEYS = ("density_evals", "gradient_evals", "max_evaluations", "max_seconds")
+
+
+def metered(rec: dict) -> bool:
+    """Whether the harness counted the rep's evaluations against the grid's limits (the logdensity
+    adapter). Such a rep must record both limits and a total equal to its density plus gradient
+    calls; a record that keeps any sign of the meter and drops the rest is wrong, not unmetered."""
+    t = rec.get("timing") or {}
+    extra = t.get("extra") or {}
+    return (rec.get("sampler") == "logdensity" or t.get("evaluations") is not None
+            or any(extra.get(k) is not None for k in METERED_KEYS))
+
+
 def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid) -> dict:
     d = label_dir / entry.model / f"rep{rep}"
     row = {"label": label_dir.name, "model": entry.model, "rep": rep, "status": "wrong", "reason": "",
@@ -200,8 +213,13 @@ def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid) -> dict:
     limits = (entry.max_evaluations, entry.max_seconds)
     extra = t.get("extra") or {}
     recorded = (extra.get("max_evaluations"), extra.get("max_seconds"))
-    if recorded != (None, None) and recorded != limits:
-        return wrong(f"rep{rep} limits {recorded} (evaluations, s), the grid's are {limits}")
+    if metered(rec):
+        if recorded != limits:
+            return wrong(f"rep{rep} limits {recorded} (evaluations, s), the grid's are {limits}")
+        counts = (t.get("evaluations"), extra.get("density_evals"), extra.get("gradient_evals"))
+        if not all(isinstance(c, int) for c in counts) or counts[0] != counts[1] + counts[2]:
+            return wrong(f"rep{rep} counted {counts[0]} evaluations, not its {counts[1]} density plus "
+                         f"{counts[2]} gradient calls")
     if total is not None and total > entry.max_evaluations:
         return wrong(f"rep{rep} used {total} evaluations, the limit is {entry.max_evaluations}")
     if t.get("wall_s") is not None and t["wall_s"] > entry.max_seconds:

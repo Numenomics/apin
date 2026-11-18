@@ -30,7 +30,9 @@ def grid():
 
 
 def write_rep(runs, label, model, rep, grid, *, shift=0.0, evaluations=10**5, seconds=2.0, identity=None,
-              seed=None, draws=None, seed_rng=None, limits=None):
+              seed=None, draws=None, seed_rng=None, limits="grid", sampler="fake"):
+    """A finished rep. A rep with `evaluations` is metered and records the grid's limits unless
+    `limits` says otherwise (None: none recorded)."""
     d = runs / label / model / f"rep{rep}"
     d.mkdir(parents=True)
     e = grid.entries[model]
@@ -45,9 +47,11 @@ def write_rep(runs, label, model, rep, grid, *, shift=0.0, evaluations=10**5, se
               "evaluations": evaluations,
               "extra": {} if evaluations is None else {"density_evals": evaluations // 4,
                                                        "gradient_evals": evaluations - evaluations // 4}}
+    if limits == "grid":
+        limits = None if evaluations is None else (e.max_evaluations, e.max_seconds)
     if limits is not None:
         timing["extra"].update(max_evaluations=limits[0], max_seconds=limits[1])
-    rec = {"label": label, "sampler": "fake", "model": model, "rep": rep,
+    rec = {"label": label, "sampler": sampler, "model": model, "rep": rep,
            "seed": grid.base_seed + 1000 * rep if seed is None else seed, "base_seed": grid.base_seed,
            "chains": e.chains, "warmup": e.warmup, "draws": n, "identity": identity or {"name": label},
            "timing": timing}
@@ -235,7 +239,7 @@ def test_a_cached_verdict_holds_only_for_the_files_it_was_computed_from(tmp_path
 
 def test_a_rep_run_with_other_limits_or_over_them_is_wrong(tmp_path, grid):
     """T2: the grid carries the evaluation and time limits. A rep that recorded other limits, or
-    used more than the grid's, is wrong; one within them that recorded none is scored."""
+    used more than the grid's, is wrong."""
     e = grid.entries["m1"]
     cap, secs = e.max_evaluations, e.max_seconds
     assert (cap, secs) == (e.chains * (e.warmup + e.draws) * 1023, 1800.0)
@@ -248,3 +252,44 @@ def test_a_rep_run_with_other_limits_or_over_them_is_wrong(tmp_path, grid):
     assert got[("m1", 1)][0] == "wrong" and "evaluations" in got[("m1", 1)][1]
     assert got[("m2", 0)][0] == "wrong" and "limits" in got[("m2", 0)][1]
     assert got[("m2", 1)][0] == "wrong" and " s" in got[("m2", 1)][1]
+
+
+def _rewrite(d, change):
+    rec = json.loads((d / "run.json").read_text())
+    change(rec["timing"])
+    (d / "run.json").write_text(json.dumps(rec))
+
+
+def test_a_metered_rep_must_record_its_limits_and_consistent_counts(tmp_path, grid):
+    """U2: a metered rep (counted by the harness: it records evaluations, density or gradient
+    calls, or a limit, or it is a logdensity rep) that dropped a limit, or whose total is not its
+    density plus gradient calls, was scored right, at whatever ESS per evaluation its total gave."""
+    def drop(*keys):
+        return lambda t: [t["extra"].pop(k) for k in keys]
+
+    cases = {
+        ("m1", 0): None,
+        ("m1", 1): drop("max_seconds"),
+        ("m2", 0): drop("max_evaluations", "max_seconds"),
+        ("m2", 1): lambda t: t.update(evaluations=1),
+    }
+    for (m, r), change in cases.items():
+        d = write_rep(tmp_path, "x", m, r, grid)
+        if change:
+            _rewrite(d, change)
+    got = _reasons(tmp_path, grid)
+    assert got[("m1", 0)][0] == "right"
+    for k in cases.keys() - {("m1", 0)}:
+        assert got[k][0] == "wrong", (k, got[k])
+    assert "limits" in got[("m1", 1)][1] and "limits" in got[("m2", 0)][1]
+    assert "density" in got[("m2", 1)][1]
+
+
+def test_a_logdensity_rep_without_counts_is_wrong(tmp_path, grid):
+    """A logdensity rep is metered whatever its record says, so one that records no counts and
+    no limits is wrong too."""
+    write_rep(tmp_path, "x", "m1", 0, grid, evaluations=None, sampler="logdensity")
+    write_rep(tmp_path, "x", "m1", 1, grid, evaluations=None)  # not metered: scored, no per-evaluation speed
+    got = _reasons(tmp_path, grid)
+    assert got[("m1", 0)][0] == "wrong" and "limits" in got[("m1", 0)][1]
+    assert got[("m1", 1)][0] == "right"
