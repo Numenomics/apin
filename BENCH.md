@@ -1,8 +1,141 @@
 # The sampler benchmark
 
-This file defines a benchmark for MCMC samplers written in Python. A submission gets a log density and its gradient, and nothing else about the model. It returns draws. The score is effective samples per evaluation of the log density, relative to Stan's NUTS, over a fixed set of models. A rep that fails the correctness gate scores almost nothing.
+This file defines a benchmark for MCMC samplers written in Python. A submission gets a log density and its gradient, and nothing else about the model. It returns draws. A model counts for the submission only when the draws prove that its posterior agrees with a reference. Among submissions that prove the same number of models, the faster one per evaluation ranks higher.
 
-PROTOCOL.md defines the measurement (the grid, ESS, the gate). This file defines the task, the rules and the score. Where a rule is a judgement call, the file says what it recommends and gives one alternative.
+PROTOCOL.md defines the measurement: the grid, ESS, the references and the gate's statistics. This file defines the task, the rules and the score. The benchmark will be hill-climbed, by people and by programs scored on it. A way to score without sampling well is a defect of the same rank as a wrong number, and the rules below are written to close them.
+
+## The rules
+
+**Rule 1. Credit needs proof.** Each repetition (rep) of a model gets one of three verdicts.
+
+- `right`: every checked quantity is shown to be within the tolerance. The upper 95 % confidence bound of its error is below the tolerance.
+- `wrong`: the data show an error outside the tolerance, or the run failed hard. A hard failure is a non-finite draw, a missing variable, a variable that never moves, a provenance error or a budget overrun.
+- `unproven`: everything else. This includes chains that have not mixed and a quantity whose standard error the run does not define.
+
+Only `right` earns speed credit. A model is right when every rep is right, wrong when any rep is wrong, and unproven otherwise.
+
+**Rule 2. Speed is credited for the accuracy the run achieved, not the accuracy it claims.** The gate trusts the run's Monte Carlo standard errors (MCSEs) only after it has checked them. Over all variables, functions and reps of a model, the realized errors divided by the claimed MCSEs must look like draws from a unit normal. Copies of a chain, dependent chains and an approximation that hides correlation all claim more ESS than they have, and they fail this check. A cheaper check for chains that are near copies of each other comes first. It is a heuristic and is described as one.
+
+**Rule 3. The posterior is joint.** The gate checks every variable, the log density of the draws, and a fixed set of projections stored with each reference. For each of these it checks the mean, the mean of the square, and the fractions of draws below the reference's 5 % and 95 % quantiles. A fraction is bounded, so a single extreme draw cannot hide an error in it.
+
+**Rule 4. Missing is failing.** The score is computed over a declared grid of models and reps. A missing or failed rep makes its model wrong. A saved rep is reused, and scored, only when its seed, its submission and its budget match the grid.
+
+**Rule 5. A submission sees the interface and nothing else, and everything it does is charged.** The interface is `sample(problem, budget, rng)`. Every call is counted. The clock runs from loading the submission to converting what it returns.
+
+## How the code meets the rules
+
+### Rule 1: the gate
+
+`harness/gate.py` implements the gate. For each checked quantity j of a rep it computes
+
+    e_j = (run mean − reference mean) / reference SD
+    s_j = sqrt(MCSE_run² + MCSE_ref²) / reference SD
+
+The quantities are the four functions (mean, square, below the 5 % quantile, below the 95 % quantile) of each standardised variable, each stored projection and lp__.
+
+The verdict is decided in this order.
+
+1. A missing or non-finite variable, a variable that never moves, or a reference constant that the run does not reproduce: `wrong`.
+2. A function whose reference value is exact, such as the fraction below the 5 % quantile of a two-valued variable, must match to 1e-6. Otherwise `wrong`. Its MCSE is not defined, so it is checked directly.
+3. Rank-normalized split R-hat at or above 1.01, bulk or tail ESS below 400 on any series, or two chains that are near copies: `unproven`. The standard errors are not trusted until the chains have mixed.
+4. Some |e_j| − z_w·s_j above the tolerance: `wrong`. z_w is the Bonferroni value for all quantities of all reps, at a family-wise rate of 1 % per model.
+5. Every |e_j| + 1.645·s_j below the tolerance: `right`.
+6. Otherwise `unproven`.
+
+The tolerance is **0.1 reference SDs** of each function. The right test is an intersection–union test. A rep whose true error on one quantity equals the tolerance is called right at most 5 % of the time, however many quantities there are.
+
+The evidence for these rates is a simulation, `harness/gate_rates.py`, with its output in `results/tables/gate_rates.md`. It uses a correlated normal in five variables and stationary AR(1) chains at ρ = 0, 0.5, 0.9, 0.99 and 0.999. The reference is redrawn for every batch, so the rates include the reference's own error.
+
+The table below is a summary of `results/tables/gate_rates.md`: 100 simulated runs of 4 chains per row, one rep per verdict. "ESS" is the ESS of each variable, 4n(1 − ρ)/(1 + ρ).
+
+| ρ | draws per chain | ESS | correct: right / unproven / wrong | error = tol: right | error = 2·tol: wrong |
+|---|---|---|---|---|---|
+| 0 | 1000 | 4000 | 0.90 / 0.10 / 0 | 0.04 | 0.94 |
+| 0 | 5000 | 20 000 | 1.00 / 0 / 0 | 0 | 1.00 |
+| 0.5 | 1000 | 1333 | 0.38 / 0.62 / 0 | 0.02 | 0.49 |
+| 0.9 | 1000 | 211 | 0 / 1.00 / 0 | 0 | 0 |
+| 0.9 | 20 000 | 4211 | 1.00 / 0 / 0 | 0.01 | 0.94 |
+| 0.9 | 50 000 | 10 526 | 1.00 / 0 / 0 | 0 | 1.00 |
+| 0.99 | 1000 | 20 | 0 / 1.00 / 0 | 0 | 0 |
+| 0.99 | 50 000 | 1005 | 0.20 / 0.80 / 0 | 0.01 | 0.33 |
+| 0.999 | 1000 | 2 | 0 / 1.00 / 0 | 0 | 0 |
+| 0.999 | 50 000 | 100 | 0 / 1.00 / 0 | 0 | 0 |
+
+What it shows:
+
+- **False wrong.** No correct run was called wrong, at any ρ, in 1100 runs. The design rate is at most 1 % per model, and it holds only for chains that have mixed. Chains that have not mixed, as at ρ = 0.99 and 0.999 with short runs, are unproven, not wrong.
+- **False right.** A run whose error is exactly the tolerance was called right in 0 to 4 % of runs. The design rate is at most 5 % per rep, for any degree of mixing, because a run that has not mixed is never right.
+- **Power.** A bias of twice the tolerance is called wrong in 94 % of runs at an ESS of 4000, and in all runs at 10 000 and above. At low ESS the same bias is unproven. It earns nothing either way.
+- **What a correct sampler needs.** A rep is proven right in 90 % of runs at an ESS of 4000 per variable, and in all runs at 20 000. A model needs all 5 reps right, so 90 % per rep gives about 59 % per model. The budgets below are set from NUTS's ESS on each model, not from this table.
+
+The calibration test (rule 2), 100 groups of 5 reps:
+
+| ρ | draws per chain | sampler | model right | median ratio of realized to claimed variance |
+|---|---|---|---|---|
+| 0 | 5000 | correct | 1.00 | 0.96 |
+| 0 | 5000 | two pairs of copies, 1e-3 SD apart | 0.25 | 1.96 |
+| 0.5 | 15 000 | correct | 1.00 | 1.02 |
+| 0.5 | 15 000 | two pairs of copies, 1e-3 SD apart | 0.21 | 2.01 |
+
+The calibration test catches chains that claim twice their real ESS in 75 to 79 % of models on this five-variable target. That is not enough to stop a submission that copies its chains on a small model. Its power grows with the number of quantities and reps, so it is higher on the larger models.
+
+The threshold is a trade. On the same target, in 200 groups of 5 reps:
+
+| threshold p | correct model refused | copies caught |
+|---|---|---|
+| 0.001 (in use) | 0.5 % | 70 % |
+| 0.01 | 2 % | 88 % |
+| 0.05 | 4.5 % | 96 % |
+
+The rank counts models right before it looks at speed. Copying the chains gains at most a factor of 2 in the tie-break on one model, and loses that model outright in 70 % or more of cases. A submission that maximises its rank does not gain by copying. A higher threshold would cost honest submissions a model in 2 to 5 % of models. *Alternative:* p = 0.01, if the review of submissions finds that the tie-break is what people compete on.
+
+The bound on the error shrinks as 1/√ESS. Stock NUTS at 4 × 1000 draws reaches an ESS of 700 to 1300 on its worst series on the core models, and its bounds were 0.09 to 0.15: most of its reps came out unproven. At 4 × 5000 its ESS is 4000 to 11 000 and its bounds are 0.05 to 0.08. The budgets are therefore raised per model (see "The budget"), and the tolerance stays at 0.1. *Alternative:* a tolerance of 0.2 would prove most models at 4 × 1000. A bias of 0.2 SD in a mean is large enough to change a conclusion, so this file does not recommend it.
+
+### Rule 2: claimed against achieved accuracy
+
+`gate.judge` runs the calibration test on a model whose reps are all right. It forms two sums of squared standardised errors over all quantities:
+
+- against the reference: Σ e² / (MCSE_run² + MCSE_ref²) over reps and quantities. The reference error is shared by all reps, and the null distribution accounts for that.
+- between the reps: the weighted spread of each quantity's errors around their mean over reps. The reference error cancels out of this sum.
+
+Each sum is compared with a scaled χ² of the same mean and variance. The variance comes from the correlation of the quantities in the reference. If the smaller p-value, doubled, is below 0.001, the model is unproven, and the reason gives the ratio of the realized to the claimed variance. Two copies of every chain give a ratio near 2.
+
+The near-copy check in `gate._copies` is the cheap heuristic. Two chains are flagged when more than 1 % of their draws lie within 1e-6 reference SDs of a draw in the other chain. It catches lazy copying and nothing more. A submission can perturb its copies past any fixed threshold. The calibration test is the check that matters.
+
+Cross-chain adaptation stays legal. Chains may share a mass matrix or a step size, and ensemble methods may move chains together. The rule asks only that the MCSEs, which assume independent chains, are right. A method whose chains are dependent enough to break that is not credited for the ESS it does not have.
+
+The credited ESS is the smallest bulk or tail ESS over every series the gate checks. It is not over the variables alone, so an approximation that samples each variable well but misses their correlation gets no more credit than its worst projection earns.
+
+### Rule 3: what the reference stores
+
+Each reference (`models/reference/<model>.json`, built by `harness/reference.py`) holds no draws. It holds summaries of a set of series:
+
+- every variable, standardised;
+- projections of the standardised variables on eigenvectors of the reference correlation matrix: all of them up to 20 variables, else the 10 of largest and the 10 of smallest eigenvalue (4 and 4 above 500 variables). The smallest directions are where an approximation that ignores correlation goes wrong. They are chosen on one half of the reference chains and summarised on the other, so the choice does not bias them. Local references run 20 chains, so each half has 10. With 10 chains, the summary half of radon_vis and bym2_offset_only carried errors of 3 to 5 of its own MCSEs on one projection, and correct NUTS runs came out unproven against it. The posteriordb references cannot be grown and keep halves of 5 chains (see "Not built yet");
+- lp__.
+
+For each series it stores the expected value of each function, its SD and its MCSE, and the 5 % and 95 % quantiles. Variables that are constant in the reference, such as the fixed entries of a Cholesky factor, are stored apart, and a run must reproduce them.
+
+lp__ is computed by the harness from the constrained draws with BridgeStan. A column the sampler wrote is ignored. A draw outside the support, or one the model rejects, gives a NaN log density, and the rep is wrong.
+
+### Rule 4: the declared grid
+
+`score.declared` builds the grid: every selected model that has a reference, at the budget in `models/manifest.json`, with the declared number of reps and base seed. `score.score` walks this grid, not the run directories. A rep that is not there is wrong ("repN missing"). A rep with another seed, budget or submission digest is wrong. So is a rep whose chain files are fewer than the budget's chains, hold fewer draws than its draws, or are cut short: a last row without a line end or a row with the wrong number of fields. A verdict cache that does not load is recomputed.
+
+`grid.run_grid` resumes a rep only when the saved seed, base seed, submission identity and budget all match. Otherwise it deletes the rep and runs it again.
+
+A label whose reps come from more than one submission is refused.
+
+### Rule 5: the seam and its limits
+
+`harness/logdensity.py` hands the submission two plain functions and a copy of its budget. The limits the harness enforces and the shape it expects are copied before the submission runs.
+
+- Every call to `log_density` or `log_density_gradient` is charged before it is evaluated, at a rejected point too.
+- A call past the limit raises BudgetExceeded, and the run fails even if the submission catches it.
+- The clock starts before the submission file is loaded and stops after the return value is converted to an array. An overrun fails the run at the end, even if no call came after it.
+- Every returned draw must be a point the submission evaluated with a finite log density (provenance). Points must keep the order in which they were first evaluated, and no point may appear in two chains.
+
+This protects the counts from a submission that makes a mistake. It does not protect them from one that sets out to cheat. In-process Python cannot stop determined introspection. A submission can reach the counter through closure cells, the garbage collector or the stack. An official round therefore reads every submission before it trusts the result. Process isolation is listed under "Not built yet".
 
 ## The task
 
@@ -17,19 +150,19 @@ def sample(problem: Problem, budget: Budget, rng: numpy.random.Generator) -> num
 
 - `problem.log_density(theta)` and `problem.log_density_gradient(theta)` evaluate the model on the unconstrained space, with the Jacobian and all constants. A point the model rejects gives −inf.
 - `problem.initial_points` has one starting point per chain, uniform on (−2, 2).
-- Every returned draw must be a point the submission evaluated. A chain must return its draws in the order it visited them, and no point may appear in two chains.
+- Every returned draw must be a point the submission evaluated with a finite log density.
 
 Run a submission on the public models with
 
 ```bash
-uv run apin run --sampler logdensity --label mine --opt sampler=path/to/mine.py --models public --reps 3
-uv run apin run --sampler cmdstan --label cmdstan --models public --reps 3
-uv run apin score --baseline cmdstan
+uv run apin run --sampler logdensity --label mine --opt sampler=path/to/mine.py --models public --reps 5
+uv run apin run --sampler cmdstan --label cmdstan --models public --reps 5
+uv run apin score --baseline cmdstan --models public --reps 5
 ```
 
 `examples/samplers/hmc.py` is a complete submission of about 100 lines. `examples/samplers/ula_wrong.py` is wrong on purpose and shows what the gate does with a fast, biased sampler.
 
-## Rules
+## What a submission may do
 
 A submission may import numpy, scipy and the standard modules math, typing, dataclasses, functools, itertools, collections and `__future__`. It may not name `open`, `exec`, `eval`, `compile`, `__import__`, `breakpoint`, `input`, `globals` or `vars`. `apin run` checks both before it starts.
 
@@ -37,47 +170,82 @@ A submission must not:
 
 - read or write files, use the network, start processes or threads, or keep any state between runs;
 - identify the model, from its dimension or by probing the density, in order to look up settings tuned for it;
-- reach the model by any route other than the two functions in `problem`.
+- reach the model, the counter or the harness by any route other than the two functions in `problem`.
 
-The import check is a lint. It does not stop a submission that sets out to break these rules (`getattr` on the builtins gets past it). An official round therefore reads every submission by hand, and runs it under the limits below. A real sandbox is not built yet.
+The import check is a lint. `getattr` on the builtins gets past it. It is there to catch mistakes, and the reading of the code is the real check.
 
 ## The budget
 
-Each rep gives the submission:
+Each rep gives the submission the budget of its model in `models/manifest.json`:
 
 | | value | why |
 |---|---|---|
-| chains | 4 | as CmdStan; R-hat needs several chains |
-| draws | 1000 per chain | as CmdStan |
-| evaluations | 4 × 2000 × 1023 = 8 184 000 | the most NUTS can spend with 1000 warmup and 1000 sampling iterations at tree depth 10 |
+| chains | 4 | R-hat needs several chains |
+| warmup | 1000 | as CmdStan; it sets the evaluation limit |
+| draws | 5000 per chain; 10 000 for lsat_model, 20 000 for accel_gp | enough for stock NUTS to be proven right at a tolerance of 0.1 where a budget can do it (see below) |
+| evaluations | 4 × (warmup + draws) × 1023 | the most NUTS can spend at tree depth 10 |
 | time | 1800 s on one core | `OMP_NUM_THREADS=1` and the BLAS equivalents; the process is killed 300 s later |
 
-The evaluation limit does not bind for a sensible sampler. On the small core models NUTS spends 35 000 to 100 000 gradients in its sampling phase, 1 to 3 % of the limit with warmup. Only a model that drives NUTS to its maximum tree depth on every iteration comes close. The limit is there to stop a submission that thins by a factor of thousands. The time limit stops a submission that spends its time in numpy between evaluations.
+A density call and a gradient call count the same. Both counts are recorded (`density_evals`, `gradient_evals`).
 
-**Recommendation:** density and gradient calls count the same. Most samplers that use the density alone (random-walk Metropolis, slice sampling) are not competitive per evaluation anyway, and the cost of a gradient in reverse mode is a small multiple of the density. *Alternative:* charge a gradient 2 to 4 density calls, measured per model with BridgeStan. This favours gradient-free samplers on cheap models.
+The evaluation limit stops a submission that thins by a factor of thousands. The time limit stops one that spends its time in numpy between evaluations.
+
+### Stock NUTS at the bench budget
+
+CmdStan 2.39 NUTS with default settings, 5 reps per model, at the budgets above:
+
+| model | draws per chain | verdict | reps right | largest bound | smallest ESS | note |
+|---|---|---|---|---|---|---|
+| eight_schools_noncentered | 5000 | right | 5 of 5 | 0.083 | 7621 |  |
+| blr | 5000 | right | 5 of 5 | 0.079 | 3696 |  |
+| kidscore_momiq | 5000 | right | 5 of 5 | 0.072 | 4978 |  |
+| lsat_model | 10000 | right | 5 of 5 | 0.065 | 7269 |  |
+| logmesquite_logvash | 5000 | right | 5 of 5 | 0.080 | 6275 |  |
+| wells_dist100_model | 5000 | right | 5 of 5 | 0.062 | 4987 |  |
+| diamonds | 5000 | right | 5 of 5 | 0.083 | 5654 |  |
+| radon_partially_pooled_noncentered | 5000 | right | 5 of 5 | 0.080 | 1232 |  |
+| radon_variable_intercept_slope_noncentered | 5000 | right | 5 of 5 | 0.070 | 3282 |  |
+| dogs_hierarchical | 5000 | right | 5 of 5 | 0.055 | 6830 |  |
+| pilots | 5000 | unproven | 0 of 5 | – | 32 | unproven: R-hat 1.092 on sigma_a |
+| hier_2pl | 5000 | right | 5 of 5 | 0.076 | 3089 |  |
+| gp_regr | 5000 | right | 5 of 5 | 0.063 | 9797 |  |
+| accel_gp | 20000 | unproven | 3 of 5 | 0.151 | 15333 | unproven: proj.17 square e=+0.0583 bound=0.144 |
+| bym2_offset_only | 5000 | right | 5 of 5 | 0.077 | 1094 |  |
+| eight_schools_centered | 5000 | wrong | 0 of 5 | – | 43 | wrong: lp__ mean e=-0.274 bound=0.16 |
+| garch11 | 5000 | right | 5 of 5 | 0.081 | 7072 |  |
+| lotka_volterra | 5000 | right | 5 of 5 | 0.065 | 4511 |  |
+| low_dim_gauss_mix | 5000 | right | 5 of 5 | 0.064 | 9337 |  |
+| arma11 | 5000 | right | 5 of 5 | 0.066 | 9893 |  |
+
+The verdict counts only correctness; it does not depend on timing. The runs behind this table were made on a machine under load, so their times are not reported here.
+
+- 17 of 20 models are right. "Largest bound" is the largest upper bound on |e| over the reps' quantities; it must be below 0.1. "Smallest ESS" is the smallest credited ESS over the reps.
+- eight_schools_centered is wrong. In one rep the mean of lp__ is 0.27 SD off, with a lower bound of 0.16 on the error. This is the known bias of NUTS on the centred funnel, and more draws only make it clearer.
+- pilots is unproven. sigma_a has R-hat 1.092 and an ESS of 32 in 4 × 5000 draws: the chains do not cross the funnel. ESS grows about linearly with the draws, so 400 would take some 60 000 draws per chain. The budget stays at 5000.
+- accel_gp is unproven at 4 × 20 000 draws. Three reps are right. In the other two, the run's own MCSE of the square of proj.17 is 0.05 SD, an ESS of about 390 for that function, while the bulk and tail ESS of the series is 21 000. That points to rare long excursions along this direction. At 4 × 5000, one rep of five failed the same way: one chain went to 25 SD on proj.16. Proving it would take about 4 × 80 000 draws.
+- radon_variable_intercept_slope_noncentered and bym2_offset_only were unproven against references built on 10 chains. The summary half of those references was off by 3 to 5 of its own MCSEs on one projection (see rule 3). Against the 20-chain references both are right at 4 × 5000.
+- lsat_model runs 4 × 10 000 draws. The budget was raised when its reference still had 10 chains. 4 × 5000 has not been retried against the 20-chain reference.
+- At 4 × 1000 draws, the old default, most reps of most models were unproven: their bounds were 0.09 to 0.15.
 
 ## The score
 
-For each held-out model m and each rep r:
+1. Each rep gets a verdict (rule 1). A failed or missing rep is wrong.
+2. Each model gets a verdict from its reps: right if all are right and the calibration test passes, wrong if any is wrong, unproven otherwise.
+3. The rank is by the number of models right, out of every model in the grid. That includes models where NUTS is wrong or unproven. A sampler that proves a model NUTS cannot prove gains a full point.
+4. Ties are broken by speed: the geometric mean, over the models where both the submission and the baseline are right, of the ratio of the submission's ESS per evaluation to the baseline's. The ratio for a model is the ratio of the means over reps.
+5. A 95 % bootstrap interval comes with the speed. It resamples the reps of the submission and of the baseline, 2000 times.
 
-1. If the rep failed (an exception, the budget exceeded, a provenance error) or the gate marks it wrong, its relative score is PENALTY = 0.001.
-2. Otherwise its relative score is `ess_per_eval` of the rep divided by the median `ess_per_eval` of CmdStan's NUTS on m. `ess_per_eval` is min(bulk ESS, tail ESS) over all variables, divided by every evaluation, warmup included (PROTOCOL.md, "The score").
+There is no penalty factor and no median over reps. A model omitted counts as wrong, so it never scores better than an attempt.
 
-The model's score is the median over reps. The benchmark score is the geometric mean over models. `apin score --baseline cmdstan` writes it to `bench.csv` and prints it with a bootstrap 95 % interval, from 2000 resamples of the reps within each model.
+The speed is per evaluation first. ESS per evaluation does not depend on the machine, on load, or on how well the submission uses numpy, so a submission in pure Python competes with C++ NUTS. ESS per second is printed next to it, from the sum of the chains' own times. It measures what a user waits for, but mostly how well the overhead was vectorised.
 
-A score of 1 means "as efficient as NUTS per evaluation". A score of 2 means half the evaluations for the same ESS.
+A run that cannot count all its evaluations has no ESS per evaluation. This is the case for CmdStan with `thin` above 1, for the Pathfinder adapter (CmdStan does not report Pathfinder's gradients) and for nutpie (no warmup count). The adapter says why in `Timing.uncounted`. Such a label has no per-evaluation speed, and the table says on which models.
 
-**The penalty.** One wrong model out of 11 multiplies the score by 0.001^(1/11) ≈ 0.53. A submission that is twice as fast as NUTS everywhere and wrong on one model scores about 1.07. Two wrong models give 0.29 times the score. The penalty is finite so that one failure does not hide the rest of the result. *Alternative:* score a wrong model as 0 and a submission with any wrong model as 0. This is simpler, but it makes the score useless for a sampler in development.
-
-**Models where NUTS is wrong.** When CmdStan's own reps are wrong on a model, the model has no baseline and is left out. `bench.csv` lists it under "excluded". This can happen on eight_schools_centered, where NUTS has divergences. *Alternative:* keep the model and score any correct submission there at a fixed bonus. That rewards the samplers that solve the hard case, but the bonus would be arbitrary.
-
-**Wrong reps.** The gate judges each rep alone, and its power depends on the rep's ESS. A sampler with a small bias can pass in some reps and fail in others. The median over reps then forgives one wrong rep in three, or two in five. The demo run below shows this twice: the wrong ULA passed one rep of garch11, and HMC failed one rep of eight_schools_centered on the mean of tau. Both models still came out right, wrong for ULA and correct for HMC. *Alternative:* a model whose reps include any wrong one scores PENALTY. The gate's false-fail rate is at most 1 % per rep, so a correct sampler would lose a model about once in 20 models of 5 reps. That rule is stricter on samplers that are nearly right, and it would have marked HMC wrong on eight_schools_centered.
-
-**Models without a reference.** The gate cannot check a model that has no reference posterior, so a wrong sampler would score there. Such a model is left out and listed under "excluded". Today this is kronecker_gp, so the held-out score covers 10 models. *Alternative:* score it with the gate's other checks only (R-hat and finiteness). That keeps the model but lets a sampler that is consistently biased through.
-
-**Why per evaluation.** ESS per evaluation does not depend on the machine, on load, or on how well the submission uses numpy. A submission in pure Python competes with C++ NUTS. *Alternative:* `ess_per_s_chain`, ESS per second of one core. That measures what a user waits for, but it mostly measures how well the overhead was vectorised. Both columns are in `table.md`.
+`apin score` writes `per_run.csv`, `per_model.csv`, `ranking.csv` and `table.md`. The table prints the rank and, next to it, the per-model table with each model's verdict and speed.
 
 **Why min(bulk, tail).** Bulk ESS alone rewards a sampler that mixes the centre and never visits the tails.
+
+**Models without a reference.** The gate cannot check a model that has no reference, so such a model is not in the grid. Today this is kronecker_gp. It is not scored and has no rows.
 
 ## The split
 
@@ -89,63 +257,82 @@ The 21 core models are split into 10 public and 11 held-out models. Each family 
 | GLM | diamonds | logmesquite_logvash, wells_dist100_model |
 | hierarchical | radon_partially_pooled_noncentered, pilots | radon_variable_intercept_slope_noncentered, dogs_hierarchical, hier_2pl |
 | stiff/funnel | eight_schools_centered, garch11, low_dim_gauss_mix | lotka_volterra, arma11 |
-| GP/spatial | gp_regr, bym2_offset_only | accel_gp, kronecker_gp |
+| GP/spatial | gp_regr, bym2_offset_only | accel_gp, kronecker_gp (no reference, not scored) |
 
 The reasons:
 
 - Each public model shows a hard feature of its family. diamonds has strong correlations, pilots and eight_schools_centered have funnels, low_dim_gauss_mix is a two-component mixture, bym2_offset_only has a sparse spatial prior. A submission tuned on the public set has seen each difficulty.
 - The two radon models share data but differ in structure. One goes in each half, so a submission cannot learn the radon data from the public half and score it twice.
-- The held-out half has the one ODE model (lotka_volterra), the one item-response model (hier_2pl) and the one Kronecker GP. These are the models least like anything in the public half, so they test whether a sampler generalises.
+- The held-out half has the one ODE model (lotka_volterra) and the one item-response model (hier_2pl). These are the models least like anything in the public half, so they test whether a sampler generalises.
 - `models/manifest.json` records the split (`"bench"`). `--models public` and `--models held-out` select it.
 
-The repository is public, so the held-out models are not secret. Anyone can run them. The split states the intent: tune on the public half and report on the held-out half. A held-out set that is really hidden needs a private manifest, or the same models with data that is not published. That is not built yet.
+The held-out models are not secret. The repository is public and anyone can run them. The split states the intent: tune on the public half and report on the held-out half. A secret held-out set is not built yet.
 
-**Recommendation:** report the held-out score as the result and the public score next to it. A large gap between the two shows overfitting. *Alternative:* score all 21 models. That gives a smaller interval but no check on overfitting.
+**Recommendation:** report the held-out rank as the result and the public rank next to it. A large gap between the two shows overfitting.
 
 ## Seeds and reps
 
-Rep r uses seed BASE + 1000·r for the initial points and for `rng`. During development BASE is 20260819, the default. An official run uses a BASE that is kept secret until the run is done, passed with `apin run --base-seed`. A submission therefore cannot be tuned to the initial points it will see.
+Rep r uses seed BASE + 1000·r for the initial points and for `rng`. During development BASE is 20260819, the default. An official run uses a BASE that is kept secret until the run is done, passed with `--base-seed` to both `apin run` and `apin score`.
 
-An official result uses 5 reps. Development runs use 3, the grid default. The model score is a median, so one unlucky rep in 5 does not change it. The bootstrap interval shows how much the score would move with other reps. Two submissions whose intervals overlap are not ranked.
+An official result uses 5 reps. Every rep must be right for the model to be right, so a sampler that is right only some of the time is not credited.
 
 ## A demo run
 
-One run on 5 public and held-out models, 3 reps, on a loaded 12-core machine: CmdStan 2.39 NUTS, `examples/samplers/hmc.py`, and `examples/samplers/ula_wrong.py`. Cells are the median ESS per evaluation over reps, or the gate's reason when the model is wrong.
+One run on 5 public and held-out models, 5 reps each, at the bench budget (4 × 5000 draws), on a loaded 12-core machine: CmdStan 2.39 NUTS, `examples/samplers/hmc.py` and `examples/samplers/ula_wrong.py`. The machine was running other jobs, so the speeds per second were measured under load and are not a record. The speeds per evaluation do not depend on load.
 
-| model | CmdStan NUTS | HMC example | ULA (wrong) |
+| rank | label | models right | speed per evaluation [95 %] | speed per second [95 %] |
+|---|---|---|---|---|
+| 1 | CmdStan NUTS | 4 of 5 | 1 [0.964, 1.04] | 1 [0.931, 1.08] |
+| 2 | HMC example | 3 of 5 | 0.505 [0.488, 0.525] | 0.155 [0.147, 0.163] |
+| 3 | ULA (wrong on purpose) | 0 of 5 | | |
+
+| model | CmdStan NUTS | HMC example | ULA |
 |---|---|---|---|
-| blr | 0.00594 | 0.00485 | wrong: R-hat 1.585 on sigma |
-| eight_schools_centered | wrong: R-hat 1.060 on tau | 0.00206 | wrong: R-hat 1.708 on theta.2 |
-| eight_schools_noncentered | 0.0238 | 0.0407 | wrong: R-hat 1.598 on tau |
-| garch11 | 0.0198 | 0.0309 | wrong: alpha1 var b² = 0.0538 |
-| kidscore_momiq | 0.00457 | 0.00631 | wrong: R-hat 3.090 on beta.1 |
+| blr | right: 0.0115/eval, 1230/s | right: 0.00319/eval, 54.7/s | unproven: R-hat 1.361 on sigma |
+| eight_schools_centered | wrong: lp__ mean e = −0.274, bound 0.16 | unproven: R-hat 1.013 on lp__ | unproven: R-hat 1.035 on proj.1 |
+| eight_schools_noncentered | right: 0.0382/eval, 3390/s | unproven: proj.2 square e = +0.075, bound 0.131 | wrong: non-finite lp__ |
+| garch11 | right: 0.0276/eval, 382/s | right: 0.0229/eval, 178/s | wrong: lp__ square e = +1.13, bound 0.837 |
+| kidscore_momiq | right: 0.00881/eval, 361/s | right: 0.00491/eval, 64.4/s | unproven: R-hat 2.612 on beta.1 |
 
-Benchmark score against CmdStan, over the 4 models where CmdStan is right: HMC 1.32 [1.16, 1.38], ULA 0.001 [0.001, 0.0056]. eight_schools_centered is left out because NUTS fails 2 of its 3 reps on R-hat.
+Cells are the mean over reps of the credited ESS per evaluation and per second of chain time, or the model's verdict and the reason from the first rep that decided it.
 
-HMC scores above NUTS per evaluation on these small models. A likely reason is that NUTS doubles its trajectory until it turns back, which overshoots on simple targets; this run does not test that. NUTS is still faster per second, since it is compiled and the example is not (`ess_per_s_chain` 159 against 301, geometric means over the 5 models).
+What the run shows:
+
+- NUTS is wrong on eight_schools_centered. One of its five reps passed R-hat and ESS and still showed the funnel's bias in lp__, 0.27 SD with a lower bound of 0.16. The others had not mixed. This is the known failure of NUTS on the centred funnel, and the gate sees it.
+- ULA earns nothing. Where its chains mix, the gate calls it wrong. Where they do not, it is unproven.
+- The HMC example ranks below NUTS. It proves fewer models and is about half as fast per evaluation where both are right. With the old score, which credited the bulk ESS of the variables alone at 4 × 1000 draws, it scored 1.32 times NUTS on four of these models. A likely reason for the change is that the credited ESS now includes the projections on the correlated directions and lp__, and the example uses a diagonal metric, which mixes slowly along them. This run does not test that.
 
 ## Ways to game the score
 
 | attack | defence |
 |---|---|
-| Return draws from a stored reference, or from a Laplace or variational fit, without paying for them. | Every draw must be a point the submission evaluated (provenance check). File access is forbidden; the references are not in the problem. |
+| Return draws from a stored reference, or from a Laplace or variational fit, without paying for them. | Every draw must be a point the submission evaluated with a finite density (provenance). File access is forbidden; the references are not in the problem. |
+| Return points the model rejected. | A rejected point has no finite density, so it fails provenance. Rejected calls are still charged. |
 | Shuffle the draws within a chain, which hides autocorrelation and inflates ESS. | Draws must keep the order in which they were first evaluated. |
-| Copy one chain four times, so that R-hat is 1 and ESS counts four times. | No point may appear in two chains. |
+| Copy one chain four times. | No point may appear in two chains. |
+| Copy a chain with a small perturbation, or run chains that are not independent. | The calibration test (rule 2): the realized errors are larger than the claimed MCSEs. The near-copy check catches small perturbations cheaply. |
+| Sample each variable well and ignore the correlations. | The projections and lp__ are checked (rule 3). The credited ESS is the worst over them. |
+| Hide a bias behind one extreme draw that inflates the MCSE. | The quantile exceedance fractions are bounded and still show the bias (rule 3). |
 | Spend evaluations in warmup and report only the sampling phase. | Every call counts, warmup included. |
-| Thin a long chain by a large factor. | Allowed, and counted: thinning costs evaluations and ESS per evaluation shows it. The evaluation limit bounds it. |
-| Be fast and biased. | The correctness gate (PROTOCOL.md). A wrong rep scores 0.001. |
-| Be biased by less than the gate can see at low ESS. | The gate's power grows with ESS: at ESS 400 it catches about 0.27 sd, at high ESS close to 0.1 sd. A sampler with a small bias and a high ESS is checked tightly. A sampler with a low ESS scores low anyway. |
-| Get stuck in one mode in every chain. | R-hat above 1.05 fails the rep if chains disagree. If every chain is stuck in the same mode, the bias test catches the missing mass at the gate's power. |
-| Identify the model by `problem.dim` and look up tuned step sizes. | Forbidden. It works on any model whose dimension is known, which is all 21. The held-out split helps only if it is private. An official round reads the code. |
+| Thin a long chain by a large factor. | Allowed, and counted: thinning costs evaluations. The evaluation limit bounds it. |
+| Be fast and biased. | The gate calls the bias wrong once the data show it. A small bias the data cannot show leaves the model unproven, which earns nothing. |
+| Get stuck so the chains do not mix. | R-hat or ESS makes the rep unproven. It earns nothing. |
+| Get stuck in the same mode in every chain. | The moments and quantile fractions miss the other mode's mass, and the gate calls it wrong. |
+| Skip a hard model. | A missing model is wrong (rule 4). |
+| Keep a lucky rep from an old seed or an old version. | A rep is reused only when its seed, submission and budget match. |
+| Change the budget or the shape the harness checks. | The harness copies both before the submission runs. |
+| Keep computing after the last call. | The clock runs to the end of the conversion. |
+| Identify the model by `problem.dim` and look up tuned step sizes. | Forbidden. Not prevented in code; an official round reads the code. |
 | Tune to the initial points or the seed. | A secret base seed in official runs. |
-| Use more cores. | One process, `OMP_NUM_THREADS=1`, threads forbidden. The score is per evaluation, so extra cores would only help against the time limit. |
-| Do work outside the counted functions, such as finite differences on a surrogate. | Allowed if it only uses points that were evaluated. The time limit bounds it. A surrogate that cuts real evaluations is a better sampler, not an exploit. |
-| Overfit to the public models. | Report the held-out score. |
-| Get past the import lint. | Not prevented in code. An official round reads the code and runs it in a container without network or file access. |
+| Use more cores. | One process, `OMP_NUM_THREADS=1`, threads forbidden. The score is per evaluation, so extra cores help only against the time limit. |
+| Reach the counter or the model through introspection. | Not prevented in code (rule 5). An official round reads the code. |
+| Overfit to the public models. | Report the held-out rank. |
 
 ## Not built yet
 
-- A sandbox. The child process has the rights of the user who runs it.
-- Models that are not Stan programs. The seam works through BridgeStan, so every model must be a `.stan` file. A JAX or PyTorch log density would need a second backend behind `Problem`.
-- GPU samplers, and samplers that evaluate many points in one call. `log_density_gradient` takes one point. A batched call, counted per point, would be the natural extension.
-- A private held-out set (see "The split").
+- Process isolation. The submission runs in a child process with the rights of the user who runs it. It shares that process with the counter, so it can reach the counter by introspection. A real sandbox would run the submission in a separate process, without file or network access, and serve the density over a pipe.
+- A secret held-out set. The held-out models are in the public repository.
+- Models that are not Stan programs. The seam works through BridgeStan, so every model must be a `.stan` file.
+- A replicate check on the references. Nothing yet compares two independent builds of a reference, so a reference error is found only when a correct sampler fails against it, as on radon_vis and bym2_offset_only.
+- Larger posteriordb references. The posteriordb draws are 10 chains of 1000, so their projections are summarised on 5 chains. An error of a few of their MCSEs in one projection is about 0.05 SD on these models. That is enough to make a correct run unproven, and too small to make it wrong at a tolerance of 0.1.
+- GPU samplers, and samplers that evaluate many points in one call. `log_density_gradient` takes one point.
