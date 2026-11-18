@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from harness import cmdstan, models, sampler
+from harness.adapters import cmdstan as cmdstan_adapter
 from harness.adapters import nutpie as nutpie_adapter
 from harness.adapters import pathfinder, walnutpie
 
@@ -38,7 +39,7 @@ def test_sample_argv():
     argv = cmdstan.sample_argv(Path("/m/x"), Path("/d.json"), 42, 2, Path("/o/chain_2.csv"), 10, 20,
                                init=Path("/i.json"), extra=["adapt", "delta=0.9"])
     assert argv == ["/m/x", "id=3", "data", "file=/d.json", "random", "seed=42", "init=/i.json", "output",
-                    "file=/o/chain_2.csv", "method=sample", "num_warmup=10", "num_samples=20", "save_warmup=0",
+                    "file=/o/chain_2.csv", "method=sample", "num_warmup=10", "num_samples=20", "save_warmup=1",
                     "adapt", "delta=0.9"]
 
 
@@ -50,6 +51,20 @@ def test_read_cmdstan_csv(tmp_path):
     f = cmdstan.read_csv(p)
     assert (f.warmup_s, f.sampling_s, f.total_s) == (0.012, 0.034, 0.046)
     assert f.column("n_leapfrog__").sum() == 10
+
+
+def test_read_csv_keeps_warmup_rows_apart(tmp_path):
+    p = tmp_path / "c.csv"
+    p.write_text("lp__,n_leapfrog__,x\n-1,7,0.1\n-1,15,0.2\n# Adaptation terminated\n# Step size = 0.5\n"
+                 "-2,3,0.3\n-2,3,0.4\n-2,1,0.5\n")
+    f = cmdstan.read_csv(p)
+    assert f.values.shape == (3, 3) and f.warmup_values.shape == (2, 3)
+    t = cmdstan_adapter.timing_from_csvs([p], 1.0)
+    assert (t.grads_sampling, t.grads_warmup) == (7, 22)
+    q = tmp_path / "d.csv"
+    q.write_text("lp__,n_leapfrog__,x\n-2,3,0.3\n")
+    assert cmdstan.read_csv(q).warmup_values is None
+    assert cmdstan_adapter.timing_from_csvs([q], 1.0).grads_warmup is None
 
 
 def test_unflatten_for_pathfinder_inits():

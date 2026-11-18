@@ -53,3 +53,60 @@ def test_score_end_to_end_on_fixture(tmp_path):
     assert row["ess_per_s_chain"] == pytest.approx(row["ess_bulk_min"] / 4.0)
     assert row["ess_per_grad"] == pytest.approx(row["ess_bulk_min"] / (4 * 101 * 7))
     assert (tmp_path / "scores" / "summary.csv").is_file()
+
+
+def _gated(label, model, rep, ess_per_eval, gate="pass", detail="pass"):
+    r = _row(label, model, rep, 100, 1.0, 4.0, 1000)
+    r.update(gate=gate, gate_detail=detail, evaluations=1000, ess_per_eval=ess_per_eval)
+    if gate != "pass":
+        for k in score.COST:
+            r[k] = math.nan
+    return r
+
+
+def test_wrong_model_has_no_speed_and_shows_its_worst_variable():
+    rows = [_gated("x", "m1", 0, math.nan, "wrong", "wrong: tau x2 b2=0.3"),
+            _gated("x", "m1", 1, math.nan, "failed", "failed: boom"),
+            _gated("x", "m1", 2, 0.05)]
+    (m,) = score.per_model(rows)
+    assert m["gate"] == "wrong" and m["reps_wrong"] == 2
+    assert all(math.isnan(m[k]) for k in score.COST)
+    assert "wrong: tau x2 b2=0.3" in score.table([m], ["x"])
+    (s,) = score.summary([m])
+    assert s["n_models_wrong"] == 1
+
+
+def test_one_bad_rep_of_three_is_not_a_wrong_model():
+    rows = [_gated("x", "m1", 0, math.nan, "wrong", "wrong: a x b2=1")] + [_gated("x", "m1", r, 0.05) for r in (1, 2)]
+    (m,) = score.per_model(rows)
+    assert m["gate"] == "pass" and m["reps_wrong"] == 1 and m["ess_per_eval"] == pytest.approx(0.05)
+
+
+def test_bench_score_penalty_and_baseline_exclusion():
+    rows = [_gated("base", m, 0, 0.01) for m in ("m1", "m2")]
+    rows += [_gated("base", "m3", 0, math.nan, "wrong", "wrong: z x b2=1")]
+    rows += [_gated("cand", "m1", r, v) for r, v in enumerate((0.02, 0.04, 0.03))]  # median ratio 3
+    rows += [_gated("cand", "m2", r, math.nan, "wrong", "wrong") for r in range(3)]  # PENALTY
+    rows += [_gated("cand", "m3", 0, 0.5)]  # baseline wrong here: left out
+    b = score.bench_score(rows, score.per_model(rows), "cand", "base")
+    assert b["per_model"] == {"m1": pytest.approx(3.0), "m2": score.PENALTY}
+    assert b["score"] == pytest.approx(math.sqrt(3.0 * score.PENALTY))
+    assert b["excluded"] == "m3"
+
+
+def test_failed_rep_becomes_a_row(tmp_path):
+    rep = tmp_path / "lab" / "m1" / "rep0"
+    rep.mkdir(parents=True)
+    (rep / "FAILED").write_text("Traceback...\nRuntimeError: submission killed after 2100 s\n")
+    r = score.failed_row(rep)
+    assert (r["label"], r["model"], r["rep"], r["gate"]) == ("lab", "m1", 0, "failed")
+    assert "killed" in r["gate_detail"] and math.isnan(r["ess_per_eval"])
+
+
+def test_bench_interval_brackets_the_score():
+    rows = [_gated("base", m, 0, 0.01) for m in ("m1", "m2")]
+    rows += [_gated("cand", "m1", r, v) for r, v in enumerate((0.01, 0.02, 0.04))]
+    rows += [_gated("cand", "m2", r, v) for r, v in enumerate((0.01, 0.01, 0.01))]
+    b = score.bench_score(rows, score.per_model(rows), "cand", "base")
+    assert b["score_lo"] <= b["score"] <= b["score_hi"]
+    assert b["score_lo"] >= 1.0 - 1e-12 and b["score_hi"] <= 2.0 + 1e-12

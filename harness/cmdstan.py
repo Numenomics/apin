@@ -86,11 +86,12 @@ def parameter_names(root: Path, stan_file: Path) -> list[str]:
 @dataclass
 class StanCsv:
     columns: list[str]
-    values: np.ndarray  # (rows, columns)
+    values: np.ndarray  # (rows, columns), post-warmup draws only
     warmup_s: float | None = None
     sampling_s: float | None = None
     total_s: float | None = None
     comments: list[str] = field(default_factory=list)
+    warmup_values: np.ndarray | None = None  # rows written before "Adaptation terminated" (save_warmup=1)
 
     def column(self, name: str) -> np.ndarray | None:
         try:
@@ -105,12 +106,20 @@ _TOTAL = re.compile(r"#\s*([\d.eE+-]+) seconds \(Total\)")
 
 
 def read_csv(path: Path) -> StanCsv:
-    """Read a CmdStan output CSV (or any CSV with a header row and '#' comments)."""
-    comments, header, rows = [], None, []
+    """Read a CmdStan output CSV (or any CSV with a header row and '#' comments).
+
+    With save_warmup=1, CmdStan writes the warmup draws first and then a
+    comment "# Adaptation terminated". Rows before that comment go to
+    `warmup_values`; `values` holds only the draws after it. A file without
+    the comment (save_warmup=0, or not from CmdStan) has no warmup rows.
+    """
+    comments, header, rows, warm = [], None, [], None
     with open(path) as fh:
         for line in fh:
             if line.startswith("#"):
                 comments.append(line.rstrip("\n"))
+                if warm is None and "Adaptation terminated" in line:
+                    warm, rows = rows, []
                 continue
             line = line.strip()
             if not line:
@@ -121,7 +130,10 @@ def read_csv(path: Path) -> StanCsv:
                 rows.append([float(v) for v in line.split(",")])
     if header is None:
         raise CmdStanError(f"{path} has no header row")
-    out = StanCsv(header, np.array(rows, dtype=float).reshape(len(rows), len(header)), comments=comments)
+    def mat(r):
+        return np.array(r, dtype=float).reshape(len(r), len(header))
+
+    out = StanCsv(header, mat(rows), comments=comments, warmup_values=mat(warm) if warm is not None else None)
     for c in comments:
         if m := _ELAPSED.match(c):
             out.warmup_s = float(m.group(1))
@@ -152,7 +164,8 @@ def run_chains(argv_for_chain, chains: int) -> float:
 def sample_argv(exe: Path, data: Path | None, seed: int, chain: int, out_csv: Path, warmup: int, draws: int,
                 init: Path | None = None, extra: list[str] | None = None) -> list[str]:
     """CmdStan NUTS command for one chain. All chains share the seed and differ
-    by id, so their RNG streams are distinct and reproducible."""
+    by id, so their RNG streams are distinct and reproducible. Warmup draws are
+    saved so that their gradient count is known; `read_csv` keeps them apart."""
     argv = [str(exe), f"id={chain + 1}"]
     if data is not None:
         argv += ["data", f"file={data}"]
@@ -160,5 +173,5 @@ def sample_argv(exe: Path, data: Path | None, seed: int, chain: int, out_csv: Pa
     if init is not None:
         argv += [f"init={init}"]
     argv += ["output", f"file={out_csv}", "method=sample", f"num_warmup={warmup}", f"num_samples={draws}",
-             "save_warmup=0"]
+             "save_warmup=1"]
     return argv + list(extra or [])

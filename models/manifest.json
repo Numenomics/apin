@@ -2,169 +2,285 @@
   {
     "model": "eight_schools_noncentered",
     "family": "easy/small",
+    "bench": "public",
     "posterior": "eight_schools-eight_schools_noncentered",
     "data": "eight_schools",
     "data_sha256": "f06889e8cae3755c00a4a44f002d5fc3acf3263ff9ae8ffe5655b1907bcadd80",
-    "data_shipped": true
+    "data_shipped": true,
+    "reference": {
+      "source": "posteriordb",
+      "posteriordb": "eight_schools-eight_schools_noncentered"
+    }
   },
   {
     "model": "blr",
     "family": "easy/small",
+    "bench": "public",
     "posterior": "sblrc-blr",
     "data": "sblrc",
     "data_sha256": "d78239c2ff72fb578461d3ed4494f8c5d46e9089c61b4275d7c2f530452e3e9e",
-    "data_shipped": true
+    "data_shipped": true,
+    "reference": {
+      "source": "posteriordb",
+      "posteriordb": "sblrc-blr"
+    }
   },
   {
     "model": "kidscore_momiq",
     "family": "easy/small",
+    "bench": "held-out",
     "posterior": "kidiq-kidscore_momiq",
     "data": "kidiq",
     "data_sha256": "8f6026d1d51013be5956cdeec880e4fd522c1a98a8d1c3600f12dd438924f21b",
-    "data_shipped": false
+    "data_shipped": false,
+    "reference": {
+      "source": "posteriordb",
+      "posteriordb": "kidiq-kidscore_momiq"
+    }
   },
   {
     "model": "lsat_model",
     "family": "easy/small",
+    "bench": "held-out",
     "posterior": "lsat_data-lsat_model",
     "data": "lsat_data",
     "data_sha256": "eb36bced252d0acfeb1ea195c2c3c932602c884e9af1dacfdc6fefacaabe1a03",
-    "data_shipped": true
+    "data_shipped": true,
+    "reference": {
+      "source": "local",
+      "posteriordb": null,
+      "note": "posteriordb has no reference posterior; built with `apin reference build`"
+    }
   },
   {
     "model": "logmesquite_logvash",
     "family": "GLM",
+    "bench": "held-out",
     "posterior": "mesquite-logmesquite_logvash",
     "data": "mesquite",
     "data_sha256": "32002e710ee5228e3d7d96109932de86f4e6490cdf0840f472f648b17ff3fb92",
-    "data_shipped": false
+    "data_shipped": false,
+    "reference": {
+      "source": "posteriordb",
+      "posteriordb": "mesquite-logmesquite_logvash"
+    }
   },
   {
     "model": "wells_dist100_model",
     "family": "GLM",
+    "bench": "held-out",
     "posterior": "wells_data-wells_dist100_model",
     "data": "wells_data",
     "data_sha256": "dfa61ec04d9785a0b811553d1366221fd75f509b0c308275cd314df2cc2b879c",
-    "data_shipped": false
+    "data_shipped": false,
+    "reference": {
+      "source": "local",
+      "posteriordb": null,
+      "note": "posteriordb has no reference posterior; built with `apin reference build`"
+    }
   },
   {
     "model": "diamonds",
     "family": "GLM",
+    "bench": "public",
     "posterior": "diamonds-diamonds",
     "data": "diamonds",
     "data_sha256": "681cd95077f24986782f8ad2b52f1a0ca80b337d368d6be155264b6abe3ba21d",
-    "data_shipped": false
+    "data_shipped": false,
+    "reference": {
+      "source": "posteriordb",
+      "posteriordb": "diamonds-diamonds"
+    }
   },
   {
     "model": "radon_partially_pooled_noncentered",
     "family": "hierarchical",
+    "bench": "public",
     "posterior": "radon_all-radon_partially_pooled_noncentered",
     "data": "radon_all",
     "data_sha256": "05cac39913090df5430e3f769d8eb8d2ee4e6f0a3c5286c9e767f37926d51ffd",
-    "data_shipped": false
+    "data_shipped": false,
+    "reference": {
+      "source": "local",
+      "posteriordb": null,
+      "note": "posteriordb has no reference posterior; built with `apin reference build`"
+    }
   },
   {
     "model": "radon_variable_intercept_slope_noncentered",
     "family": "hierarchical",
+    "bench": "held-out",
     "posterior": "radon_mn-radon_variable_intercept_slope_noncentered",
     "data": "radon_mn",
     "data_sha256": "99c607bdd4e11d2693b27f8fd71d7e79adb6426caf013993b267983fdf598d4f",
-    "data_shipped": false
+    "data_shipped": false,
+    "reference": {
+      "source": "local",
+      "posteriordb": null,
+      "note": "posteriordb has no reference posterior; built with `apin reference build`"
+    }
   },
   {
     "model": "dogs_hierarchical",
     "family": "hierarchical",
+    "bench": "held-out",
     "posterior": "dogs-dogs_hierarchical",
     "data": "dogs",
     "data_sha256": "a0a846b35922994afb60ed464eecf3e118efe06fa04b917eda5e642668986211",
-    "data_shipped": false
+    "data_shipped": false,
+    "reference": {
+      "source": "local",
+      "posteriordb": null,
+      "note": "posteriordb has no reference posterior; built with `apin reference build`"
+    }
   },
   {
     "model": "pilots",
     "family": "hierarchical",
+    "bench": "public",
     "posterior": "pilots-pilots",
     "data": "pilots",
     "data_sha256": "bc35ce1446523f76a8e76eb9aafd504fe80ff4ad9952c4d7587af5a1fe03f810",
-    "data_shipped": false
+    "data_shipped": false,
+    "reference": {
+      "source": "local",
+      "posteriordb": null,
+      "stan": "reference/pilots.stan",
+      "note": "posteriordb has no reference posterior; built with `apin reference build` from a non-centred version with the same posterior, because NUTS diverges on the centred model"
+    }
   },
   {
     "model": "hier_2pl",
     "family": "hierarchical",
+    "bench": "held-out",
     "posterior": "sat-hier_2pl",
     "data": "sat",
     "data_sha256": "1b06fd37b0cde2e167615beea91009faf11a395481d6d7c819d54335f1a14d1c",
-    "data_shipped": false
+    "data_shipped": false,
+    "reference": {
+      "source": "local",
+      "posteriordb": null,
+      "note": "posteriordb has no reference posterior; built with `apin reference build`"
+    }
   },
   {
     "model": "gp_regr",
     "family": "GP/spatial",
+    "bench": "public",
     "posterior": "gp_pois_regr-gp_regr",
     "data": "gp_pois_regr",
     "data_sha256": "9094c25b7653ba5f347178b2614d697fd7b709d4ee16ca33112ffd6266936e12",
-    "data_shipped": true
+    "data_shipped": true,
+    "reference": {
+      "source": "posteriordb",
+      "posteriordb": "gp_pois_regr-gp_regr"
+    }
   },
   {
     "model": "kronecker_gp",
     "family": "GP/spatial",
+    "bench": "held-out",
     "posterior": "synthetic_grid_RBF_kernels-kronecker_gp",
     "data": "synthetic_grid_RBF_kernels",
     "data_sha256": "68498ac82e2e59c244f49cfff6973a4e4bf914270bb6989564df15bb5387a5fe",
-    "data_shipped": true
+    "data_shipped": true,
+    "reference": {
+      "source": "local",
+      "posteriordb": null,
+      "note": "posteriordb has no reference posterior; built with `apin reference build`"
+    }
   },
   {
     "model": "accel_gp",
     "family": "GP/spatial",
+    "bench": "held-out",
     "posterior": "mcycle_gp-accel_gp",
     "data": "mcycle_gp",
     "data_sha256": "e0c31958c493d78c921cd3795901e0197f5e532d851ec1a8a2e413813d3c1046",
-    "data_shipped": false
+    "data_shipped": false,
+    "reference": {
+      "source": "posteriordb",
+      "posteriordb": "mcycle_gp-accel_gp"
+    }
   },
   {
     "model": "bym2_offset_only",
     "family": "GP/spatial",
+    "bench": "public",
     "posterior": "traffic_accident_nyc-bym2_offset_only",
     "data": "traffic_accident_nyc",
     "data_sha256": "c7bae55788db89a30a809a38cea46ad725b0dcd218b10e398abfd67a03dd20c4",
-    "data_shipped": false
+    "data_shipped": false,
+    "reference": {
+      "source": "local",
+      "posteriordb": null,
+      "note": "posteriordb has no reference posterior; built with `apin reference build`"
+    }
   },
   {
     "model": "eight_schools_centered",
     "family": "stiff/funnel",
+    "bench": "public",
     "posterior": "eight_schools-eight_schools_centered",
     "data": "eight_schools",
     "data_sha256": "f06889e8cae3755c00a4a44f002d5fc3acf3263ff9ae8ffe5655b1907bcadd80",
-    "data_shipped": true
+    "data_shipped": true,
+    "reference": {
+      "source": "posteriordb",
+      "posteriordb": "eight_schools-eight_schools_noncentered",
+      "note": "posteriordb lists the reference of eight_schools-eight_schools_noncentered for this posterior; the gate compares the variables both share"
+    }
   },
   {
     "model": "garch11",
     "family": "stiff/funnel",
+    "bench": "public",
     "posterior": "garch-garch11",
     "data": "garch",
     "data_sha256": "6f5dd0d191c8f5f0dd655d1936a78dded65c41807d9c733e18d08a2fb0437ce0",
-    "data_shipped": true
+    "data_shipped": true,
+    "reference": {
+      "source": "posteriordb",
+      "posteriordb": "garch-garch11"
+    }
   },
   {
     "model": "lotka_volterra",
     "family": "stiff/funnel",
+    "bench": "held-out",
     "posterior": "hudson_lynx_hare-lotka_volterra",
     "data": "hudson_lynx_hare",
     "data_sha256": "381934bf92c9f86e938da824fda8adcc0b5b43dd3c0eb62c0686006beea0893d",
-    "data_shipped": true
+    "data_shipped": true,
+    "reference": {
+      "source": "posteriordb",
+      "posteriordb": "hudson_lynx_hare-lotka_volterra"
+    }
   },
   {
     "model": "low_dim_gauss_mix",
     "family": "stiff/funnel",
+    "bench": "public",
     "posterior": "low_dim_gauss_mix-low_dim_gauss_mix",
     "data": "low_dim_gauss_mix",
     "data_sha256": "9adb76f51fed5426f26090ce18c2bf732aef7695aadb57fa12e11efc5f0d9efb",
-    "data_shipped": true
+    "data_shipped": true,
+    "reference": {
+      "source": "posteriordb",
+      "posteriordb": "low_dim_gauss_mix-low_dim_gauss_mix"
+    }
   },
   {
     "model": "arma11",
     "family": "stiff/funnel",
+    "bench": "held-out",
     "posterior": "arma-arma11",
     "data": "arma",
     "data_sha256": "42dae9f7ccca02a5e62f6e89e6e0ffcc15dee5d42638d7540147b0c8b88b8cab",
-    "data_shipped": true
+    "data_shipped": true,
+    "reference": {
+      "source": "posteriordb",
+      "posteriordb": "arma-arma11"
+    }
   }
 ]

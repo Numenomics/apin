@@ -20,7 +20,7 @@ import numpy as np
 from scipy.special import ndtri
 from scipy.stats import rankdata
 
-__all__ = ["ess_bulk", "ess_tail", "rhat", "summarise"]
+__all__ = ["ess_bulk", "ess_tail", "ess_mean", "mcse_mean", "rhat", "summarise"]
 
 
 def _is_degenerate(x: np.ndarray) -> bool:
@@ -41,15 +41,17 @@ def _z_scale(x: np.ndarray) -> np.ndarray:
 
 
 def _autocovariance(x: np.ndarray) -> np.ndarray:
-    n = x.size
-    varx = np.var(x, ddof=1)
-    if varx == 0:
-        return np.zeros(n)
+    """Autocovariance of each column of x (draws, chains), one FFT for all chains."""
+    n = x.shape[0]
+    varx = np.var(x, axis=0, ddof=1)
     m = _nextn(n)
-    yc = np.zeros(2 * m)
-    yc[:n] = x - x.mean()
-    ac = np.fft.ifft(np.abs(np.fft.fft(yc)) ** 2).real[:n]
-    return ac / ac[0] * varx * (n - 1) / n
+    yc = np.zeros((2 * m, x.shape[1]))
+    yc[:n] = x - x.mean(axis=0)
+    ac = np.fft.ifft(np.abs(np.fft.fft(yc, axis=0)) ** 2, axis=0).real[:n]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = ac / ac[0] * varx * (n - 1) / n
+    out[:, varx == 0] = 0.0
+    return out
 
 
 def _nextn(n: int) -> int:
@@ -69,7 +71,7 @@ def _ess(x: np.ndarray) -> float:
     niter, nchains = x.shape
     if niter < 3 or _is_degenerate(x):
         return math.nan
-    acov = np.column_stack([_autocovariance(x[:, c]) for c in range(nchains)])
+    acov = _autocovariance(x)
     am = np.concatenate([[math.nan], acov.mean(axis=1)])  # 1-based, as in R
     mean_var = am[1] * niter / (niter - 1)
     var_plus = mean_var * (niter - 1) / niter
@@ -120,6 +122,21 @@ def ess_bulk(x: np.ndarray) -> float:
     if _is_degenerate(x):
         return math.nan
     return _ess(_z_scale(_split_chains(x)))
+
+
+def ess_mean(x: np.ndarray) -> float:
+    """ESS for the mean of x: split chains, no rank normalisation (posterior's `ess_mean`)."""
+    x = np.asarray(x, dtype=float)
+    if _is_degenerate(x):
+        return math.nan
+    return _ess(_split_chains(x))
+
+
+def mcse_mean(x: np.ndarray) -> float:
+    """Monte Carlo standard error of the mean of x (posterior's `mcse_mean`)."""
+    x = np.asarray(x, dtype=float)
+    e = ess_mean(x)
+    return float(np.std(x, ddof=1) / math.sqrt(e)) if math.isfinite(e) and e > 0 else math.nan
 
 
 def _ess_quantile(x: np.ndarray, prob: float) -> float:

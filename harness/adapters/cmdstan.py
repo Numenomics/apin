@@ -44,16 +44,20 @@ class Adapter(Sampler):
 
 
 def timing_from_csvs(csvs, wall: float) -> Timing:
-    warm, samp, chain, grads, div = [], [], [], 0, 0
+    warm, samp, chain, grads, grads_w, div = [], [], [], 0, 0, 0
     for path in csvs:
         f = cmdstan.read_csv(path)
         warm.append(f.warmup_s)
         samp.append(f.sampling_s)
         chain.append((f.warmup_s or 0.0) + (f.sampling_s or 0.0))
-        # save_warmup=0, so every row is a sampling draw.
+        # read_csv keeps the warmup rows (save_warmup=1) out of `values`.
         lf = f.column("n_leapfrog__")
         grads += int(lf.sum()) if lf is not None else 0
+        if grads_w is not None and f.warmup_values is not None and lf is not None:
+            grads_w += int(f.warmup_values[:, f.columns.index("n_leapfrog__")].sum())
+        else:
+            grads_w = None  # warmup not saved: unknown
         d = f.column("divergent__")
         div += int(d.sum()) if d is not None else 0
     return Timing(wall_s=wall, chain_s=chain, warmup_s=warm, sampling_s=samp,
-                  grads_sampling=grads, grads_warmup=None, divergences=div)
+                  grads_sampling=grads, grads_warmup=grads_w, divergences=div)

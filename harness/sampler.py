@@ -54,6 +54,9 @@ class Timing:
         sampling. Their sum is the second wall convention (see PROTOCOL.md).
     grads_sampling: gradient evaluations in the sampling phase, all chains.
     grads_warmup: the same for warmup, or None when the sampler does not report it.
+    evaluations: every density and gradient evaluation, warmup included, when the
+        harness counts them itself (the logdensity adapter); else None, and the
+        scorer uses grads_sampling + grads_warmup.
     """
 
     wall_s: float
@@ -64,6 +67,7 @@ class Timing:
     grads_warmup: int | None
     divergences: int | None
     extra: dict = field(default_factory=dict)
+    evaluations: int | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)

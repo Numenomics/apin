@@ -25,12 +25,13 @@ from .sampler import RunRequest, Sampler
 BASE_SEED = 20260819
 
 
-def seed_for(rep: int) -> int:
-    return BASE_SEED + 1000 * rep
+def seed_for(rep: int, base: int = BASE_SEED) -> int:
+    return base + 1000 * rep
 
 
 def run_grid(sampler: Sampler, models: list[models_mod.Model], reps: int, runs_dir: Path, label: str | None = None,
-             chains: int = 4, warmup: int = 1000, draws: int = 1000, log=print) -> list[Path]:
+             chains: int = 4, warmup: int = 1000, draws: int = 1000, log=print, base_seed: int = BASE_SEED
+             ) -> list[Path]:
     sampler.check()
     label = label or sampler.name
     identity = sampler.describe()
@@ -45,7 +46,7 @@ def run_grid(sampler: Sampler, models: list[models_mod.Model], reps: int, runs_d
             if d.exists():
                 shutil.rmtree(d)
             d.mkdir(parents=True)
-            req = RunRequest(model=model, data_file=data, seed=seed_for(rep), chains=chains, warmup=warmup,
+            req = RunRequest(model=model, data_file=data, seed=seed_for(rep, base_seed), chains=chains, warmup=warmup,
                              draws=draws, out_dir=d)
             try:
                 timing = sampler.run(req)
@@ -62,5 +63,6 @@ def run_grid(sampler: Sampler, models: list[models_mod.Model], reps: int, runs_d
             (d / "DONE").touch()
             done.append(d)
             log(f"[{label}] {model.name} rep{rep}: wall {timing.wall_s:.2f}s, "
-                f"chains {sum(timing.chain_s):.2f}s, grads {timing.grads_sampling}")
+                f"chains {sum(timing.chain_s):.2f}s, grads {timing.grads_sampling}"
+                + (f", evaluations {timing.evaluations}" if timing.evaluations is not None else ""))
     return done

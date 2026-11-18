@@ -1,18 +1,23 @@
 # apin
 
-apin is a workbench for measuring changes to MCMC samplers and the libraries under them. It pins the upstream projects as git submodules, keeps the owner's patches on fork branches, and runs any sampler over a fixed set of 21 posteriordb models with one protocol, so that a patched build and its baseline can be compared in effective samples per second. It also holds the records of a 2026 campaign on Stan's wall time and a ledger of every patch and where it stands upstream.
+apin is a workbench for measuring changes to MCMC samplers and the libraries under them. It pins the upstream projects as git submodules, keeps the owner's patches on fork branches, and runs any sampler over a fixed set of 21 posteriordb models with one protocol, so that a patched build and its baseline can be compared in effective samples per second. Every run is checked against a reference posterior, so a sampler that is fast and wrong is marked wrong. It also holds the records of a 2026 campaign on Stan's wall time and a ledger of every patch and where it stands upstream.
+
+BENCH.md turns the same pieces into a benchmark. A sampler written in Python gets a log density and its gradient, and is scored on ESS per evaluation against Stan's NUTS.
 
 ## Layout
 
 | path | what it holds |
 |---|---|
-| `harness/` | The runner and the scorer. `sampler.py` is the interface; `adapters/` has one file per sampler (cmdstan, pathfinder, walnutpie, nutpie). |
-| `models/` | The 21 core models and `manifest.json` (posteriordb name, family, data file, shipped or fetched). |
+| `harness/` | The runner and the scorer. `sampler.py` is the interface; `adapters/` has one file per sampler (cmdstan, pathfinder, walnutpie, nutpie, logdensity). `gate.py` is the correctness gate, `reference.py` reads and builds the reference posteriors, `logdensity.py` is the seam a Python sampler runs behind, and `stan_library.py` builds BridgeStan libraries. |
+| `models/` | The 21 core models and `manifest.json` (posteriordb name, family, data file, shipped or fetched, reference source, benchmark split). |
+| `models/reference/` | One reference posterior per model, as summary statistics (`<model>.json`), and the reparameterised programs some references are built from. |
+| `examples/samplers/` | Two submissions for the logdensity adapter: a working HMC and a sampler that is wrong on purpose. |
 | `data/` | The small data files apin ships; `SOURCES.md` says where each data set comes from. |
 | `upstream/` | One submodule per upstream at `upstream/<name>/`, its build notes in `upstream/<name>.md`, and the ledger `upstream/STATUS.md`. |
 | `results/` | The old campaign: `records/` (one note per experiment), `tables/` (medians), `campaign/` (summary JSON). |
-| `tests/` | Fast unit tests, a slow end-to-end test and the smoke test. |
-| `PROTOCOL.md` | How to measure a sampler or a patch, the runner output schema and the known hazards. |
+| `tests/` | Fast unit tests, and slow end-to-end tests marked `slow`. |
+| `PROTOCOL.md` | How to measure a sampler or a patch, the correctness gate, the log-density seam, the runner output schema and the known hazards. |
+| `BENCH.md` | The benchmark: the task, the rules, the budget, the score, the public and held-out split, and the defences against gaming it. |
 | `REPORT.md` | What the campaign found, with the source of every headline number. |
 | `ARCHIVE.md` | What the old repository held that apin leaves out. |
 | `LICENSE`, `LICENSING.md` | The proposed licence and the licences of the upstreams. |
@@ -48,13 +53,36 @@ uv run apin run --sampler cmdstan --models hierarchical --reps 3 --label patched
 uv run apin score --baseline stock
 ```
 
-`--models` takes `all`, a family name or a comma list. Runs go to `runs/<label>/`, scores to `scores/`; both are ignored by git. A rerun skips the reps that finished. Adapter options go through `--opt key=value`; each adapter documents its own at the top of its file. PROTOCOL.md says which budget, seeds and cost column to use.
+`--models` takes `all`, a family name, `public`, `held-out` or a comma list. Runs go to `runs/<label>/`, scores to `scores/`; both are ignored by git. A rerun skips the reps that finished. Adapter options go through `--opt key=value`; each adapter documents its own at the top of its file. `--base-seed` changes the seeds of every rep. PROTOCOL.md says which budget, seeds and cost column to use.
+
+`apin score` first gates every rep against its reference. It writes `table.md`, with one row per model and one column per label. With `--baseline` it also writes `bench.csv`, the benchmark score.
+
+Run a Python sampler through the log-density seam, and score it against CmdStan:
+
+```bash
+uv run apin run --sampler logdensity --label hmc --opt sampler=examples/samplers/hmc.py --models public
+uv run apin run --sampler cmdstan --label cmdstan --models public
+uv run apin score --baseline cmdstan
+```
+
+The first logdensity run of each model builds a BridgeStan library, one to two minutes per model.
+
+posteriordb has no reference for 9 of the models. apin builds those with CmdStan and posteriordb's recipe, and keeps them in git. To rebuild one:
+
+```bash
+uv run apin reference build --models pilots   # needs CMDSTAN; minutes to an hour per model
+```
 
 ## Tests
 
 ```bash
-uv run pytest                                   # fast unit tests, no CmdStan needed
-CMDSTAN=/path/to/cmdstan uv run pytest -m slow  # tests/test_smoke.py: CmdStan end to end on two models
+uv run pytest                                   # fast unit tests, no CmdStan or BridgeStan needed
+CMDSTAN=/path/to/cmdstan uv run pytest -m slow  # end to end on real models
+```
+
+The slow tests run CmdStan on a few models, and the two example samplers on two models through BridgeStan. The first run builds a BridgeStan library per model, one to two minutes each. The CmdStan test is skipped when `CMDSTAN` is not set.
+
+```
 ```
 
 A smoke run of the command line, about a minute on first build:
@@ -85,7 +113,7 @@ Branches on a fork can be rebased. When a pin is not on any branch, push a tag f
 
 ## Add a sampler
 
-Write one file in `harness/adapters/` that defines a class `Adapter`, a subclass of `harness.sampler.Sampler`, with a `name` and a `run(RunRequest) -> Timing` method. `run` writes one CSV per chain in the output directory; PROTOCOL.md, "Runner output schema", gives the format. The grid sets the seeds and budget, writes `run.json` and the markers, and the scorer reads only the CSVs and `run.json`. `apin list` finds the new adapter on its own. REPORT.md, section 9, describes what the seam still assumes (Stan models, one Stan-specific setting, no correctness score).
+Write one file in `harness/adapters/` that defines a class `Adapter`, a subclass of `harness.sampler.Sampler`, with a `name` and a `run(RunRequest) -> Timing` method. `run` writes one CSV per chain in the output directory; PROTOCOL.md, "Runner output schema", gives the format. The grid sets the seeds and budget, writes `run.json` and the markers, and the scorer reads only the CSVs and `run.json`. `apin list` finds the new adapter on its own. A sampler written in Python needs no adapter: the logdensity adapter runs it (PROTOCOL.md, "The log-density seam"). REPORT.md, section 9, describes what the seam still assumes (Stan models, one Stan-specific setting).
 
 ## Add an upstream
 
