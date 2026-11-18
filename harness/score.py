@@ -112,11 +112,24 @@ def read_rep(rep_dir: Path, chains: int, draws: int, names: list[str] | None = N
     return csvs
 
 
+def fingerprint(rep_dir: Path) -> dict[str, str]:
+    """The sha256 of each chain file, by name: the draws a cached verdict was computed from."""
+    return {f.name: hashlib.sha256(f.read_bytes()).hexdigest() for f in chain_files(rep_dir)}
+
+
 def verdict(rep_dir: Path, entry: Entry, reps: int) -> gate.Verdict:
     """The gate's verdict on a finished rep, cached in rep_dir/gate.json. lp__ is computed by the
     harness from the constrained draws; a column of that name written by the sampler is ignored.
-    A rep whose files fall short of the budget is wrong. An unreadable cache is recomputed."""
-    key = _key(entry, reps)
+    A rep whose files fall short of the budget is wrong; that check runs on every call. The cache
+    holds only for the chain files it was computed from (`fingerprint`); an unreadable cache is
+    recomputed."""
+    ref = entry.ref
+    names = list(ref.names) + list(ref.constants)
+    try:
+        csvs = read_rep(rep_dir, entry.chains, entry.draws, names)
+    except ValueError as e:
+        return gate.Verdict("wrong", str(e))
+    key = {**_key(entry, reps), "chains": fingerprint(rep_dir)}
     cache = rep_dir / "gate.json"
     try:
         c = json.loads(cache.read_text())
@@ -124,17 +137,10 @@ def verdict(rep_dir: Path, entry: Entry, reps: int) -> gate.Verdict:
             return gate.Verdict.from_dict(c["verdict"])
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         pass
-    ref = entry.ref
-    names = list(ref.names) + list(ref.constants)
-    try:
-        csvs = read_rep(rep_dir, entry.chains, entry.draws, names)
-    except ValueError as e:
-        v = gate.Verdict("wrong", str(e))
-    else:
-        draws = chain_draws(rep_dir, names, csvs)
-        if ref.has_lp and all(n in draws for n in ref.names):
-            draws[LP] = entry.lp(draws)
-        v = gate.check(draws, ref, reps=reps)
+    draws = chain_draws(rep_dir, names, csvs)
+    if ref.has_lp and all(n in draws for n in ref.names):
+        draws[LP] = entry.lp(draws)
+    v = gate.check(draws, ref, reps=reps)
     cache.write_text(json.dumps({"key": key, "verdict": v.to_dict()}))
     return v
 

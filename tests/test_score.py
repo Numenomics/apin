@@ -196,3 +196,26 @@ def test_a_corrupt_verdict_cache_is_recomputed(tmp_path, grid):
     (d / "gate.json").write_text('{"key": {"reps": 2, "refer')
     assert _reasons(tmp_path, grid)[("m1", 0)] == first
     assert json.loads((d / "gate.json").read_text())["verdict"]["status"] == first[0]
+
+
+def test_a_cached_verdict_holds_only_for_the_files_it_was_computed_from(tmp_path, grid):
+    """T1: a cached `right` must not outlive its chain files. Deleting, truncating or replacing a
+    chain after scoring is a cache miss, and the missing and short checks run every time."""
+    write_rep(tmp_path, "x", "m1", 1, grid)
+    d = write_rep(tmp_path, "x", "m1", 0, grid)
+    assert _reasons(tmp_path, grid)[("m1", 0)][0] == "right"
+    text = (d / "chain_1.csv").read_text()
+    (d / "chain_0.csv").unlink()
+    status, reason = _reasons(tmp_path, grid)[("m1", 0)]
+    assert status == "wrong" and "3 chains" in reason
+    write_rep(tmp_path / "fresh", "x", "m1", 0, grid)  # restore chain_0 from an identical rep
+    (d / "chain_0.csv").write_bytes((tmp_path / "fresh" / "x" / "m1" / "rep0" / "chain_0.csv").read_bytes())
+    assert _reasons(tmp_path, grid)[("m1", 0)][0] == "right"
+    lines = text.splitlines()
+    (d / "chain_1.csv").write_text("\n".join(lines[:-100]) + "\n")
+    status, reason = _reasons(tmp_path, grid)[("m1", 0)]
+    assert status == "wrong" and "chain_1.csv" in reason and "draws" in reason
+    shifted = [lines[0]] + [",".join(f"{float(v) + 5:.6g}" if i == 0 else v for i, v in enumerate(l.split(",")))
+                            for l in lines[1:]]
+    (d / "chain_1.csv").write_text("\n".join(shifted) + "\n")  # same shape, other draws
+    assert _reasons(tmp_path, grid)[("m1", 0)][0] != "right"  # recomputed: one chain off by 5
