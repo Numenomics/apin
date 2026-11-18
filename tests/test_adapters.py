@@ -60,7 +60,8 @@ def test_read_csv_keeps_warmup_rows_apart(tmp_path):
     f = cmdstan.read_csv(p)
     assert f.values.shape == (3, 3) and f.warmup_values.shape == (2, 3)
     t = cmdstan_adapter.timing_from_csvs([p], 1.0)
-    assert (t.grads_sampling, t.grads_warmup) == (7, 22)
+    assert t.grads_sampling == 7 + 3  # one gradient per transition start, too
+    assert t.grads_warmup is None and "step size" in t.uncounted  # no stepsize__ trace to rebuild
     q = tmp_path / "d.csv"
     q.write_text("lp__,n_leapfrog__,x\n-2,3,0.3\n")
     assert cmdstan.read_csv(q).warmup_values is None
@@ -143,8 +144,8 @@ def test_thinned_cmdstan_runs_have_no_evaluation_count(tmp_path):
     """S12: with thin=10 only every tenth transition's leapfrogs are written."""
     t = cmdstan_adapter.timing_from_csvs([_csv(tmp_path / "a.csv", thin=10)], 1.0)
     assert score.evaluation_counts(t.to_dict()) == (None, None, None) and "thin" in t.uncounted
-    t1 = cmdstan_adapter.timing_from_csvs([_csv(tmp_path / "b.csv")], 1.0)
-    assert score.evaluation_counts(t1.to_dict()) == (10, 0, 10) and t1.uncounted == ""
+    t1 = cmdstan_adapter.timing_from_csvs([FIXTURE], 1.0)
+    assert score.evaluation_counts(t1.to_dict()) == (18111 + 128, 0, 18111 + 128) and t1.uncounted == ""
 
 
 def test_a_csv_without_leapfrogs_has_no_evaluation_count(tmp_path):
@@ -169,3 +170,28 @@ def test_pathfinder_cost_is_unavailable(tmp_path, monkeypatch):
                            "model": type("M", (), {"stan_file": tmp_path / "m.stan"})()})()
     t = pathfinder.Adapter(Settings()).run(req)
     assert "pathfinder" in t.uncounted and score.evaluation_counts(t.to_dict())[0] is None
+
+
+FIXTURE = Path(__file__).parent / "fixtures" / "nuts" / "blr_chain.csv"  # a CmdStan 2.39 chain, cut to 10 draws
+
+
+def test_cmdstan_gradients_count_transition_starts_and_step_size_searches():
+    """S12: n_leapfrog__ leaves out the gradient at the start of every transition (base_nuts.hpp)
+    and the step-size searches (base_hmc.hpp init_stepsize), 2k + 4 gradients for k halvings or
+    doublings: k = 13, 7, 0, 2, 0, 1 in this chain, rebuilt from stepsize__ and accept_stat__."""
+    t = cmdstan_adapter.timing_from_csvs([FIXTURE], 1.0)
+    assert t.uncounted == ""
+    assert t.grads_warmup == 17041 + 1000 + 70 and t.grads_sampling == 118 + 10
+    assert t.extra["step_size_searches"] == [[13, 7, 0, 2, 0, 1]]
+
+
+def test_a_step_size_trace_that_does_not_rebuild_is_uncounted(tmp_path):
+    lines = FIXTURE.read_text().splitlines(keepends=True)
+    start = next(i for i, l in enumerate(lines) if l.startswith("lp__"))
+    f = lines[start + 300].split(",")
+    f[2] = str(float(f[2]) * 1.5)  # stepsize__ of one warmup row
+    lines[start + 300] = ",".join(f)
+    p = tmp_path / "c.csv"
+    p.write_text("".join(lines))
+    t = cmdstan_adapter.timing_from_csvs([p], 1.0)
+    assert score.evaluation_counts(t.to_dict()) == (None, None, None) and "step size" in t.uncounted

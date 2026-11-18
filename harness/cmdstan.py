@@ -99,6 +99,21 @@ class StanCsv:
         except ValueError:
             return None
 
+    def warmup_column(self, name: str) -> np.ndarray | None:
+        if self.warmup_values is None or name not in self.columns:
+            return None
+        return self.warmup_values[:, self.columns.index(name)]
+
+    @property
+    def config(self) -> dict[str, str]:
+        """The `key = value` lines of the CmdStan header, without "(Default)"; the first of a repeated key."""
+        out = {}
+        for c in self.comments:
+            k, eq, v = c.lstrip("# ").partition(" = ")
+            if eq:
+                out.setdefault(k.strip(), v.replace("(Default)", "").strip())
+        return out
+
 
 _ELAPSED = re.compile(r"#\s*Elapsed Time:\s*([\d.eE+-]+) seconds \(Warm-up\)")
 _SAMPLING = re.compile(r"#\s*([\d.eE+-]+) seconds \(Sampling\)")

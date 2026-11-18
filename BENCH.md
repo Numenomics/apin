@@ -239,7 +239,7 @@ There is no penalty factor and no median over reps. A model omitted counts as wr
 
 The speed is per evaluation first. ESS per evaluation does not depend on the machine, on load, or on how well the submission uses numpy, so a submission in pure Python competes with C++ NUTS. ESS per second is printed next to it, from the sum of the chains' own times. It measures what a user waits for, but mostly how well the overhead was vectorised.
 
-A run that cannot count all its evaluations has no ESS per evaluation. This is the case for CmdStan with `thin` above 1, for the Pathfinder adapter (CmdStan does not report Pathfinder's gradients) and for nutpie (no warmup count). The adapter says why in `Timing.uncounted`. Such a label has no per-evaluation speed, and the table says on which models.
+CmdStan's count is `n_leapfrog__`, plus one gradient at the start of every transition, plus the gradients of its step-size searches, which the adapter rebuilds from the CSV (PROTOCOL.md, "The log-density seam"). CmdStan's initialisation attempts are not counted: 2 to 200 evaluations per chain. At the bench budget a chain spends at least 2 × (1000 + 5000) = 12 000 on the rest, so the share left out is under 1.7 %. A run that cannot count all its evaluations has no ESS per evaluation. This is the case for CmdStan with `thin` above 1 or a step-size trace that does not rebuild (`stepsize_jitter` above 0), for the Pathfinder adapter (CmdStan does not report Pathfinder's gradients) and for nutpie (no warmup count). The adapter says why in `Timing.uncounted`. Such a label has no per-evaluation speed, and the table says on which models.
 
 `apin score` writes `per_run.csv`, `per_model.csv`, `ranking.csv` and `table.md`. The table prints the rank and, next to it, the per-model table with each model's verdict and speed.
 
@@ -282,17 +282,17 @@ One run on 5 public and held-out models, 5 reps each, at the bench budget (4 × 
 
 | rank | label | models right | speed per evaluation [95 %] | speed per second [95 %] |
 |---|---|---|---|---|
-| 1 | CmdStan NUTS | 4 of 5 | 1 [0.964, 1.04] | 1 [0.931, 1.08] |
-| 2 | HMC example | 3 of 5 | 0.505 [0.488, 0.525] | 0.155 [0.147, 0.163] |
+| 1 | CmdStan NUTS | 4 of 5 | 1 [0.965, 1.04] | 1 [0.931, 1.08] |
+| 2 | HMC example | 3 of 5 | 0.538 [0.52, 0.559] | 0.155 [0.147, 0.163] |
 | 3 | ULA (wrong on purpose) | 0 of 5 | | |
 
 | model | CmdStan NUTS | HMC example | ULA |
 |---|---|---|---|
-| blr | right: 0.0115/eval, 1230/s | right: 0.00319/eval, 54.7/s | unproven: R-hat 1.361 on sigma |
+| blr | right: 0.0107/eval, 1230/s | right: 0.00319/eval, 54.7/s | unproven: R-hat 1.361 on sigma |
 | eight_schools_centered | wrong: lp__ mean e = −0.274, bound 0.16 | unproven: R-hat 1.013 on lp__ | unproven: R-hat 1.035 on proj.1 |
-| eight_schools_noncentered | right: 0.0382/eval, 3390/s | unproven: proj.2 square e = +0.075, bound 0.131 | wrong: non-finite lp__ |
-| garch11 | right: 0.0276/eval, 382/s | right: 0.0229/eval, 178/s | wrong: lp__ square e = +1.13, bound 0.837 |
-| kidscore_momiq | right: 0.00881/eval, 361/s | right: 0.00491/eval, 64.4/s | unproven: R-hat 2.612 on beta.1 |
+| eight_schools_noncentered | right: 0.0342/eval, 3390/s | unproven: proj.2 square e = +0.075, bound 0.131 | wrong: non-finite lp__ |
+| garch11 | right: 0.0253/eval, 382/s | right: 0.0229/eval, 178/s | wrong: lp__ square e = +1.13, bound 0.837 |
+| kidscore_momiq | right: 0.0085/eval, 361/s | right: 0.00491/eval, 64.4/s | unproven: R-hat 2.612 on beta.1 |
 
 Cells are the mean over reps of the credited ESS per evaluation and per second of chain time, or the model's verdict and the reason from the first rep that decided it.
 
@@ -300,7 +300,7 @@ What the run shows:
 
 - NUTS is wrong on eight_schools_centered. One of its five reps passed R-hat and ESS and still showed the funnel's bias in lp__, 0.27 SD with a lower bound of 0.16. The others had not mixed. This is the known failure of NUTS on the centred funnel, and the gate sees it.
 - ULA earns nothing. Where its chains mix, the gate calls it wrong. Where they do not, it is unproven.
-- The HMC example ranks below NUTS. It proves fewer models and is about half as fast per evaluation where both are right. With the old score, which credited the bulk ESS of the variables alone at 4 × 1000 draws, it scored 1.32 times NUTS on four of these models. A likely reason for the change is that the credited ESS now includes the projections on the correlated directions and lp__, and the example uses a diagonal metric, which mixes slowly along them. This run does not test that.
+- The HMC example ranks below NUTS. It proves fewer models and is about half as fast per evaluation where both are right. With the old score, which credited the bulk ESS of the variables alone at 4 × 1000 draws, it scored 1.32 times NUTS on four of these models, with NUTS's cost counted as `n_leapfrog__` alone. A likely reason for the change is that the credited ESS now includes the projections on the correlated directions and lp__, and the example uses a diagonal metric, which mixes slowly along them. This run does not test that.
 
 ## Ways to game the score
 

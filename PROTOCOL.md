@@ -22,7 +22,7 @@ Every rep gets a verdict from the correctness gate (next section): right, wrong 
 
 | column | meaning |
 |---|---|
-| `ess_per_eval` | credited ESS divided by every density and gradient evaluation, warmup included. It does not depend on the machine and does not let a sampler hide work in warmup. It is the primary speed. It needs complete counts: CmdStan's `n_leapfrog__` over every saved warmup and sampling row with thin = 1, or the logdensity adapter's own count. An adapter that cannot count all its evaluations says why in `timing.uncounted`, and the rep has no `ess_per_eval`. |
+| `ess_per_eval` | credited ESS divided by every density and gradient evaluation, warmup included. It does not depend on the machine and does not let a sampler hide work in warmup. It is the primary speed. It needs complete counts: for CmdStan, the count read from every saved warmup and sampling row with thin = 1 (see below), or the logdensity adapter's own count. An adapter that cannot count all its evaluations says why in `timing.uncounted`, and the rep has no `ess_per_eval`. |
 | `ess_per_s` | credited ESS divided by the sum of each chain's own time (warmup plus sampling). This removes the effect of parallel dispatch and machine load. W-109 and W-133 used this convention ("stanza sum"). It is the secondary speed. |
 
 Never compare numbers that use different conventions. A report states which one it uses.
@@ -132,6 +132,12 @@ The contract:
 
 `timing.wall_s` runs from loading the submission file to converting what `sample()` returns into an array. Loading the model and constraining the draws are excluded. The chains share one process, so each `chain_s` entry is `wall_s / chains` and `ess_per_s` is ESS per second of the single core the submission ran on. `ess_per_s_wall` of a CmdStan run uses 4 cores in parallel, so compare `ess_per_s` (chain time) or `ess_per_eval` between a submission and CmdStan, never a wall time. `timing.evaluations` holds the count, and `timing.extra` holds the density and gradient counts apart and the limits in force.
 
+CmdStan's gradient count (`adapters/cmdstan.py`, `gradients`) follows the CmdStan 2.39 source in `stan/src/stan/mcmc/hmc`:
+
+- One gradient per leapfrog step (`n_leapfrog__`), and one at the start of every transition, warmup and sampling (`base_nuts.hpp`, `hamiltonian_.init`). `n_leapfrog__` leaves the second out.
+- 2k + 4 gradients per step-size search (`base_hmc.hpp`, `init_stepsize`), where k is the number of times the search halved or doubled the step size. There is one search before warmup and one after each metric update, six in all at 1000 warmup iterations. CmdStan does not report k. The adapter finds it by replaying the dual averaging (`stepsize_adaptation.hpp`) from `accept_stat__` and `stepsize__` of the warmup rows. Every replayed step size of the kept runs matches CmdStan's to 3e-7 in log2. A trace that does not replay to 1e-4 leaves the run uncounted.
+- Not counted: the initialisation attempts (`services/util/initialize.hpp`). Each costs one density and, if that is finite, one gradient. There are at most 100, so 2 to 200 evaluations per chain. The rest of a chain costs at least 2 × (warmup + draws), 12 000 at the bench budget.
+
 `examples/samplers/` holds two submissions: `hmc.py`, HMC with a diagonal metric, a step size tuned by dual averaging in warmup and a jittered number of steps, and `ula_wrong.py`, the unadjusted Langevin algorithm with a large step, which is wrong on purpose. Run one with
 
 ```bash
@@ -168,6 +174,7 @@ runs/<label>/<model>/rep<r>/
 | `timing.chain_s` | each chain's own time, warmup plus sampling |
 | `timing.warmup_s`, `timing.sampling_s` | per chain, or null when the sampler does not report them |
 | `timing.grads_sampling`, `timing.grads_warmup` | gradient evaluations summed over chains, or null |
+| `timing.extra.step_size_searches` | CmdStan: per chain, the halvings or doublings of each step-size search |
 | `timing.evaluations` | every density and gradient evaluation, when the harness counts them itself (logdensity), else null |
 | `timing.divergences` | summed over chains, or null when the sampler does not report them |
 | `timing.uncounted` | why the counts above leave out some evaluations, or empty when they are complete |

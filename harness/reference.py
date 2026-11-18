@@ -365,21 +365,11 @@ def settings_for(model: Model, settings: dict | None = None) -> dict:
     return {**LOCAL, **model.reference_settings, **(settings or {})}
 
 
-def _config(comments: list[str]) -> dict[str, str]:
-    """The `key = value` lines of a CmdStan CSV header, without "(Default)"."""
-    out = {}
-    for c in comments:
-        k, eq, v = c.lstrip("# ").partition(" = ")
-        if eq:
-            out.setdefault(k.strip(), v.replace("(Default)", "").strip())
-    return out
-
-
 def _made_with(f: cmdstan.StanCsv, s: dict, chain: int) -> bool:
     """Whether a chain CSV was made with settings `s` as chain `chain` (CmdStan's id is chain + 1)."""
     want = {"num_samples": s["samples"], "num_warmup": s["warmup"], "thin": s["thin"], "delta": s["adapt_delta"],
             "seed": s["seed"], "id": chain + 1}
-    got = _config(f.comments)
+    got = f.config
     try:
         return all(k in got and float(got[k]) == float(v) for k, v in want.items())
     except ValueError:
