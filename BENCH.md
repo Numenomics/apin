@@ -14,13 +14,13 @@ PROTOCOL.md defines the measurement: the grid, ESS, the references and the gate'
 
 Only `right` earns speed credit. A model is right when every rep is right, wrong when any rep is wrong, and unproven otherwise.
 
-**Rule 2. Speed is credited for the accuracy the run achieved, not the accuracy it claims.** The gate trusts the run's Monte Carlo standard errors (MCSEs) only after it has checked them. Over all variables, functions and reps of a model, the realized errors divided by the claimed MCSEs must look like draws from a unit normal. Copies of a chain, dependent chains and an approximation that hides correlation all claim more ESS than they have, and they fail this check. A cheaper check for chains that are near copies of each other comes first. It is a heuristic and is described as one.
+**Rule 2. Speed is credited for the accuracy the run achieved, not the accuracy it claims.** The gate trusts the run's Monte Carlo standard errors (MCSEs) only after it has checked them. Over all variables, functions and reps of a model, the realized errors divided by the claimed MCSEs must look like draws from a unit normal. Copies of a chain, dependent chains and an approximation that hides correlation all claim more ESS than they have. This check catches them only when the excess is large enough for the data to show it, and it misses a single perturbed copy or a shuffled chain (see "Ways to game the score"). A cheaper check for chains that are near copies of each other comes first. It is a heuristic and is described as one. Neither check can rule out dependent chains under `sample()`, so results under this interface are provisional, and no official round runs on it.
 
 **Rule 3. The posterior is joint.** The gate checks every variable, the log density of the draws, and a fixed set of projections stored with each reference. For each of these it checks the mean, the mean of the square, and the fractions of draws below the reference's 5 % and 95 % quantiles. A fraction is bounded, so a single extreme draw cannot hide an error in it.
 
 **Rule 4. Missing is failing.** The score is computed over a declared grid of models and reps. A missing or failed rep makes its model wrong. A saved rep is reused, and scored, only when its seed, its submission and its budget match the grid.
 
-**Rule 5. A submission sees the interface and nothing else, and everything it does is charged.** The interface is `sample(problem, budget, rng)`. Every call is counted. The clock runs from loading the submission to converting what it returns.
+**Rule 5. A submission sees the interface and nothing else, and everything it does is charged.** The interface is `sample(problem, budget, rng)`. Every call is counted. The clock runs from loading the submission to converting what it returns. The interface cannot show that the returned draws are a Markov chain's or that the chains are independent, so results under it are provisional, and no official round runs on it.
 
 ## How the code meets the rules
 
@@ -172,7 +172,7 @@ A label whose reps come from more than one submission is refused.
 - Every call to `log_density` or `log_density_gradient` is charged before it is evaluated, at a rejected point too.
 - A call past the limit raises BudgetExceeded, and the run fails even if the submission catches it.
 - The clock starts before the submission file is loaded and stops after the return value is converted to an array. An overrun fails the run at the end, even if no call came after it.
-- Every returned draw must be a point the submission evaluated with a finite log density (provenance). Points must keep the order in which they were first evaluated, and no point may appear in two chains.
+- Every returned draw must be a point the submission evaluated with a finite log density (provenance). Points must keep the order in which they were first evaluated, and no point may appear in two chains. That is all provenance verifies. It does not verify that the order is a Markov chain's: a submission can evaluate its draws again in any order, at points one float step away, and return them in that order. Nor does it verify that the chains are independent.
 
 This protects the counts from a submission that makes a mistake. It does not protect them from one that sets out to cheat. In-process Python cannot stop determined introspection. A submission can reach the counter through closure cells, the garbage collector or the stack. An official round therefore reads every submission before it trusts the result. Process isolation is listed under "Not built yet".
 
@@ -343,29 +343,32 @@ What the run shows:
 
 ## Ways to game the score
 
-| attack | defence |
-|---|---|
-| Return draws from a stored reference, or from a Laplace or variational fit, without paying for them. | Every draw must be a point the submission evaluated with a finite density (provenance). File access is forbidden; the references are not in the problem. |
-| Return points the model rejected. | A rejected point has no finite density, so it fails provenance. Rejected calls are still charged. |
-| Shuffle the draws within a chain, which hides autocorrelation and inflates ESS. | Draws must keep the order in which they were first evaluated. |
-| Copy one chain four times. | No point may appear in two chains. |
-| Copy a chain with a small perturbation, or run chains that are not independent. | The calibration test (rule 2): the realized errors are larger than the claimed MCSEs. The near-copy check catches small perturbations cheaply. |
-| Sample each variable well and ignore the correlations. | The projections and lp__ are checked (rule 3). The credited ESS is the worst over them. |
-| Hide a bias behind one extreme draw that inflates the MCSE. | The quantile exceedance fractions are bounded and still show the bias (rule 3). |
-| Spend evaluations in warmup and report only the sampling phase. | Every call counts, warmup included. |
-| Thin a long chain by a large factor. | Allowed, and counted: thinning costs evaluations. The evaluation limit bounds it. |
-| Be fast and biased. | The gate calls the bias wrong once the data show it. A small bias the data cannot show leaves the model unproven, which earns nothing. |
-| Get stuck so the chains do not mix. | R-hat or ESS makes the rep unproven. It earns nothing. |
-| Get stuck in the same mode in every chain. | The moments and quantile fractions miss the other mode's mass, and the gate calls it wrong. |
-| Skip a hard model. | A missing model is wrong (rule 4). |
-| Keep a lucky rep from an old seed or an old version. | A rep is reused only when its seed, submission and budget match. |
-| Change the budget or the shape the harness checks. | The harness copies both before the submission runs. |
-| Keep computing after the last call. | The clock runs to the end of the conversion. |
-| Identify the model by `problem.dim` and look up tuned step sizes. | Forbidden. Not prevented in code; an official round reads the code. |
-| Tune to the initial points or the seed. | A secret base seed in official runs. |
-| Use more cores. | One process, `OMP_NUM_THREADS=1`, threads forbidden. The score is per evaluation, so extra cores help only against the time limit. |
-| Reach the counter or the model through introspection. | Not prevented in code (rule 5). An official round reads the code. |
-| Overfit to the public models. | Report the held-out rank. |
+"Prevented" says whether the harness stops the attack. "Not with this interface" means `sample()` gives the harness no way to stop it; results under it are provisional (rules 2 and 5).
+
+| attack | defence | prevented |
+|---|---|---|
+| Return draws from a stored reference, or from a Laplace or variational fit, without paying for them. | Every draw must be a point the submission evaluated with a finite density (provenance). File access is forbidden; the references are not in the problem. | yes |
+| Return points the model rejected. | A rejected point has no finite density, so it fails provenance. Rejected calls are still charged. | yes |
+| Copy one chain four times. | No point may appear in two chains. | yes |
+| Sample each variable well and ignore the correlations. | The projections and lp__ are checked (rule 3). The credited ESS is the worst over them. | yes |
+| Hide a bias behind one extreme draw that inflates the MCSE. | The quantile exceedance fractions are bounded and still show the bias (rule 3). | yes |
+| Spend evaluations in warmup and report only the sampling phase. | Every call counts, warmup included. | yes |
+| Thin a long chain by a large factor. | Allowed, and counted: thinning costs evaluations. The evaluation limit bounds it. | yes |
+| Be fast and biased. | The gate calls the bias wrong once the data show it. A small bias the data cannot show leaves the model unproven, which earns nothing. | yes |
+| Get stuck so the chains do not mix. | R-hat or ESS makes the rep unproven. It earns nothing. | yes |
+| Get stuck in the same mode in every chain. | The moments and quantile fractions miss the other mode's mass, and the gate calls it wrong. | yes |
+| Skip a hard model. | A missing model is wrong (rule 4). | yes |
+| Keep a lucky rep from an old seed or an old version. | A rep is reused only when its seed, submission and budget match. | yes |
+| Change the budget or the shape the harness checks. | The harness copies both before the submission runs. | yes |
+| Keep computing after the last call. | The clock runs to the end of the conversion. | yes |
+| Identify the model by `problem.dim` and look up tuned step sizes. | Forbidden. Not prevented in code; an official round reads the code. | no: an official round reads the code |
+| Tune to the initial points or the seed. | A secret base seed in official runs. | only in an official round |
+| Use more cores. | One process, `OMP_NUM_THREADS=1`, threads forbidden. The score is per evaluation, so extra cores help only against the time limit. | partly: threads are forbidden by rule, and an official round reads the code |
+| Reach the counter or the model through introspection. | Not prevented in code (rule 5). An official round reads the code. | no: an official round reads the code |
+| Overfit to the public models. | Report the held-out rank. | partly: the held-out models are public (see "Not built yet") |
+| Shuffle the draws within a chain, which hides autocorrelation and inflates ESS. | Draws must keep the order in which they were first evaluated, but a submission can evaluate its draws again in shuffled order, one float step away (`np.nextafter`), and return them. The calibration test refused 3 of 4 such groups of an AR(1) chain at ρ = 0.8. The fourth was right, at p = 0.0017, and its credited ESS per call rose from 0.111 to 0.473. | no: not with this interface |
+| Copy a chain with a small perturbation. | The near-copy check catches copies within 1e-6 SD. A copy of one chain of four, 1e-3 SD away, earned credit in 24 of 30 groups in the review and 27 of 30 in a rerun: the calibration test does not see one copy. | no: not with this interface |
+| Run chains that are not independent. | The calibration test catches dependence only when the realized errors are much larger than the claimed MCSEs (rule 2). | no: not with this interface |
 
 ## Not built yet
 
