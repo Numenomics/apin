@@ -25,7 +25,7 @@ def grid():
     x = MU + SIGMA * rng.standard_normal((1000, 10, 3))
     d = {n: x[..., i] for i, n in enumerate(NAMES)}
     ref = reference.summarise(d, lp=lp(d), model="sim")
-    entries = {m: score.Entry(m, ref, chains=4, warmup=10, draws=4000, lp=lp) for m in ("m1", "m2")}
+    entries = {m: score.Entry(m, ref, chains=4, warmup=10, draws=4000, lp=lp, cost_weights={"r_grad": 2.0}) for m in ("m1", "m2")}
     return score.Grid(entries, reps=2, base_seed=100)
 
 
@@ -405,7 +405,7 @@ def test_a_verdict_cached_by_another_gate_is_recomputed(tmp_path, grid, monkeypa
     cache = json.loads((d / "gate.json").read_text())
     old = {k: cache["key"][k] for k in ("reps", "reference", "chains")}
     old["gate"] = {k: getattr(gate, k) for k in ("TOLERANCE", "ALPHA_WRONG", "ALPHA_RIGHT", "RHAT_MAX", "MIN_ESS",
-                                                 "EXACT", "COPY_DISTANCE", "COPY_FRACTION", "COPY_SERIES", "SPLIT_Z")}
+                                                 "EXACT", "SPLIT_Z")}
     stale = {**cache["verdict"], "status": "wrong", "reason": "exact"}
     for key in (old, cache["key"]):
         (d / "gate.json").write_text(json.dumps({"key": key, "verdict": stale}))
@@ -420,7 +420,7 @@ def test_the_cache_key_hashes_the_bytes_the_gate_read(tmp_path, monkeypatch):
     so the replaced, shifted files were then called right from the cache."""
     rng = np.random.default_rng(31)
     ref = reference.summarise({"x": rng.normal(size=(5000, 4))})
-    entry = score.Entry("x", ref, 4, 1000, 5000, None)
+    entry = score.Entry("x", ref, 4, 1000, 5000, None, cost_weights={"r_grad": 1.0})
     d = tmp_path / "rep0"
     d.mkdir()
 
@@ -440,3 +440,69 @@ def test_the_cache_key_hashes_the_bytes_the_gate_read(tmp_path, monkeypatch):
     assert score.verdict(d, entry, 1).status == "right"  # the old files
     monkeypatch.setattr(score, "read_rep", orig)
     assert score.verdict(d, entry, 1).status == "wrong"  # the new files, not the cached verdict
+
+
+def test_missing_cost_weights_raises_explicit_error(tmp_path, grid):
+    """Slice 2: missing r_m is an explicit error, never silently defaulted to 1.0."""
+    bad_entries = {m: score.Entry(e.model, e.ref, e.chains, e.warmup, e.draws, e.lp, cost_weights=None)
+                   for m, e in grid.entries.items()}
+    bad_grid = score.Grid(bad_entries, reps=grid.reps, base_seed=grid.base_seed)
+    write_rep(tmp_path, "x", "m1", 0, bad_grid)
+    with pytest.raises(ValueError, match="missing r_m"):
+        score.score(tmp_path, tmp_path / "s", bad_grid, log=lambda *_: None)
+
+
+def test_r_grad_weights_cost_separately_from_1_to_1_eval(tmp_path, grid):
+    """Slice 2: cost = n_density + r_grad * n_gradient with r_grad=2.0 separates ess_per_cost from ess_per_eval."""
+    for r in range(2):
+        for m in ("m1", "m2"):
+            # base: 25k density + 75k grad -> eval=100k, cost=175k
+            write_rep(tmp_path, "base", m, r, grid, evaluations=100_000)
+            # dens_only: 100k density + 0 grad -> eval=100k, cost=100k (1.75x cheaper in cost!)
+            d = write_rep(tmp_path, "dens_only", m, r, grid, evaluations=100_000)
+            rec = json.loads((d / "run.json").read_text())
+            rec["timing"]["extra"]["density_evals"] = 100_000
+            rec["timing"]["extra"]["gradient_evals"] = 0
+            (d / "run.json").write_text(json.dumps(rec))
+    out = score.score(tmp_path, tmp_path / "s", grid, baseline="base", log=lambda *_: None)
+    by = {r["label"]: r for r in out["ranking"]}
+    assert by["dens_only"]["speed_eval"] == pytest.approx(1.0, rel=0.05)
+    assert by["dens_only"]["speed_cost"] == pytest.approx(1.75, rel=0.05)
+    assert [r["label"] for r in out["ranking"]] == ["dens_only", "base"]
+
+
+def test_multiwalker_and_tempered_reps_are_refused_scoring_in_slice2(tmp_path, grid):
+    for r in range(2):
+        for m in ("m1", "m2"):
+            d = write_rep(tmp_path, "nrpt", m, r, grid)
+            rec = json.loads((d / "run.json").read_text())
+            rec["timing"]["extra"]["walkers"] = 4
+            rec["timing"]["extra"]["tempered"] = True
+            (d / "run.json").write_text(json.dumps(rec))
+    out = score.score(tmp_path, tmp_path / "s", grid, log=lambda *_: None)
+    assert all(r["status"] == "unproven" and "Slice 4" in r["reason"] for r in out["per_run"])
+    assert all(math.isnan(r["ess_per_cost"]) for r in out["per_run"])
+
+
+def test_expanded_cache_key_invalidates_on_stan_data_or_bridgestan_change(tmp_path, grid):
+    d = write_rep(tmp_path, "x", "m1", 0, grid)
+    write_rep(tmp_path, "x", "m1", 1, grid)
+    assert _reasons(tmp_path, grid)[("m1", 0)][0] == "right"
+    cache = json.loads((d / "gate.json").read_text())
+    assert {"stan_sha256", "data_sha256", "bridgestan_key", "reference", "gate"} <= set(cache["key"])
+    # Tamper cached verdict and change stan_sha256 -> must miss cache and recompute "right"
+    cache["verdict"]["status"] = "wrong"
+    (d / "gate.json").write_text(json.dumps(cache))
+    e = grid.entries["m1"]
+    e2 = score.Entry(e.model, e.ref, e.chains, e.warmup, e.draws, e.lp,
+                     cost_weights=e.cost_weights, stan_sha256="new_stan_hash")
+    g2 = score.Grid({**grid.entries, "m1": e2}, reps=grid.reps, base_seed=grid.base_seed)
+    assert _reasons(tmp_path, g2)[("m1", 0)][0] == "right"
+
+
+def test_split_adapt_transition_counts_must_sum_to_total(tmp_path, grid):
+    d = write_rep(tmp_path, "x", "m1", 0, grid, evaluations=1000)
+    write_rep(tmp_path, "x", "m1", 1, grid, evaluations=1000)
+    _rewrite(d, lambda t: t["extra"].update(adapt_density_evals=100, transition_density_evals=100))
+    got = _reasons(tmp_path, grid)
+    assert got[("m1", 0)][0] == "wrong" and "adapt/transition" in got[("m1", 0)][1]

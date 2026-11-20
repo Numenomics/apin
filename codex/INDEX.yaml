@@ -1,0 +1,403 @@
+schema_version: 1
+description: >
+  Machine-readable Codex index for Numenomics/apin.
+  Tier 1 repositories live in .gitmodules under upstream/.
+  Tier 2 repositories stay out of .gitmodules and are shallow-cloned on demand
+  into gitignored .codex_cache/ by exact commit SHA via `apin codex sync`.
+  Tier 3 repositories are license-quarantined (never cloned; paper-only).
+
+repositories:
+  # --- Tier 1: Executable & Patchable Upstreams (.gitmodules) ---
+  - id: nuts-rs
+    tier: 1
+    url: https://github.com/pymc-devs/nuts-rs
+    license: MIT
+    reuse_policy: direct_port_with_attribution
+    checkout: upstream/nuts-rs
+    commit: PIN_AT_SLICE_5
+    axes: [1, 2, 3, 4, 8]
+    role: Primary Rust trait substrate (NUTS, low-rank Fisher, WALNUTS, MCLMC, BridgeStan)
+
+  - id: nutpie
+    tier: 1
+    url: https://github.com/pymc-devs/nutpie
+    license: MIT
+    reuse_policy: direct_port_with_attribution
+    checkout: upstream/nutpie
+    commit: PIN_AT_SLICE_5
+    axes: [1, 2, 7]
+    role: Python driver & flow-adaptation wrapper around nuts-rs
+
+  - id: blackjax
+    tier: 1
+    url: https://github.com/blackjax-devs/blackjax
+    license: Apache-2.0
+    reuse_policy: clean_room_from_paper
+    checkout: upstream/blackjax
+    commit: PIN_AT_SLICE_5
+    axes: [1, 3, 4, 5, 6, 7]
+    role: Post-NUTS dynamics (MAMS, MCLMC, LAPS, ChEES, MEADS, GIST, Barker, ESS, higher-order integrators)
+
+  - id: inference-gym
+    tier: 1
+    url: https://github.com/tensorflow/probability
+    license: Apache-2.0
+    reuse_policy: clean_room_from_paper
+    checkout: upstream/probability
+    commit: PIN_AT_SLICE_5
+    axes: [5, 8]
+    role: Inference Gym ground truth (spinoffs/inference_gym) + SNAPER-HMC
+
+  - id: advancedhmc-jl
+    tier: 1
+    url: https://github.com/TuringLang/AdvancedHMC.jl
+    license: MIT
+    reuse_policy: direct_port_with_attribution
+    checkout: upstream/AdvancedHMC.jl
+    commit: PIN_AT_SLICE_5
+    axes: [1, 4, 5, 7]
+    role: Modular Integrator x Metric x Trajectory x Adaptation + Woodbury metric
+
+  - id: pathfinder-jl
+    tier: 1
+    url: https://github.com/mlcolab/Pathfinder.jl
+    license: MIT
+    reuse_policy: direct_port_with_attribution
+    checkout: upstream/Pathfinder.jl
+    commit: PIN_AT_SLICE_5
+    axes: [1, 7]
+    role: Multi-path Pathfinder + PSIS warmup initialization & inverse-Hessian Woodbury seeding
+
+  - id: advancedvi-jl
+    tier: 1
+    url: https://github.com/TuringLang/AdvancedVI.jl
+    license: MIT
+    reuse_policy: direct_port_with_attribution
+    checkout: upstream/AdvancedVI.jl
+    commit: PIN_AT_SLICE_5
+    axes: [1, 7]
+    role: Batch-and-Match score-based Fisher Gaussian VI for fast warmup metrics
+
+  - id: bayes-kit
+    tier: 1
+    url: https://github.com/flatironinstitute/bayes-kit
+    license: MIT
+    reuse_policy: direct_port_with_attribution
+    checkout: upstream/bayes-kit
+    commit: PIN_AT_SLICE_5
+    axes: [3]
+    role: Readable DR-HMC & diagnostic references
+
+  - id: drghmc
+    tier: 1
+    url: https://github.com/giladturok/drghmc
+    license: MIT
+    reuse_policy: direct_port_with_attribution
+    checkout: upstream/drghmc
+    commit: PIN_AT_SLICE_5
+    axes: [3, 5]
+    role: Delayed Rejection Generalized HMC (partial momentum refresh) for funnels
+
+  - id: walnuts-proto
+    tier: 1
+    url: https://github.com/bob-carpenter/walnuts
+    license: MIT
+    reuse_policy: direct_port_with_attribution
+    checkout: upstream/walnuts
+    commit: PIN_AT_SLICE_5
+    axes: [3]
+    role: Original WALNUTS within-orbit dyadic step-size prototype
+
+  - id: emcee
+    tier: 1
+    url: https://github.com/dfm/emcee
+    license: MIT
+    reuse_policy: direct_port_with_attribution
+    checkout: upstream/emcee
+    commit: PIN_AT_SLICE_5
+    axes: [5, 6]
+    role: Canonical affine-invariant ensemble baseline for Track L5 and K-point ABI
+
+  - id: posterior
+    tier: 1
+    url: https://github.com/stan-dev/posterior
+    license: BSD-3-Clause
+    reuse_policy: direct_port_with_attribution
+    checkout: upstream/posterior
+    commit: PIN_AT_SLICE_5
+    axes: [8]
+    role: Canonical Stan-compatible R-hat, folded/nested R-hat, bulk/tail ESS, MCSE
+
+  # --- Tier 2: Pinned On-Demand Codex Cache (.codex_cache/, NOT in .gitmodules) ---
+  - id: mpart
+    tier: 2
+    url: https://github.com/MeasureTransport/MParT
+    license: BSD-3-Clause
+    reuse_policy: direct_port_with_attribution
+    checkout: .codex_cache/MParT
+    commit: PIN_AT_SYNC
+    axes: [2, 7]
+    role: Monotone polynomial / linearized-Hermite triangular Knothe-Rosenblatt maps
+
+  - id: mici
+    tier: 2
+    url: https://github.com/matt-graham/mici
+    license: MIT
+    reuse_policy: direct_port_with_attribution
+    checkout: .codex_cache/mici
+    commit: PIN_AT_SYNC
+    axes: [3, 4]
+    role: SoftAbs Hessian regularization, implicit midpoint + reversibility check, RATTLE
+
+  - id: nrpt
+    tier: 2
+    url: https://github.com/Estep-Bingham-Lab/nrpt
+    license: Apache-2.0
+    reuse_policy: clean_room_from_paper
+    checkout: .codex_cache/nrpt
+    commit: PIN_AT_SYNC
+    axes: [6]
+    role: Non-reversible parallel tempering (DEO swaps + Lambda ladder)
+
+  - id: flowjax
+    tier: 2
+    url: https://github.com/danielward27/flowjax
+    license: MIT
+    reuse_policy: direct_port_with_attribution
+    checkout: .codex_cache/flowjax
+    commit: PIN_AT_SYNC
+    axes: [2, 7]
+    role: Rational-quadratic splines & coupling flows for FisherLoss warmup
+
+  - id: flowmc
+    tier: 2
+    url: https://github.com/GW-JAX-Team/flowMC
+    license: MIT
+    reuse_policy: direct_port_with_attribution
+    checkout: .codex_cache/flowMC
+    commit: PIN_AT_SYNC
+    axes: [2, 6]
+    role: Local gradient MCMC + global flow independence-MH proposals
+
+  - id: numpyro
+    tier: 2
+    url: https://github.com/pyro-ppl/numpyro
+    license: Apache-2.0
+    reuse_policy: clean_room_from_paper
+    checkout: .codex_cache/numpyro
+    commit: PIN_AT_SYNC
+    axes: [2, 3, 5]
+    role: Stackless iterative NUTS, NeuTraReparam, BarkerMH, AIES/ESS
+
+  - id: optim-jl
+    tier: 2
+    url: https://github.com/JuliaNLSolvers/Optim.jl
+    license: MIT
+    reuse_policy: direct_port_with_attribution
+    checkout: .codex_cache/Optim.jl
+    commit: PIN_AT_SYNC
+    axes: [1, 7]
+    role: L-BFGS, SR1 negative-curvature updates, trust-region / Levenberg-Marquardt
+
+  - id: shampoo-optimizers
+    tier: 2
+    url: https://github.com/facebookresearch/optimizers
+    license: BSD-3-Clause
+    reuse_policy: direct_port_with_attribution
+    checkout: .codex_cache/optimizers
+    commit: PIN_AT_SYNC
+    axes: [1]
+    role: Kronecker-factored preconditioning (A x B) and matrix roots
+
+  - id: optax
+    tier: 2
+    url: https://github.com/google-deepmind/optax
+    license: Apache-2.0
+    reuse_policy: clean_room_from_paper
+    checkout: .codex_cache/optax
+    commit: PIN_AT_SYNC
+    axes: [1, 7]
+    role: Composable transform algebra + L-BFGS zoom line search (Muon excluded)
+
+  # --- Tier 3: License-Quarantined (NEVER clone) ---
+  - id: pigeons-jl
+    tier: 3
+    url: https://github.com/Julia-Tempering/Pigeons.jl
+    license: AGPL-3.0
+    reuse_policy: paper_only
+    substitute: nrpt
+  - id: microcanonical-hmc-py
+    tier: 3
+    url: https://github.com/JakobRobnik/MicroCanonicalHMC
+    license: GPL-3.0
+    reuse_policy: paper_only
+    substitute: blackjax
+  - id: unbiasedmcmc
+    tier: 3
+    url: https://github.com/pierrejacob/unbiasedmcmc
+    license: GPL-2.0-or-later
+    reuse_policy: paper_only
+    substitute: paper-only-card
+  - id: zeus-pocomc
+    tier: 3
+    url: https://github.com/minaskar/zeus
+    license: GPL-3.0
+    reuse_policy: paper_only
+    substitute: emcee
+  - id: sampler-benchmarks
+    tier: 3
+    url: https://github.com/reubenharry/sampler-benchmarks
+    license: UNLICENSED
+    reuse_policy: paper_only
+    substitute: paper-only-card
+
+cards:
+  - id: fisher-low-rank
+    card: cards/fisher-low-rank.md
+    axis: 1
+    lanes: [A1, A0]
+    phase: adapt
+    requires: [grad]
+    state_schema:
+      tuning: [diag_scale, low_rank_factors, low_rank_eigs]
+      aux_spec: none
+    invariance_obligations:
+      kernel_class: reversible
+      must_freeze_after_adapt: true
+      key_risk: Neck-dominated Fisher scaling on funnels; unscreened low-rank harm (apin W-63)
+    cost:
+      extra_evals_per_step: 0
+      overhead_order: O(d * k)
+    incompatible_with: []
+    source:
+      repo: nuts-rs
+      path: src/adapt_strategy/low_rank.rs
+      symbol: LowRankMassMatrixStrategy
+    reuse_policy: direct_port_with_attribution
+    evidence: [REPORT.md#W-62..W-66, arXiv:2603.18845]
+    test_ids: [tier0_gaussian_rot, tier1_e1_lowrank_21, tier2_funnel_neck]
+
+  - id: walnuts-drghmc
+    card: cards/walnuts-drghmc.md
+    axis: 3
+    lanes: [A2, A0]
+    phase: transition
+    requires: [grad]
+    state_schema:
+      tuning: [base_step_size, max_halvings, energy_tol, refresh_alpha]
+      aux_spec: normal_momentum_or_none
+    invariance_obligations:
+      kernel_class: nonreversible_lifted
+      must_freeze_after_adapt: true
+      key_risk: Backward step-size check breaks if leapfrog is swapped for McLachlan without re-deriving balance
+    cost:
+      extra_evals_per_step: variable_2x_to_8x_in_neck
+      overhead_order: O(d)
+    incompatible_with: [unadjusted_l4_only]
+    source:
+      repo: drghmc
+      path: drghmc/
+      symbol: drghmc_step
+    reuse_policy: direct_port_with_attribution
+    evidence: [REPORT.md#walnutpie, arXiv:2506.18746]
+    test_ids: [tier0_funnel_smoke, tier2_funnel_neck_invariance, tier2_rosenbrock]
+
+  - id: mpart-monotone-transport
+    card: cards/mpart-monotone-transport.md
+    axis: 2
+    lanes: [A4, A0]
+    phase: adapt
+    requires: [grad]
+    state_schema:
+      tuning: [triangular_map_coeffs, basis_spec_linearized_hermite]
+      aux_spec: none
+    invariance_obligations:
+      kernel_class: reversible
+      must_freeze_after_adapt: true
+      key_risk: Unbounded polynomial tails blow up log-det Jacobian; linearized-Hermite tails mandatory; missing Jacobian fails invariance
+    cost:
+      extra_evals_per_step: 0
+      overhead_order: O(d * p_basis)
+    incompatible_with: [dynamic_map_updates_in_transition]
+    source:
+      repo: mpart
+      path: MParT/MapFactory.h
+      symbol: CreateTriangular
+    reuse_policy: direct_port_with_attribution
+    evidence: [MeasureTransport/MParT]
+    test_ids: [tier0_missing_jacobian_check, tier2_banana_invariance, tier2_student_t_tails]
+
+  - id: mams-microcanonical
+    card: cards/mams-microcanonical.md
+    axis: 4
+    lanes: [A3, A0]
+    phase: transition
+    requires: [grad]
+    state_schema:
+      tuning: [step_size, L_jitter, inverse_mass, momentum_refresh_rate]
+      aux_spec: unit_sphere
+    invariance_obligations:
+      kernel_class: nonreversible_lifted
+      must_freeze_after_adapt: true
+      key_risk: Unadjusted MCLMC fails L1 invariance; MAMS requires exact MH step on joint (position, unit_sphere) law
+    cost:
+      extra_evals_per_step: 1_grad_per_step
+      overhead_order: O(d)
+    incompatible_with: [gandy_scott_reversibility_test]
+    source:
+      repo: blackjax
+      path: blackjax/mcmc/adjusted_mclmc_dynamic.py
+      symbol: build_kernel
+    reuse_policy: clean_room_from_paper
+    evidence: [arXiv:2212.08549, blackjax_mams]
+    test_ids: [tier0_joint_stationarity, tier2_high_dim_ladder]
+
+  - id: surrogate-and-ess
+    card: cards/surrogate-and-ess.md
+    axis: 4
+    lanes: [A3, A0]
+    phase: both
+    requires: [density_only_or_grad]
+    state_schema:
+      tuning: [surrogate_mean, surrogate_cov_or_map, L_steps]
+      aux_spec: none
+    invariance_obligations:
+      kernel_class: reversible
+      must_freeze_after_adapt: true
+      key_risk: Surrogate trajectory must use frozen surrogate and exact reversible MH ratio on true log_pi at endpoint
+    cost:
+      extra_evals_per_step: 1_density_per_trajectory
+      overhead_order: O(d^2_or_dk)
+    incompatible_with: []
+    source:
+      repo: blackjax
+      path: blackjax/mcmc/elliptical_slice.py
+      symbol: build_kernel
+    reuse_policy: clean_room_from_paper
+    evidence: [Rasmussen2003, Murray2010, CabezasNemeth2023]
+    test_ids: [tier0_gaussian_rot, tier2_l5_density_only, tier2_heavy_tails]
+
+  - id: nrpt-deo-tempering
+    card: cards/nrpt-deo-tempering.md
+    axis: 6
+    lanes: [A0]
+    phase: both
+    requires: [grad]
+    state_schema:
+      tuning: [betas_ladder, per_beta_local_tuning]
+      aux_spec: uniform_discrete_2
+    invariance_obligations:
+      kernel_class: nonreversible_lifted
+      must_freeze_after_adapt: true
+      key_risk: DEO swap parity bit must live in chain.aux (not mutable globals); requires marginal/joint stationarity test
+    cost:
+      extra_evals_per_step: K_walkers_x_local
+      overhead_order: O(K * d)
+    incompatible_with: [gandy_scott_reversibility_test, single_walker_only]
+    source:
+      repo: nrpt
+      path: nrpt/
+      symbol: deo_swap_step
+    reuse_policy: clean_room_from_paper
+    evidence: [Syed2022_NRPT]
+    test_ids: [tier2_tempered_mixture_invariance, tier2_multimodal_column]

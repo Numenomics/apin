@@ -1,12 +1,5 @@
-"""apin command line.
-
-  apin list                         samplers and models
-  apin fetch-data                   download the data files that are not shipped
-  apin run --sampler S [--models M] [--reps N] [--label L] [--cmdstan DIR] [--opt k=v ...]
-  apin score [--runs DIR] [--out DIR] [--models M] [--reps N] [--baseline LABEL]
-  apin reference build [--models M] [--cmdstan DIR] [--adapt-delta X] [--rerun]
-                                    write models/reference/<model>.json (summaries, no draws)
-"""
+"""Command-line entry point: `apin list`, `apin fetch-data`, `apin run`, `apin score`,
+`apin reference build`, `apin costs build`, `apin codex validate`."""
 
 from __future__ import annotations
 
@@ -14,18 +7,51 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import grid, models, reference, sampler, score
+from . import cost, grid, models, reference, sampler, score
 from .models import ROOT
 
 
-def _opts(pairs: list[str]) -> dict[str, str]:
+def _opts(items: list[str]) -> dict[str, str]:
     out = {}
-    for p in pairs:
-        if "=" not in p:
-            raise SystemExit(f"--opt expects key=value, got {p!r}")
-        k, v = p.split("=", 1)
+    for item in items:
+        if "=" not in item:
+            raise SystemExit(f"--opt needs KEY=VALUE, got {item!r}")
+        k, v = item.split("=", 1)
         out[k] = v
     return out
+
+
+def _validate_codex(index_path: Path) -> int:
+    try:
+        import yaml
+    except ImportError:
+        raise SystemExit("PyYAML is required for `apin codex validate`")
+    data = yaml.safe_load(index_path.read_text())
+    assert data.get("schema_version") == 1, "expected schema_version: 1"
+    repos = data.get("repositories") or []
+    repo_ids = {r["id"] for r in repos}
+    assert len(repo_ids) == len(repos), "duplicate repo id in INDEX.yaml"
+    tier3 = {r["id"] for r in repos if r.get("tier") == 3}
+    req_fields = {
+        "id", "card", "axis", "lanes", "phase", "requires", "state_schema",
+        "invariance_obligations", "cost", "incompatible_with", "source",
+        "reuse_policy", "evidence", "test_ids",
+    }
+    cards = data.get("cards") or []
+    for c in cards:
+        missing = req_fields - set(c.keys())
+        if missing:
+            raise SystemExit(f"card {c.get('id')!r} missing fields: {sorted(missing)}")
+        cpath = index_path.parent / c["card"]
+        if not cpath.is_file():
+            raise SystemExit(f"missing card file: {cpath}")
+        srepo = c["source"]["repo"]
+        if srepo not in repo_ids:
+            raise SystemExit(f"card {c['id']!r} references unknown repo {srepo!r}")
+        if srepo in tier3:
+            raise SystemExit(f"card {c['id']!r} references license-quarantined Tier 3 repo {srepo!r}")
+    print(f"codex valid: {len(repos)} repositories, {len(cards)} cards ({index_path})")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,10 +59,10 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("list", help="list samplers and models")
-    sub.add_parser("fetch-data", help="download the data files that are not shipped")
+    sub.add_parser("fetch-data", help="download and verify any model data not shipped in data/")
 
-    r = sub.add_parser("run", help="run a sampler over models x reps")
-    r.add_argument("--sampler", required=True)
+    r = sub.add_parser("run", help="run one sampler over models x reps")
+    r.add_argument("sampler", help="adapter name (`apin list` shows them)")
     r.add_argument("--models", default="all", help="'all', a family, 'public', 'held-out', or a comma list")
     r.add_argument("--reps", type=int, default=3)
     r.add_argument("--label", help="name of this arm in runs/ (default: the sampler name)")
@@ -59,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--reps", type=int, default=3, help="reps in the grid; a rep that is not there is wrong")
     s.add_argument("--base-seed", type=int, default=grid.BASE_SEED)
     s.add_argument("--build", type=Path, default=ROOT / "build")
+    s.add_argument("--costs", type=Path, default=cost.COSTS_PATH, help="path to frozen models/costs.json")
     s.add_argument("--submission", action="append", default=[], metavar="LABEL=PATH",
                    help="the submission file of a label; every rep of it must record its sha256 (repeatable)")
 
@@ -73,12 +100,32 @@ def main(argv: list[str] | None = None) -> int:
     rb.add_argument("--rerun", action="store_true",
                     help="rerun CmdStan for local references even when complete chain CSVs are in build/reference")
 
+    c = sub.add_parser("costs", help="target-calibrated evaluation cost weights (r_m)")
+    c_sub = c.add_subparsers(dest="cost_cmd", required=True)
+    cb = c_sub.add_parser("build", help="measure r_grad via BridgeStan at raw reference draws")
+    cb.add_argument("--models", default="all", help="'all', a family, 'public', 'held-out', or a comma list")
+    cb.add_argument("--build", type=Path, default=ROOT / "build")
+    cb.add_argument("--bridgestan", help="BridgeStan source tree (default: $BRIDGESTAN or package tree)")
+    cb.add_argument("--out", type=Path, default=cost.COSTS_PATH)
+    cb.add_argument("--draws", type=int, default=cost.DEFAULT_DRAWS)
+    cb.add_argument("--repeats", type=int, default=cost.DEFAULT_REPEATS)
+    cb.add_argument("--include-hvp", action="store_true")
+    cb.add_argument("--include-hess", action="store_true")
+
+    cx = sub.add_parser("codex", help="sampler & optimization codex tools")
+    cx_sub = cx.add_subparsers(dest="codex_cmd", required=True)
+    cv = cx_sub.add_parser("validate", help="validate codex/INDEX.yaml schema and card links")
+    cv.add_argument("--index", type=Path, default=ROOT / "codex" / "INDEX.yaml")
+
     a = ap.parse_args(argv)
     if a.cmd == "list":
         print("samplers:", ", ".join(sorted(sampler.registry())))
+        costs_tbl = cost.load()
         for m in models.load().values():
+            rm = costs_tbl.get(m.name, {}).get("r_grad")
+            rm_s = f"r_grad={rm:.2f}" if rm is not None else "r_grad=MISSING"
             print(f"  {m.name:45s} {m.family:14s} data={'shipped' if m.data_shipped else 'fetched':8s} "
-                  f"reference={m.reference}{'' if reference.path(m.name).is_file() else ' (not built)'}")
+                  f"reference={m.reference}{'' if reference.path(m.name).is_file() else ' (not built)'} {rm_s}")
         return 0
     if a.cmd == "fetch-data":
         for m in models.load().values():
@@ -93,12 +140,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{len(done)} reps done, {len(failed)} failed")
         return 1 if failed else 0
     if a.cmd == "score":
-        g = score.declared(a.models, a.reps, a.base_seed, a.build)
+        g = score.declared(a.models, a.reps, a.base_seed, a.build, costs_path=a.costs)
         subs = dict(x.split("=", 1) for x in a.submission)
         try:
             score.score(a.runs, a.out, g, a.baseline, a.labels.split(",") if a.labels else None,
                         submissions={k: Path(v) for k, v in subs.items()})
-        except ValueError as e:  # a refused label or submission, not a crash
+        except ValueError as e:
             raise SystemExit(f"apin score: {e}") from None
         return 0
     if a.cmd == "reference":
@@ -113,6 +160,15 @@ def main(argv: list[str] | None = None) -> int:
                 failed.append(m.name)
                 print(f"{m.name}: FAILED: {e}")
         return 1 if failed else 0
+    if a.cmd == "costs":
+        cost.build(
+            models.select(a.models), build_dir=a.build, bridgestan_root=a.bridgestan,
+            out_path=a.out, n_draws=a.draws, repeats=a.repeats,
+            include_hvp=a.include_hvp, include_hess=a.include_hess,
+        )
+        return 0
+    if a.cmd == "codex":
+        return _validate_codex(a.index)
     return 2
 
 

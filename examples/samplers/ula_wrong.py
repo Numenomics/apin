@@ -1,15 +1,11 @@
-"""A deliberately wrong submission: the unadjusted Langevin algorithm with a large step.
+"""A deliberately biased submission: unadjusted Langevin (ULA) with a large step size.
 
-ULA moves x to x + h M grad log p(x) + sqrt(2 h M) z and never rejects, so
-its draws come from a distribution that differs from the target by an amount
-that grows with h. On a standard normal, for example, its stationary variance
-is 1 / (1 - h / 2). This file exists so the tests and the score table can
-show that the correctness gate catches such a sampler.
+adapt() runs MALA warmup to tune step size h toward TARGET_ACCEPT and estimate a diagonal metric M,
+freezing tuning = {"h": h, "inv_m": inv_m}.
 
-Warmup is MALA, the corrected version: each chain tunes h towards an
-acceptance rate of TARGET_ACCEPT and estimates a diagonal metric M from its
-warmup draws. The chains then share the smallest h and the average M, so that they all
-target the same wrong distribution, and sampling accepts every move.
+transition() runs unadjusted Langevin (accepting every finite move without Metropolis correction),
+so its stationary distribution differs from the target by an amount growing with h.
+This example exists to verify that the benchmark gate catches biased kernels.
 """
 
 from __future__ import annotations
@@ -21,45 +17,57 @@ import numpy as np
 TARGET_ACCEPT = 0.5
 
 
-def sample(problem, budget, rng):
-    grad = problem.log_density_gradient
-    warm = [warmup(grad, x0, budget.draws, rng) for x0 in problem.initial_points]
-    log_eps = float(np.min([w[3] for w in warm]))
-    inv_m = np.mean([w[4] for w in warm], axis=0)
-    out = np.empty((budget.chains, budget.draws, problem.dim))
-    for c, (x, lp, g, _, _) in enumerate(warm):
-        for i in range(budget.draws):
-            x, lp, g, _ = langevin(grad, x, lp, g, math.exp(log_eps), inv_m, rng)
-            out[c, i] = x
-    return out
+def _log_q(y: np.ndarray, x: np.ndarray, g: np.ndarray, h: float, inv_m: np.ndarray) -> float:
+    diff = y - (x + 0.5 * h * inv_m * g)
+    return -0.5 * float(np.sum(diff * diff / (h * inv_m)))
 
 
-def langevin(grad, x, lp, g, eps, inv_m, rng):
-    """One leapfrog step with fresh momentum, which is one Langevin step with h = eps^2 / 2.
-    Returns the proposal and the probability with which MALA would accept it."""
-    p = rng.standard_normal(x.size) / np.sqrt(inv_m)
-    h0 = lp - 0.5 * np.sum(inv_m * p * p)
-    p1 = p + 0.5 * eps * g
-    x1 = x + eps * inv_m * p1
-    lp1, g1 = grad(x1)
-    p1 = p1 + 0.5 * eps * g1
-    h1 = lp1 - 0.5 * np.sum(inv_m * p1 * p1)
-    accept = math.exp(min(0.0, h1 - h0)) if math.isfinite(h1) else 0.0
-    return x1, lp1, g1, accept
+def _find_finite_init(oracle, rng: np.random.Generator) -> tuple[np.ndarray, float, np.ndarray]:
+    for _ in range(100):
+        x = rng.uniform(-2.0, 2.0, size=oracle.dim)
+        lp, g = oracle.log_density_gradient(x)
+        if math.isfinite(lp) and np.all(np.isfinite(g)):
+            return x, lp, g
+    x = np.zeros(oracle.dim, dtype=float)
+    lp, g = oracle.log_density_gradient(x)
+    return x, lp, g
 
 
-def warmup(grad, x0, n, rng):
-    x = np.array(x0, dtype=float)
-    lp, g = grad(x)
-    inv_m = np.ones(x.size)
-    log_eps = math.log(0.1)
-    history = np.empty((n, x.size))
-    for i in range(n):
-        if i == n // 2:
-            inv_m = history[n // 4:i].var(axis=0) + 1e-3
-        x1, lp1, g1, accept = langevin(grad, x, lp, g, math.exp(log_eps), inv_m, rng)
-        if rng.uniform() < accept:
-            x, lp, g = x1, lp1, g1
-        log_eps += 0.05 * (accept - TARGET_ACCEPT)  # Robbins-Monro on the acceptance rate
+def adapt(oracle, budget, rng):
+    x, lp, g = _find_finite_init(oracle, rng)
+    inv_m = np.ones(oracle.dim, dtype=float)
+    h = 0.05
+    warmup = max(20, int(budget.draws))
+    history = np.empty((warmup, oracle.dim), dtype=float)
+    for i in range(warmup):
+        if i in (int(0.3 * warmup), int(0.7 * warmup)):
+            window = history[max(0, i - warmup // 3):i]
+            k = len(window)
+            inv_m = (k / (k + 5)) * window.var(axis=0) + 1e-3 * (5 / (k + 5))
+        y = x + 0.5 * h * inv_m * g + np.sqrt(h * inv_m) * rng.standard_normal(x.size)
+        lpy, gy = oracle.log_density_gradient(y)
+        if math.isfinite(lpy) and np.all(np.isfinite(gy)):
+            log_a = (lpy + _log_q(x, y, gy, h, inv_m)) - (lp + _log_q(y, x, g, h, inv_m))
+            acc = math.exp(min(0.0, log_a)) if math.isfinite(log_a) else 0.0
+        else:
+            acc = 0.0
+        if rng.uniform() < acc:
+            x, lp, g = y, lpy, gy
+        h = float(np.clip(h * math.exp(0.05 * (acc - TARGET_ACCEPT)), 1e-6, 1.5))
         history[i] = x
-    return x, lp, g, log_eps, inv_m
+    tuning = {"h": float(max(h, 0.25)), "inv_m": np.asarray(inv_m, dtype=float)}
+    return tuning, (x, None), [1.0], "none"
+
+
+def transition(tuning, chain, oracle, rng):
+    x = chain.position
+    h = float(tuning["h"])
+    inv_m = tuning["inv_m"]
+    lp, g = oracle.log_density_gradient(x)
+    if not (math.isfinite(lp) and np.all(np.isfinite(g))):
+        return x, None
+    y = x + 0.5 * h * inv_m * g + np.sqrt(h * inv_m) * rng.standard_normal(x.size)
+    lpy = oracle.log_density(y)
+    if math.isfinite(lpy):
+        return y, None
+    return x, None

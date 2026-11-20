@@ -2,13 +2,15 @@
 
 apin is a workbench for measuring changes to MCMC samplers and the libraries under them. It pins the upstream projects as git submodules, keeps the owner's patches on fork branches, and runs any sampler over a fixed set of 21 posteriordb models with one protocol, so that a patched build and its baseline can be compared in effective samples per second. Every run is checked against a reference posterior, so a sampler that is fast and wrong is marked wrong. It also holds the records of a 2026 campaign on Stan's wall time and a ledger of every patch and where it stands upstream.
 
-BENCH.md turns the same pieces into a benchmark. A sampler written in Python gets a log density and its gradient, A model counts only when the draws prove the posterior right; ties are broken by ESS per evaluation against Stan's NUTS.
+BENCH.md turns the same pieces into a benchmark. A Markov chain sampler written in Python implements `adapt(oracle, budget, rng)` and `transition(tuning, chain, oracle, rng)` behind per-chain clean process isolation and bit-exact replay. A model earns speed credit only when it passes the 0.1-SD bench gate; ties are broken by ESS per target-calibrated cost unit (`n_density + r_m * n_gradient`) against Stan's NUTS.
 
 ## Layout
 
 | path | what it holds |
 |---|---|
-| `harness/` | The runner and the scorer. `sampler.py` is the interface; `adapters/` has one file per sampler (cmdstan, pathfinder, walnutpie, nutpie, logdensity). `gate.py` is the correctness gate, `reference.py` reads and builds the reference posteriors, `logdensity.py` is the seam a Python sampler runs behind, and `stan_library.py` builds BridgeStan libraries. |
+| `harness/` | The runner and the scorer. `sampler.py` is the interface; `adapters/` has one file per sampler (cmdstan, pathfinder, walnutpie, nutpie, logdensity). `gate.py` is the 0.1-SD bench gate, `cost.py` measures target-calibrated `r_m` weights (`models/costs.json`), `reference.py` reads and builds reference posteriors, `logdensity.py` enforces the Slice 2 `adapt`/`transition` kernel ABI, and `stan_library.py` builds BridgeStan libraries. |
+| `codex/` | Schema-validated `INDEX.yaml` and ~40-line technique cards for cross-ecosystem sampler & optimizer tricks (`apin codex validate`). |
+| `autoresearch/` | Lane specs (`lanes/A1/program.md`), pre-seeded `NEGATIVE_MEMORY.md`, and versioned anti-gaming `RULINGS.md`. |
 | `models/` | The 21 core models and `manifest.json` (posteriordb name, family, data file, shipped or fetched, reference source, benchmark split). |
 | `models/reference/` | One reference posterior per model, as summary statistics (`<model>.json`), each half's estimates in `halves/<model>.json`, and the reparameterised programs some references are built from. |
 | `examples/samplers/` | Two submissions for the logdensity adapter: a working HMC and a sampler that is wrong on purpose. |

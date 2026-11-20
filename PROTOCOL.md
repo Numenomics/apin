@@ -93,6 +93,15 @@ The old walnutpie arms (W-63 to W-133) used Pathfinder inits listed in `scratch/
 5. Run the grid with a new `--label` per arm and score with `--baseline`.
 6. Write the record under `results/records/` and update `upstream/STATUS.md` in the same commit. If a later result contradicts a record, add a dated correction at the top of the old record and at the place where the claim was made. Do not delete the old text.
 
+## Slice 2 kernel ABI & cost unit (`harness/logdensity.py`, `harness/cost.py`)
+
+- Submissions implement `adapt(oracle, budget, rng) -> (tuning, chain0, betas, aux_spec)` and `transition(tuning, chain, oracle, rng) -> chain_next`.
+- Each chain runs `adapt`, `sample`, and unbilled `replay` in separate `OMP_NUM_THREADS=1` child processes under a hard wall-clock deadline; raw unconstrained draws are stored in `unconstrained.npz` with shape `(runs, walkers, draws, dim)` and cold walkers (`beta == 1.0`) are constrained to `chain_<c>.csv`.
+- `timing.extra` records split `adapt_*` and `transition_*` counts (`density_evals`, `gradient_evals`, `hvp_evals`, `hess_evals`), `eval_s`, `overhead_s`, `overhead_ratio`, `walkers`, `betas`, `tempered`, `tuning_sha256`, `replay_singles`, `replay_window`, and `bridgestan_key`.
+- `apin costs build` measures `r_grad` at raw reference draws into `models/costs.json`; `apin score` ranks by models passing the 0.1-SD gate, then by `ess_per_cost` against baseline (keeping 1:1 `ess_per_eval`, `ess_per_s`, and `overhead_ratio` alongside), and hashes Stan model, data, reference+halves, BridgeStan build, and gate source in `gate.json`.
+
+---
+
 ## The log-density seam
 
 The `logdensity` adapter (`harness/adapters/logdensity.py`) runs a sampling algorithm written in Python against any core model, through BridgeStan. It is the interface of the benchmark in BENCH.md. A submission is one file that defines

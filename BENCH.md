@@ -4,6 +4,22 @@ This file defines a benchmark for MCMC samplers written in Python. A submission 
 
 PROTOCOL.md defines the measurement: the grid, ESS, the references and the gate's statistics. This file defines the task, the rules and the score. The benchmark will be hill-climbed, by people and by programs scored on it. A way to score without sampling well is a defect of the same rank as a wrong number, and the rules below are written to close them.
 
+## Slice 2 update: `adapt`/`transition` kernel ABI, process isolation, and `r_m` cost unit
+
+As of Slice 2 (`bench/kernel-interface`), Python submissions implement two entry points instead of `sample()`:
+
+```python
+adapt(oracle, budget, rng) -> (tuning, chain0, betas, aux_spec)
+transition(tuning, chain, oracle, rng) -> chain_next
+```
+
+- **Immutable `tuning` vs. evolving `chain = (position, aux)`:** `tuning` is serialized canonically (no pickle) and SHA-256 checked before and after sampling. `chain.aux` carries typed auxiliary Markov state (e.g. momentum, unit-sphere velocity, or NRPT parity bit) whose stationary law is declared in `aux_spec`. Multi-walker / tempered entries (`walkers > 1` or `any(beta < 1.0)`) are recorded as `(runs, walkers, draws, dim)` and remain unscored until Slice 4 adds exact multi-point/tempered invariance testing.
+- **Per-chain clean process isolation & replay:** Each chain runs `adapt()` in one child process (`OMP_NUM_THREADS=1`), serializes `(tuning, chain0, betas, aux_spec)`, runs `transition()` in a brand-new clean child process with derived per-step RNGs and per-step finite provenance checking, and replays ~20 steps plus a 3-step window bit-for-bit in a third fresh process (unbilled). This replaces the Slice 1 whole-run provenance-hash and `gate._copies` heuristics.
+- **Target-calibrated cost unit:** Headline ranking uses `ess_per_cost` with `cost = n_density + r_m * n_gradient` (`r_m = max(1.0, median_t(grad_m) / median_t(density_m))` measured via `apin costs build` and frozen in `models/costs.json`; missing `r_m` is a hard error). 1:1 `ess_per_eval`, `ess_per_s`, and `overhead_s / eval_s` are printed beside it.
+- **Claim wording:** Passing a model means *"passed the 0.1-SD bench gate at this budget"*—never *"is correct"*, *"exact"*, *"unbiased"*, or *"proven"*.
+
+---
+
 ## The rules
 
 **Rule 1. Credit needs proof.** Each repetition (rep) of a model gets one of three verdicts.
