@@ -6,3 +6,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.codex_cache/
+autoresearch/lanes/*/runs/
+autoresearch/lanes/*/archive/
+autoresearch/lanes/*/incumbent.py

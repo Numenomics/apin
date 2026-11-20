@@ -7,7 +7,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import cost, grid, models, reference, sampler, score
+from . import autoresearch, cost, grid, invariance, models, records, reference, sampler, score, shapes
 from .models import ROOT
 
 
@@ -117,6 +117,29 @@ def main(argv: list[str] | None = None) -> int:
     cv = cx_sub.add_parser("validate", help="validate codex/INDEX.yaml schema and card links")
     cv.add_argument("--index", type=Path, default=ROOT / "codex" / "INDEX.yaml")
 
+    inv = sub.add_parser("invariance", help="run Slice 4 analytic exact-draw invariance & empirical efficiency check")
+    inv.add_argument("--sampler", type=Path, required=True)
+    inv.add_argument("--dim", type=int, default=6)
+    inv.add_argument("--chains", type=int, default=64)
+    inv.add_argument("--steps", type=int, default=20)
+    inv.add_argument("--seed", type=int, default=1)
+
+    rec = sub.add_parser("records", help="validate PR submission records")
+    rec_sub = rec.add_subparsers(dest="rec_cmd", required=True)
+    rv = rec_sub.add_parser("validate", help="validate a records/<release>/<track>/<date>_<slug>/ directory")
+    rv.add_argument("path", type=Path)
+
+    ar = sub.add_parser("autoresearch", help="run Karpathy-ratchet + MAP-Elites autoresearch trials")
+    ar_sub = ar.add_subparsers(dest="ar_cmd", required=True)
+    ae = ar_sub.add_parser("eval", help="evaluate current lane submission.py through Tier 0 + Tier 1")
+    ae.add_argument("--lane", default="A1")
+    ae.add_argument("--hypothesis", required=True)
+    ae.add_argument("--codex-ref", action="append", default=[])
+    ae.add_argument("--run-id", default="default")
+    ae.add_argument("--seed", type=int)
+    ae.add_argument("--dim", type=int, default=6)
+    ae.add_argument("--allow-duplicate", action="store_true")
+
     a = ap.parse_args(argv)
     if a.cmd == "list":
         print("samplers:", ", ".join(sorted(sampler.registry())))
@@ -169,6 +192,31 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if a.cmd == "codex":
         return _validate_codex(a.index)
+    if a.cmd == "invariance":
+        suite = shapes.make_suite(a.seed, dim=a.dim)
+        failed = 0
+        for i, tgt in enumerate(suite):
+            r = invariance.check_target_invariance(tgt, a.sampler, seed=a.seed + 100 * i,
+                                                   n_chains=a.chains, k_steps=a.steps)
+            status = "PASS" if r.passed else "FAIL"
+            print(f"{status:4s} {tgt.family:20s} rot={str(tgt.rotated):5s} max_z={r.max_z:5.2f}/{r.z_threshold:4.2f} "
+                  f"b2={r.b2_max:.4g} eff={r.empirical_efficiency:.3g} {r.reason}")
+            failed += 0 if r.passed else 1
+        return 1 if failed else 0
+    if a.cmd == "records":
+        meta = records.validate_record_dir(a.path)
+        print(f"record valid: {meta['entry_id']} ({meta['track']}, {meta['license']})")
+        return 0
+    if a.cmd == "autoresearch":
+        row = autoresearch.evaluate_lane_trial(
+            a.lane, a.hypothesis, codex_refs=a.codex_ref, seed=a.seed,
+            dim=a.dim, run_id=a.run_id, allow_duplicate=a.allow_duplicate,
+        )
+        print(f"{row['trial_id']} [{row['lane']}] decision={row['decision']} "
+              f"tier0={row['tier0_ok']} tier1={row['tier1_ok']} "
+              f"soft_min={row.get('soft_min_eff')} ratio={row.get('ratio_vs_incumbent')} "
+              f"wall={row['wall_s']}s")
+        return 0 if row["tier0_ok"] else 1
     return 2
 
 
