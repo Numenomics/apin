@@ -2,13 +2,13 @@
 
 apin is a workbench for measuring changes to MCMC samplers and the libraries under them. It pins the upstream projects as git submodules, keeps the owner's patches on fork branches, and runs any sampler over a fixed set of 21 posteriordb models with one protocol, so that a patched build and its baseline can be compared in effective samples per second. Every run is checked against a reference posterior, so a sampler that is fast and wrong is marked wrong. It also holds the records of a 2026 campaign on Stan's wall time and a ledger of every patch and where it stands upstream.
 
-BENCH.md turns the same pieces into a benchmark. A Markov chain sampler written in Python implements `adapt(oracle, budget, rng)` and `transition(tuning, chain, oracle, rng)` behind per-chain clean process isolation and bit-exact replay. A model earns speed credit only when it passes the 0.1-SD bench gate; ties are broken by ESS per target-calibrated cost unit (`n_density + r_m * n_gradient`) against Stan's NUTS.
+BENCH.md turns the same pieces into a benchmark. A Markov chain sampler written in Python implements `adapt(oracle, budget, rng)` and `transition(tuning, chain, oracle, rng)` behind out-of-process brokered oracle IPC (`harness/ipc.py`), clean per-phase child processes (`OMP_NUM_THREADS=1`), and bit-exact replay (OS-level container/network sandboxing for untrusted external PRs remains Slice 6). A model earns speed credit only when it passes the 0.1-SD bench gate; ties are broken by ESS per target-calibrated cost unit (`n_density + r_m * n_gradient`) against Stan's NUTS, with paired hierarchical bootstrap CIs and checkpoint cost-to-gate diagnostics reported alongside.
 
 ## Layout
 
 | path | what it holds |
 |---|---|
-| `harness/` | The runner and the scorer. `sampler.py` is the interface; `adapters/` has one file per sampler (cmdstan, pathfinder, walnutpie, nutpie, logdensity). `gate.py` is the 0.1-SD bench gate, `cost.py` measures target-calibrated `r_m` weights (`models/costs.json`), `reference.py` reads and builds reference posteriors, `logdensity.py` enforces the Slice 2 `adapt`/`transition` kernel ABI, and `stan_library.py` builds BridgeStan libraries. |
+| `harness/` | The runner, scorer, and judge. `sampler.py` is the interface; `adapters/` has one file per sampler (cmdstan, pathfinder, walnutpie, nutpie, logdensity). `gate.py` is the 0.1-SD bench gate, `cost.py` measures target-calibrated `r_m` weights (`models/costs.json`), `reference.py` reads and builds reference posteriors, `logdensity.py` enforces the Slice 2 `adapt`/`transition` kernel ABI, `ipc.py` isolates submissions from `Counter` and models over a Unix socketpair, `shapes.py` + `invariance.py` run calibrated exact-draw invariance & dispersed-start mixing, `records.py` validates `records/` PR packages & paired hierarchical bootstraps, `judge.py` owns the read-only Lane A1 fixed HMC kernel (`adapt_metric` seam), `autoresearch.py` runs the scaffolded Karpathy ratchet + paired MAP-Elites loop, and `stan_library.py` builds BridgeStan libraries. |
 | `codex/` | Schema-validated `INDEX.yaml` and ~40-line technique cards for cross-ecosystem sampler & optimizer tricks (`apin codex validate`). |
 | `autoresearch/` | Lane specs (`lanes/A1/program.md`), pre-seeded `NEGATIVE_MEMORY.md`, and versioned anti-gaming `RULINGS.md`. |
 | `models/` | The 21 core models and `manifest.json` (posteriordb name, family, data file, shipped or fetched, reference source, benchmark split). |
@@ -50,24 +50,36 @@ None of the submodules needs its own nested submodules for apin, except as the b
 
 ```bash
 export CMDSTAN=/path/to/cmdstan        # or pass --cmdstan
-uv run apin run --sampler cmdstan --models hierarchical --reps 3 --label stock
-uv run apin run --sampler cmdstan --models hierarchical --reps 3 --label patched --cmdstan /path/to/patched-cmdstan
+uv run apin run cmdstan --models hierarchical --reps 3 --label stock
+uv run apin run cmdstan --models hierarchical --reps 3 --label patched --cmdstan /path/to/patched-cmdstan
 uv run apin score --models hierarchical --reps 3 --baseline stock
 ```
 
 `--models` takes `all`, a family name, `public`, `held-out` or a comma list. Runs go to `runs/<label>/`, scores to `scores/`; both are ignored by git. A rerun skips the reps that finished with the same seed, sampler identity and budget, and runs the others again. Adapter options go through `--opt key=value`; each adapter documents its own at the top of its file. `--base-seed` changes the seeds of every rep. PROTOCOL.md says which budget, seeds and cost column to use.
 
-`apin score` scores the grid that `--models` and `--reps` declare, so pass it the same values as `apin run`. A rep the grid declares and the label lacks is wrong, and so is a rep whose `run.json` names another model, rep, seed, base seed or budget. It gates every rep against its reference: right, wrong or unproven (BENCH.md, rule 1). It writes `per_run.csv`, `per_model.csv`, `ranking.csv` and `table.md`. With `--baseline` the ranking has the speed against that label.
+`apin score` scores the grid that `--models` and `--reps` declare, so pass it the same values as `apin run`. A rep the grid declares and the label lacks is wrong, and so is a rep whose `run.json` names another model, rep, seed, base seed or budget. It gates every rep against its reference: right, wrong or unproven (BENCH.md, rule 1). It writes `per_run.csv`, `per_model.csv`, `ranking.csv` and `table.md`. With `--baseline` the ranking has the paired speed ratio and hierarchical bootstrap interval against that label.
 
 Run a Python sampler through the log-density seam, and score it against CmdStan:
 
 ```bash
-uv run apin run --sampler logdensity --label hmc --opt sampler=examples/samplers/hmc.py --models public
-uv run apin run --sampler cmdstan --label cmdstan --models public
+uv run apin run logdensity --label hmc --opt sampler=examples/samplers/hmc.py --models public
+uv run apin run cmdstan --label cmdstan --models public
 uv run apin score --models public --baseline cmdstan --submission hmc=examples/samplers/hmc.py
 ```
 
 `--submission` makes the score check that every rep of `hmc` recorded that file's sha256.
+
+Additional CLI commands (Slices 2–5):
+
+```bash
+uv run apin costs build --models all                      # measure target-calibrated r_grad into models/costs.json
+uv run apin codex validate                                # validate codex/INDEX.yaml schema & card links
+uv run apin invariance --sampler examples/samplers/hmc.py # calibrated exact-draw invariance & dispersed-start mixing
+uv run apin records validate records/<release>/<track>/<slug>
+uv run apin autoresearch eval --lane A1 --hypothesis "..." # Tier 0/1 trial against read-only harness/judge.py
+```
+
+Note: Slices 3–5 (`records`, `invariance`, `autoresearch`) are active scaffolds with out-of-process brokered oracle IPC, calibrated omnibus/rank invariance checks, and the locked Lane A1 `adapt_metric` seam; OS-level container sandboxing and a private sealed holdout remain Slice 6.
 
 The first logdensity run of each model builds a BridgeStan library, one to two minutes per model.
 
@@ -90,8 +102,8 @@ A smoke run of the command line, about a minute on first build:
 
 ```bash
 export CMDSTAN=/path/to/cmdstan
-uv run apin run --sampler cmdstan --models eight_schools_noncentered,blr --reps 1 --label smoke-cmdstan --runs /tmp/apin-smoke/runs
-uv run apin run --sampler pathfinder --models eight_schools_noncentered,blr --reps 1 --label smoke-pf --runs /tmp/apin-smoke/runs
+uv run apin run cmdstan --models eight_schools_noncentered,blr --reps 1 --label smoke-cmdstan --runs /tmp/apin-smoke/runs
+uv run apin run pathfinder --models eight_schools_noncentered,blr --reps 1 --label smoke-pf --runs /tmp/apin-smoke/runs
 uv run apin score --runs /tmp/apin-smoke/runs --out /tmp/apin-smoke/scores --models eight_schools_noncentered,blr --reps 1 --baseline smoke-cmdstan
 ```
 
@@ -142,4 +154,4 @@ REPORT.md, section 1, says how the work was done.
 
 ## Licence
 
-BSD-3-Clause (`LICENSE`), proposed and not yet confirmed by the owner. `LICENSING.md` covers the upstreams, the translated ESS code, patches and data.
+BSD-3-Clause (`LICENSE`), copyright Maximilian Scholz. `LICENSING.md` covers the upstreams, the translated ESS code, patches and data.

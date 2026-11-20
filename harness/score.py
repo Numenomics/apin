@@ -30,10 +30,11 @@ from typing import Callable
 
 import numpy as np
 
-from . import cmdstan, cost as cost_mod, gate, grid as grid_mod, models as models_mod, reference
+from . import cmdstan, cost as cost_mod, gate, grid as grid_mod, models as models_mod, records, reference
 from .reference import LP, Reference
 
 BOOTSTRAP = 2000
+CHECKPOINT_DRAWS = (500, 1000, 2000, 5000, 10000, 20000)
 
 
 @dataclass(frozen=True)
@@ -90,7 +91,13 @@ def declared(spec: str = "all", reps: int = 5, base_seed: int = grid_mod.BASE_SE
 
 
 def chain_files(rep_dir: Path) -> list[Path]:
-    return sorted(rep_dir.glob("chain_*.csv"), key=lambda p: int(p.stem.split("_")[1]))
+    def _sort_key(p: Path) -> tuple[int, int]:
+        parts = p.stem.split("_")
+        c = int(parts[1])
+        w = int(parts[2][1:]) if len(parts) > 2 and parts[2].startswith("w") else 0
+        return (c, w)
+
+    return sorted(rep_dir.glob("chain_*.csv"), key=_sort_key)
 
 
 def chain_draws(rep_dir: Path, names: list[str] | None = None, csvs: list | None = None) -> dict[str, np.ndarray]:
@@ -141,26 +148,47 @@ def read_rep(rep_dir: Path, chains: int, draws: int, names: list[str] | None = N
     return csvs, hashes
 
 
-def verdict(rep_dir: Path, entry: Entry, reps: int, bridgestan_key: str = "") -> gate.Verdict:
+def _first_passing_checkpoint(draws: dict[str, np.ndarray], ref: Reference, total_draws: int, reps: int) -> int:
+    """Earliest prefix checkpoint in CHECKPOINT_DRAWS that passes the 0.1-SD gate (right)."""
+    for k in CHECKPOINT_DRAWS:
+        if k >= total_draws:
+            break
+        sub = {name: arr[:k] for name, arr in draws.items()}
+        if gate.check(sub, ref, reps=reps).status == "right":
+            return k
+    return total_draws
+
+
+def verdict_with_checkpoint(rep_dir: Path, entry: Entry, reps: int, bridgestan_key: str = "") -> tuple[gate.Verdict, int | None]:
     ref = entry.ref
     names = list(ref.names) + list(ref.constants)
     try:
         csvs, hashes = read_rep(rep_dir, entry.chains, entry.draws, names)
     except ValueError as e:
-        return gate.Verdict("wrong", str(e))
+        return gate.Verdict("wrong", str(e)), None
     key = {**_key(entry, reps, bridgestan_key=bridgestan_key), "chains": hashes}
     cache = rep_dir / "gate.json"
     try:
         c = json.loads(cache.read_text())
         if c.get("key") == key:
-            return gate.Verdict.from_dict(c["verdict"])
+            v_cached = gate.Verdict.from_dict(c["verdict"])
+            fp = c.get("first_pass_draws")
+            if fp is None and v_cached.status == "right":
+                fp = entry.draws
+            return v_cached, fp
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         pass
     draws = chain_draws(rep_dir, names, csvs)
     if ref.has_lp and all(n in draws for n in ref.names):
         draws[LP] = entry.lp(draws)
     v = gate.check(draws, ref, reps=reps)
-    cache.write_text(json.dumps({"key": key, "verdict": v.to_dict()}))
+    fp = _first_passing_checkpoint(draws, ref, entry.draws, reps) if v.status == "right" else None
+    cache.write_text(json.dumps({"key": key, "verdict": v.to_dict(), "first_pass_draws": fp}))
+    return v, fp
+
+
+def verdict(rep_dir: Path, entry: Entry, reps: int, bridgestan_key: str = "") -> gate.Verdict:
+    v, _ = verdict_with_checkpoint(rep_dir, entry, reps, bridgestan_key=bridgestan_key)
     return v
 
 
@@ -243,6 +271,7 @@ def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid, digest: str | No
         "label": label_dir.name, "model": entry.model, "rep": rep, "status": "wrong", "reason": "",
         "identity": "", "ess": math.nan, "evaluations": None, "density_evals": None, "gradient_evals": None,
         "hvp_evals": 0, "hess_evals": 0, "cost": math.nan, "seconds": math.nan,
+        "first_pass_draws": None, "cost_to_gate": math.nan,
         "ess_per_cost": math.nan, "ess_per_eval": math.nan, "ess_per_s": math.nan,
         "overhead_ratio": math.nan, "verdict": None,
     }
@@ -274,11 +303,11 @@ def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid, digest: str | No
         return wrong(f"rep{rep} budget {got} (chains, warmup, draws), the grid's is {want}")
     t = rec["timing"]
     extra = t.get("extra") or {}
-    # Slice 2: record multi-walker / tempered entries, refuse scoring until Slice 4
+    # Multi-walker / tempered entries require invariance certification before scoring (Slice 4)
     walkers = int(extra.get("walkers") or 1)
     tempered = bool(extra.get("tempered"))
-    if walkers > 1 or tempered:
-        reason = "unscored: multi-walker/tempered scoring deferred to Slice 4"
+    if (walkers > 1 or tempered) and not bool(extra.get("invariance_verified")):
+        reason = "unscored: multi-walker/tempered scoring deferred to Slice 4 (invariance_verified not set)"
         row.update(status="unproven", reason=reason, verdict=gate.Verdict("unproven", reason))
         return row
     problem = count_problem(rec, entry)
@@ -294,12 +323,28 @@ def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid, digest: str | No
         rep_cost = cost_mod.compute_cost(dens, grad, entry.cost_weights, hvp=hvp, hess=hess)
 
     bs_key = str(extra.get("bridgestan_key") or "")
-    v = verdict(d, entry, g.reps, bridgestan_key=bs_key)
+    v, first_pass = verdict_with_checkpoint(d, entry, g.reps, bridgestan_key=bs_key)
     secs = float(sum(t["chain_s"]))
     overhead = extra.get("overhead_ratio")
+    cost_to_gate = math.nan
+    if v.status == "right" and first_pass is not None and math.isfinite(rep_cost) and entry.draws > 0:
+        frac = min(1.0, float(first_pass) / float(entry.draws))
+        if extra.get("adapt_density_evals") is not None and extra.get("transition_density_evals") is not None:
+            adapt_c = cost_mod.compute_cost(
+                int(extra.get("adapt_density_evals") or 0),
+                int(extra.get("adapt_gradient_evals") or 0),
+                entry.cost_weights,
+                hvp=int(extra.get("adapt_hvp_evals") or 0),
+                hess=int(extra.get("adapt_hess_evals") or 0),
+            )
+            trans_c = max(0.0, rep_cost - adapt_c)
+            cost_to_gate = adapt_c + frac * trans_c
+        else:
+            cost_to_gate = frac * rep_cost
     row.update(
         status=v.status, reason=v.label(), ess=v.ess, evaluations=total, density_evals=dens,
         gradient_evals=grad, hvp_evals=hvp, hess_evals=hess, cost=rep_cost, seconds=secs,
+        first_pass_draws=first_pass, cost_to_gate=cost_to_gate,
         overhead_ratio=float(overhead) if overhead is not None and math.isfinite(overhead) else math.nan,
         verdict=v,
     )
@@ -328,9 +373,13 @@ def per_model(rows: list[dict], g: Grid) -> list[dict]:
             "cost_u": [r["ess_per_cost"] for r in reps] if right else [],
             "eval": [r["ess_per_eval"] for r in reps] if right else [],
             "sec": [r["ess_per_s"] for r in reps] if right else [],
+            "gate_eff": [1.0 / r["cost_to_gate"] if isinstance(r.get("cost_to_gate"), (int, float))
+                         and math.isfinite(r["cost_to_gate"]) and r["cost_to_gate"] > 0 else math.nan
+                         for r in reps] if right else [],
             "ess_per_cost": _mean([r["ess_per_cost"] for r in reps]) if right else math.nan,
             "ess_per_eval": _mean([r["ess_per_eval"] for r in reps]) if right else math.nan,
             "ess_per_s": _mean([r["ess_per_s"] for r in reps]) if right else math.nan,
+            "cost_to_gate": _mean([r["cost_to_gate"] for r in reps]) if right else math.nan,
             "overhead_ratio": float(np.mean(oh)) if oh else math.nan,
         })
     return out
@@ -354,8 +403,8 @@ def rank(models: list[dict], baseline: str | None, names: list[str], seed: int =
             "label": lab, "right": len(right), "of": len(names),
             "overhead_ratio": float(np.median(oh_vals)) if oh_vals else math.nan, "note": "",
         }
-        for unit, key in (("cost_u", "speed_cost"), ("eval", "speed_eval"), ("sec", "speed_s")):
-            row.update({key: math.nan, f"{key}_lo": math.nan, f"{key}_hi": math.nan})
+        for unit, key in (("cost_u", "speed_cost"), ("eval", "speed_eval"), ("sec", "speed_s"), ("gate_eff", "gate_speed")):
+            row.update({key: math.nan, f"{key}_lo": math.nan, f"{key}_hi": math.nan, f"{key}_p": math.nan})
             if baseline is None:
                 continue
             both = [n for n in right if by.get((baseline, n), {}).get("status") == "right"]
@@ -373,8 +422,10 @@ def rank(models: list[dict], baseline: str | None, names: list[str], seed: int =
             if lab == baseline:
                 row[key] = 1.0
                 continue
-            row[key] = _geo([np.mean(a) / np.mean(b) for a, b in pairs])
-            row[f"{key}_lo"], row[f"{key}_hi"] = _bootstrap(pairs, seed)
+            boot = records.paired_hierarchical_bootstrap(pairs, n_boot=BOOTSTRAP, seed=seed, margin=1.0)
+            row[key] = boot["ratio"]
+            row[f"{key}_lo"], row[f"{key}_hi"] = boot["ci_lo"], boot["ci_hi"]
+            row[f"{key}_p"] = boot["p_value"]
         out.append(row)
     out.sort(key=lambda r: (-r["right"], -(r["speed_cost"] if math.isfinite(r["speed_cost"]) else (r["speed_eval"] if math.isfinite(r["speed_eval"]) else -math.inf))))
     for i, r in enumerate(out):
@@ -391,15 +442,8 @@ def _geo(v) -> float:
 
 
 def _bootstrap(pairs, seed: int) -> tuple[float, float]:
-    rng = np.random.default_rng(seed)
-    logs = np.zeros(BOOTSTRAP)
-    for a, b in pairs:
-        a, b = np.asarray(a, float), np.asarray(b, float)
-        ma = a[rng.integers(0, len(a), (BOOTSTRAP, len(a)))].mean(axis=1)
-        mb = b[rng.integers(0, len(b), (BOOTSTRAP, len(b)))].mean(axis=1)
-        logs += np.log(ma / mb)
-    lo, hi = np.percentile(logs / len(pairs), [2.5, 97.5])
-    return float(math.exp(lo)), float(math.exp(hi))
+    boot = records.paired_hierarchical_bootstrap(pairs, n_boot=BOOTSTRAP, seed=seed, margin=1.0)
+    return boot["ci_lo"], boot["ci_hi"]
 
 
 def table(ranking: list[dict], models: list[dict], baseline: str | None, names: list[str]) -> str:
@@ -452,7 +496,7 @@ def _speed(r, key) -> str:
     return f"{r[key]:.3g} [{r[key + '_lo']:.3g}, {r[key + '_hi']:.3g}]"
 
 
-def _write(path: Path, rows: list[dict], drop=("verdict", "cost_u", "eval", "sec")) -> None:
+def _write(path: Path, rows: list[dict], drop=("verdict", "cost_u", "eval", "sec", "gate_eff")) -> None:
     if not rows:
         return
     fields = list(dict.fromkeys(k for r in rows for k in r if k not in drop))

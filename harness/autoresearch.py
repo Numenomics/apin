@@ -1,17 +1,22 @@
-"""Slice 5 Autoresearch MVP runner: Karpathy 3-file contract + MAP-Elites specialist archive.
+"""Slice 5 Autoresearch runner: Karpathy 3-file contract + paired MAP-Elites archive.
 
-Combines:
-  - Pre-eval novelty filter (diff SHA-256 dedupe against ledger.jsonl + AST import lint)
-  - Tier 0 fast reject (< 30 s): ABI check, frozen-tuning SHA-256, replay determinism, and
-    coarse exact-draw invariance + dispersed-start mixing on fresh rotated Gaussian & funnel
-  - Tier 1 paired dev eval: candidate vs lane incumbent on IDENTICAL fresh seeds across
-    aligned + rotated analytic shapes (gaussian_illcond, funnel, banana, student_t, mixture)
-  - Noise-aware ratchet + MAP-Elites specialist archive (`archive/<cell>/`)
-  - Append-only `ledger.jsonl` + auto-generated flat `results.tsv`
+Hardened post-review:
+  - Read-only `harness/judge.py` owns Lane A1's fixed transition kernel (`adapt_metric` seam).
+  - Pre-eval novelty filter rejects both exact-file duplicates and AST-equivalent
+    (comment/whitespace-only) re-submissions against `ledger.jsonl`.
+  - Tier 0 & Tier 1 run untrusted submissions inside isolated out-of-process brokered workers
+    (`harness/ipc.py`) with `adapt()` billed into per-chain empirical efficiency.
+  - Tier 1 suite covers aligned + rotated `IllCondGaussian`, `NealsFunnel`, `Banana`,
+    `HybridRosenbrock`, `StudentT(nu=1.5)` (quantiles-only), `StudentT(nu=3.0)`, and `GaussianMixture`.
+  - MAP-Elites specialist archive updates are **paired on identical fresh seeds** against the
+    cell's existing specialist (eliminating lucky-seed accumulation).
+  - Any unexpected candidate crash during Tier 1 writes a `discard_error` row to `ledger.jsonl`
+    and updates `results.tsv` rather than aborting without a record.
 """
 
 from __future__ import annotations
 
+import ast
 import csv
 import hashlib
 import json
@@ -23,25 +28,27 @@ from pathlib import Path
 
 import numpy as np
 
-from . import invariance, logdensity, shapes
+from . import invariance, ipc, judge, logdensity, shapes
 from .models import ROOT
 
 NOISE_MARGIN = 0.02  # +/- 2% tie band where simplicity regularizer breaks ties
 
 
 def _judge_digest() -> str:
-    h = hashlib.sha256()
-    for mod in (logdensity, shapes, invariance):
-        h.update(Path(mod.__file__).read_bytes())
-    h.update(Path(__file__).read_bytes())
-    return h.hexdigest()[:16]
+    return judge.judge_digest()
 
 
-def _submission_stats(path: Path) -> tuple[str, int]:
+def _submission_stats(path: Path) -> tuple[str, str, int]:
+    """Return (raw_sha256[:16], ast_normalized_sha256[:16], loc)."""
     text = path.read_text()
     sha = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    try:
+        norm = ast.dump(ast.parse(text), include_attributes=False)
+        ast_sha = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
+    except SyntaxError:
+        ast_sha = sha
     loc = sum(1 for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#"))
-    return sha, loc
+    return sha, ast_sha, loc
 
 
 def _load_ledger(path: Path) -> list[dict]:
@@ -69,25 +76,32 @@ def _write_results_tsv(ledger_path: Path, tsv_path: Path) -> None:
             w.writerow(flat)
 
 
-def _eval_tier0(sub_path: Path, seed: int, work_dir: Path) -> tuple[bool, dict]:
-    """Tier 0 fast reject: AST lint, ABI + replay determinism, coarse invariance smoke on Gaussian & funnel."""
+def _append_row(ledger_path: Path, tsv_path: Path, row: dict) -> dict:
+    with open(ledger_path, "a") as fh:
+        fh.write(json.dumps(row) + "\n")
+    _write_results_tsv(ledger_path, tsv_path)
+    return row
+
+
+def _eval_tier0(sub_path: Path, seed: int, work_dir: Path, *, lane: str | None = None) -> tuple[bool, dict]:
+    """Tier 0 fast reject: AST lint, lane seam, isolated ABI + replay, calibrated invariance smoke."""
     try:
         logdensity.check_imports(sub_path.read_text())
-        logdensity.load_submission(sub_path)
+        judge.resolve_lane_submission(sub_path, lane)
     except Exception as e:
         return False, {"stage": "load_lint", "error": str(e)}
 
-    # 1. ABI + frozen tuning + 5-step replay on a fresh rotated Gaussian (d=4)
+    # 1. Isolated 3-process ABI + frozen tuning + 5-step replay on a fresh rotated Gaussian (d=4)
     g4 = shapes.IllCondGaussian(dim=4, seed=seed + 11, rotated=True, kappa=25.0)
     try:
-        _, summary = logdensity.execute_run(
+        _, summary = ipc.execute_run_isolated(
             g4, sub_path, logdensity.Budget(1, 20, 200_000, 30.0),
-            run_seed=seed + 13, work_dir=work_dir / "t0_abi", replay_count=5,
+            run_seed=seed + 13, work_dir=work_dir / "t0_abi", replay_count=5, lane=lane,
         )
     except Exception as e:
         return False, {"stage": "abi_replay", "error": str(e)}
 
-    # 2. Coarse exact-draw invariance smoke on rotated Gaussian (d=6) and small Neal's funnel (d=4)
+    # 2. Isolated exact-draw invariance + dispersed-start mixing smoke on rotated Gaussian & small funnel
     smoke_targets = [
         shapes.IllCondGaussian(dim=6, seed=seed + 17, rotated=True, kappa=25.0),
         shapes.NealsFunnel(dim=4, seed=seed + 19, rotated=False, v_sd=2.0),
@@ -95,11 +109,14 @@ def _eval_tier0(sub_path: Path, seed: int, work_dir: Path) -> tuple[bool, dict]:
     checks = []
     for tgt in smoke_targets:
         res = invariance.check_target_invariance(
-            tgt, sub_path, seed=seed + 23, n_chains=48, k_steps=12, adapt_draws=80, alpha=0.001
+            tgt, sub_path, seed=seed + 23, n_chains=48, k_steps=12, adapt_draws=80,
+            alpha=0.001, lane=lane, isolated=True,
         )
         checks.append({
             "target": tgt.family, "passed": res.passed, "max_z": round(res.max_z, 3),
-            "b2_max": round(res.b2_max, 5), "move": round(res.mean_movement_sd, 4), "reason": res.reason,
+            "z_thresh": round(res.z_threshold, 3), "b2_max": round(res.b2_max, 5),
+            "move": round(res.mean_movement_sd, 4), "adapt_cost": round(res.adapt_cost, 1),
+            "reason": res.reason,
         })
         if not res.passed:
             return False, {"stage": "invariance_smoke", "checks": checks, "error": res.reason}
@@ -107,9 +124,31 @@ def _eval_tier0(sub_path: Path, seed: int, work_dir: Path) -> tuple[bool, dict]:
     return True, {"stage": "passed", "tuning_bytes": summary["adapt"]["tuning_bytes"], "checks": checks}
 
 
-def _eval_tier1_suite(sub_path: Path, suite: list[shapes.AnalyticTarget], seed: int,
-                      n_chains: int = 64, k_steps: int = 20, adapt_draws: int = 120) -> dict:
-    """Evaluate a submission across a fresh aligned + rotated analytic suite."""
+def _build_tier1_suite(dim: int, seed: int) -> list[shapes.AnalyticTarget]:
+    """Fresh aligned + rotated Tier 1 suite covering all non-multimodal shape classes."""
+    return [
+        shapes.IllCondGaussian(dim, seed + 1, rotated=False, kappa=50.0),
+        shapes.IllCondGaussian(dim, seed + 2, rotated=True, kappa=50.0),
+        shapes.NealsFunnel(dim, seed + 3, rotated=True, v_sd=2.0),
+        shapes.Banana(dim, seed + 4, rotated=True),
+        shapes.HybridRosenbrock(dim, seed + 5, rotated=False, b=5.0),
+        shapes.StudentT(dim, seed + 6, rotated=False, nu=1.5),
+        shapes.StudentT(dim, seed + 7, rotated=True, nu=3.0),
+        shapes.GaussianMixture(dim, seed + 8, rotated=True, separation=2.5),
+    ]
+
+
+def _eval_tier1_suite(
+    sub_path: Path,
+    suite: list[shapes.AnalyticTarget],
+    seed: int,
+    *,
+    n_chains: int = 64,
+    k_steps: int = 20,
+    adapt_draws: int = 120,
+    lane: str | None = None,
+) -> dict:
+    """Evaluate a submission across a fresh aligned + rotated analytic suite via isolated workers."""
     per_target = []
     by_class: dict[str, list[float]] = {}
     all_ok = True
@@ -117,12 +156,15 @@ def _eval_tier1_suite(sub_path: Path, suite: list[shapes.AnalyticTarget], seed: 
     oh_vals = []
     for i, tgt in enumerate(suite):
         res = invariance.check_target_invariance(
-            tgt, sub_path, seed=seed + 100 * i, n_chains=n_chains, k_steps=k_steps, adapt_draws=adapt_draws
+            tgt, sub_path, seed=seed + 100 * i, n_chains=n_chains, k_steps=k_steps,
+            adapt_draws=adapt_draws, lane=lane, isolated=True,
         )
         per_target.append({
             "family": tgt.family, "rotated": tgt.rotated, "passed": res.passed,
             "emp_eff": res.empirical_efficiency, "b2_max": res.b2_max,
-            "max_z": res.max_z, "overhead_ratio": res.overhead_ratio, "reason": res.reason,
+            "max_z": res.max_z, "z_threshold": res.z_threshold,
+            "adapt_cost": res.adapt_cost, "cost_per_chain": res.cost_per_chain,
+            "overhead_ratio": res.overhead_ratio, "reason": res.reason,
         })
         if not res.passed:
             all_ok = False
@@ -147,6 +189,34 @@ def _eval_tier1_suite(sub_path: Path, suite: list[shapes.AnalyticTarget], seed: 
     }
 
 
+def _eval_class_paired(
+    specialist_path: Path,
+    suite: list[shapes.AnalyticTarget],
+    cls_name: str,
+    seed: int,
+    *,
+    n_chains: int,
+    k_steps: int,
+    adapt_draws: int,
+    lane: str | None,
+) -> tuple[bool, float]:
+    """Evaluate an archived MAP-Elites specialist on the exact same class targets & seeds."""
+    vals = []
+    for i, tgt in enumerate(suite):
+        if tgt.family != cls_name:
+            continue
+        res = invariance.check_target_invariance(
+            tgt, specialist_path, seed=seed + 100 * i, n_chains=n_chains, k_steps=k_steps,
+            adapt_draws=adapt_draws, lane=lane, isolated=True,
+        )
+        if not res.passed:
+            return False, 0.0
+        vals.append(res.empirical_efficiency)
+    if not vals:
+        return False, 0.0
+    return True, float(np.exp(np.mean(np.log(np.maximum(vals, 1e-18)))))
+
+
 def _overhead_bucket(ratio: float) -> str:
     if ratio < 1.0:
         return "oh_low"
@@ -169,7 +239,7 @@ def evaluate_lane_trial(
     run_id: str = "default",
     allow_duplicate: bool = False,
 ) -> dict:
-    """Run one complete Karpathy-ratchet + MAP-Elites autoresearch trial on `lane`."""
+    """Run one complete Karpathy-ratchet + paired MAP-Elites autoresearch trial on `lane`."""
     lane_dir = autoresearch_dir / "lanes" / lane
     sub_path = lane_dir / "submission.py"
     if not sub_path.is_file():
@@ -185,53 +255,60 @@ def evaluate_lane_trial(
 
     prior = _load_ledger(ledger_path)
     trial_id = f"T{len(prior) + 1:04d}"
-    cand_sha, cand_loc = _submission_stats(sub_path)
+    cand_sha, cand_ast_sha, cand_loc = _submission_stats(sub_path)
     seed = int(seed if seed is not None else (20261120 + len(prior) * 97))
     t0 = time.perf_counter()
 
-    # Pre-eval novelty filter: reject exact duplicate diff
-    if not allow_duplicate and any(r.get("candidate_sha") == cand_sha for r in prior):
+    # Pre-eval novelty filter: reject exact duplicate OR AST-equivalent (comment/whitespace-only) diff
+    is_dup = any(
+        r.get("candidate_sha") == cand_sha or (r.get("ast_sha") and r.get("ast_sha") == cand_ast_sha)
+        for r in prior
+    )
+    if not allow_duplicate and is_dup:
         row = {
             "trial_id": trial_id, "timestamp": datetime.now(timezone.utc).isoformat(),
-            "lane": lane, "candidate_sha": cand_sha, "loc": cand_loc,
+            "lane": lane, "candidate_sha": cand_sha, "ast_sha": cand_ast_sha, "loc": cand_loc,
             "judge_digest": _judge_digest(), "seed": seed,
             "hypothesis": hypothesis, "codex_refs": list(codex_refs or []),
             "tier0_ok": False, "tier1_ok": False, "decision": "discard_duplicate",
             "wall_s": round(time.perf_counter() - t0, 3),
         }
-        with open(ledger_path, "a") as fh:
-            fh.write(json.dumps(row) + "\n")
-        _write_results_tsv(ledger_path, tsv_path)
-        return row
+        return _append_row(ledger_path, tsv_path, row)
 
     trial_work = run_dir / "trials" / trial_id
     trial_work.mkdir(parents=True, exist_ok=True)
-    t0_ok, t0_info = _eval_tier0(sub_path, seed=seed, work_dir=trial_work)
+    t0_ok, t0_info = _eval_tier0(sub_path, seed=seed, work_dir=trial_work, lane=lane)
     if not t0_ok:
         row = {
             "trial_id": trial_id, "timestamp": datetime.now(timezone.utc).isoformat(),
-            "lane": lane, "candidate_sha": cand_sha, "loc": cand_loc,
+            "lane": lane, "candidate_sha": cand_sha, "ast_sha": cand_ast_sha, "loc": cand_loc,
             "judge_digest": _judge_digest(), "seed": seed,
             "hypothesis": hypothesis, "codex_refs": list(codex_refs or []),
             "tier0_ok": False, "tier0_info": t0_info, "tier1_ok": False,
             "decision": "discard_tier0", "wall_s": round(time.perf_counter() - t0, 3),
         }
-        with open(ledger_path, "a") as fh:
-            fh.write(json.dumps(row) + "\n")
-        _write_results_tsv(ledger_path, tsv_path)
-        return row
+        return _append_row(ledger_path, tsv_path, row)
 
     # Tier 1: paired fresh suite for candidate AND incumbent on identical fresh seeds
-    suite = [
-        shapes.IllCondGaussian(dim, seed + 1, rotated=False, kappa=50.0),
-        shapes.IllCondGaussian(dim, seed + 2, rotated=True, kappa=50.0),
-        shapes.Banana(dim, seed + 3, rotated=False),
-        shapes.StudentT(dim, seed + 4, rotated=False, nu=3.0),
-        shapes.GaussianMixture(dim, seed + 5, rotated=False, separation=2.5),
-    ]
-    cand_res = _eval_tier1_suite(sub_path, suite, seed=seed + 1000, n_chains=n_chains,
-                                 k_steps=k_steps, adapt_draws=adapt_draws)
+    suite = _build_tier1_suite(dim, seed)
+    try:
+        cand_res = _eval_tier1_suite(
+            sub_path, suite, seed=seed + 1000, n_chains=n_chains,
+            k_steps=k_steps, adapt_draws=adapt_draws, lane=lane,
+        )
+    except Exception as e:
+        row = {
+            "trial_id": trial_id, "timestamp": datetime.now(timezone.utc).isoformat(),
+            "lane": lane, "candidate_sha": cand_sha, "ast_sha": cand_ast_sha, "loc": cand_loc,
+            "judge_digest": _judge_digest(), "seed": seed,
+            "hypothesis": hypothesis, "codex_refs": list(codex_refs or []),
+            "tier0_ok": True, "tier1_ok": False, "decision": "discard_error",
+            "error": f"{type(e).__name__}: {e}",
+            "wall_s": round(time.perf_counter() - t0, 3),
+        }
+        return _append_row(ledger_path, tsv_path, row)
 
+    inc_sha = None
     # First valid trial establishes incumbent automatically
     if not incumbent_path.is_file():
         inc_res = None
@@ -239,9 +316,11 @@ def evaluate_lane_trial(
         ratio = 1.0 if cand_res["passed"] else 0.0
         decision = "keep_baseline" if cand_res["passed"] else "discard_tier1"
     else:
-        _, inc_loc = _submission_stats(incumbent_path)
-        inc_res = _eval_tier1_suite(incumbent_path, suite, seed=seed + 1000, n_chains=n_chains,
-                                    k_steps=k_steps, adapt_draws=adapt_draws)
+        inc_sha, _, inc_loc = _submission_stats(incumbent_path)
+        inc_res = _eval_tier1_suite(
+            incumbent_path, suite, seed=seed + 1000, n_chains=n_chains,
+            k_steps=k_steps, adapt_draws=adapt_draws, lane=lane,
+        )
         inc_sm = inc_res["soft_min_eff"]
         cand_sm = cand_res["soft_min_eff"]
         ratio = (cand_sm / inc_sm) if inc_sm > 0 else (math.inf if cand_sm > 0 else 0.0)
@@ -254,7 +333,7 @@ def evaluate_lane_trial(
         else:
             decision = "discard_no_gain"
 
-    # Update MAP-Elites specialist archive for any gate-passing candidate
+    # Paired MAP-Elites specialist archive update (same fresh seeds for candidate vs existing specialist!)
     archived_cells: list[str] = []
     if cand_res["passed"]:
         oh_tag = _overhead_bucket(cand_res["overhead_ratio"])
@@ -262,10 +341,28 @@ def evaluate_lane_trial(
             cell_key = f"{cls_name}__{oh_tag}"
             cell_dir = archive_dir / cell_key
             meta_file = cell_dir / "best.json"
-            prev_best = json.loads(meta_file.read_text())["score"] if meta_file.is_file() else -1.0
-            if cls_score > prev_best:
+            spec_file = cell_dir / "submission.py"
+            should_store = False
+            if not meta_file.is_file() or not spec_file.is_file():
+                should_store = True
+            else:
+                prev_meta = json.loads(meta_file.read_text())
+                prev_sha = prev_meta.get("candidate_sha")
+                if prev_sha == cand_sha:
+                    should_store = False
+                elif inc_res is not None and prev_sha == inc_sha and cls_name in inc_res["by_class"]:
+                    # Reuse already-paired incumbent score on identical seeds!
+                    prev_paired = inc_res["by_class"][cls_name]
+                    should_store = cls_score > prev_paired * (1.0 + NOISE_MARGIN)
+                else:
+                    prev_ok, prev_paired = _eval_class_paired(
+                        spec_file, suite, cls_name, seed=seed + 1000,
+                        n_chains=n_chains, k_steps=k_steps, adapt_draws=adapt_draws, lane=lane,
+                    )
+                    should_store = (not prev_ok) or (cls_score > prev_paired * (1.0 + NOISE_MARGIN))
+            if should_store:
                 cell_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(sub_path, cell_dir / "submission.py")
+                shutil.copy2(sub_path, spec_file)
                 meta_file.write_text(json.dumps({
                     "trial_id": trial_id, "candidate_sha": cand_sha, "score": cls_score,
                     "soft_min_eff": cand_res["soft_min_eff"], "hypothesis": hypothesis,
@@ -277,7 +374,9 @@ def evaluate_lane_trial(
     if decision in ("keep", "keep_simpler", "keep_baseline"):
         shutil.copy2(sub_path, incumbent_path)
 
-    (trial_work / "metrics.json").write_text(json.dumps({"tier0": t0_info, "candidate": cand_res, "incumbent": inc_res}, indent=1))
+    (trial_work / "metrics.json").write_text(
+        json.dumps({"tier0": t0_info, "candidate": cand_res, "incumbent": inc_res}, indent=1)
+    )
     shutil.copy2(sub_path, trial_work / "submission.py")
 
     row = {
@@ -285,6 +384,7 @@ def evaluate_lane_trial(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "lane": lane,
         "candidate_sha": cand_sha,
+        "ast_sha": cand_ast_sha,
         "loc": cand_loc,
         "judge_digest": _judge_digest(),
         "seed": seed,
@@ -301,7 +401,4 @@ def evaluate_lane_trial(
         "decision": decision,
         "wall_s": round(time.perf_counter() - t0, 3),
     }
-    with open(ledger_path, "a") as fh:
-        fh.write(json.dumps(row) + "\n")
-    _write_results_tsv(ledger_path, tsv_path)
-    return row
+    return _append_row(ledger_path, tsv_path, row)

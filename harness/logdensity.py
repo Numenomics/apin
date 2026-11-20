@@ -226,6 +226,156 @@ def deserialize_tree(path_prefix: Path) -> Any:
     return _decode_canonical(manifest, arrays)
 
 
+def _encode_node(obj: Any, out: bytearray) -> None:
+    if obj is None:
+        out.append(0)
+        return
+    if type(obj) is bool:
+        out.append(1)
+        out.append(1 if obj else 0)
+        return
+    if type(obj) is int:
+        raw = str(obj).encode("ascii")
+        out.append(2)
+        out.extend(struct.pack("<I", len(raw)))
+        out.extend(raw)
+        return
+    if type(obj) is float:
+        if not math.isfinite(obj):
+            raise ContractError(f"non-finite float {obj!r} in canonical state")
+        val = 0.0 if obj == 0.0 else obj
+        out.append(3)
+        out.extend(struct.pack("<d", val))
+        return
+    if type(obj) is str:
+        raw = obj.encode("utf-8")
+        out.append(4)
+        out.extend(struct.pack("<I", len(raw)))
+        out.extend(raw)
+        return
+    if isinstance(obj, np.generic):
+        _encode_node(obj.item(), out)
+        return
+    if isinstance(obj, np.ndarray):
+        arr = np.ascontiguousarray(obj)
+        if np.issubdtype(arr.dtype, np.floating) and not np.all(np.isfinite(arr)):
+            raise ContractError("non-finite float array in canonical state")
+        if not (np.issubdtype(arr.dtype, np.number) or arr.dtype == np.bool_):
+            raise ContractError(f"unsupported ndarray dtype {arr.dtype!r} in canonical state")
+        if np.issubdtype(arr.dtype, np.floating):
+            arr = arr.copy()
+            arr[arr == 0.0] = 0.0
+        dt = arr.dtype.str.encode("ascii")
+        raw = arr.tobytes()
+        out.append(5)
+        out.extend(struct.pack("<HII", len(dt), len(arr.shape), len(raw)))
+        out.extend(dt)
+        for s in arr.shape:
+            out.extend(struct.pack("<Q", s))
+        out.extend(raw)
+        return
+    if type(obj) is list:
+        out.append(6)
+        out.extend(struct.pack("<I", len(obj)))
+        for v in obj:
+            _encode_node(v, out)
+        return
+    if type(obj) is tuple:
+        out.append(7)
+        out.extend(struct.pack("<I", len(obj)))
+        for v in obj:
+            _encode_node(v, out)
+        return
+    if type(obj) is dict:
+        out.append(8)
+        out.extend(struct.pack("<I", len(obj)))
+        for k, v in obj.items():
+            if type(k) is not str:
+                raise ContractError(f"canonical dict keys must be str, got {type(k).__name__}")
+            kb = k.encode("utf-8")
+            out.extend(struct.pack("<I", len(kb)))
+            out.extend(kb)
+            _encode_node(v, out)
+        return
+    raise ContractError(f"unsupported type {type(obj).__name__!r} in canonical tuning/aux state")
+
+
+def _decode_node(buf: memoryview, pos: int) -> tuple[Any, int]:
+    tag = buf[pos]
+    pos += 1
+    if tag == 0:
+        return None, pos
+    if tag == 1:
+        return bool(buf[pos]), pos + 1
+    if tag == 2:
+        (n,) = struct.unpack_from("<I", buf, pos)
+        pos += 4
+        val = int(bytes(buf[pos:pos + n]).decode("ascii"))
+        return val, pos + n
+    if tag == 3:
+        (val,) = struct.unpack_from("<d", buf, pos)
+        return val, pos + 8
+    if tag == 4:
+        (n,) = struct.unpack_from("<I", buf, pos)
+        pos += 4
+        val = bytes(buf[pos:pos + n]).decode("utf-8")
+        return val, pos + n
+    if tag == 5:
+        dt_len, ndim, raw_len = struct.unpack_from("<HII", buf, pos)
+        pos += 10
+        dt = np.dtype(bytes(buf[pos:pos + dt_len]).decode("ascii"))
+        pos += dt_len
+        shape = tuple(struct.unpack_from(f"<{ndim}Q", buf, pos)) if ndim else ()
+        pos += 8 * ndim
+        arr = np.frombuffer(buf[pos:pos + raw_len], dtype=dt).reshape(shape).copy()
+        return arr, pos + raw_len
+    if tag == 6:
+        (n,) = struct.unpack_from("<I", buf, pos)
+        pos += 4
+        items = []
+        for _ in range(n):
+            v, pos = _decode_node(buf, pos)
+            items.append(v)
+        return items, pos
+    if tag == 7:
+        (n,) = struct.unpack_from("<I", buf, pos)
+        pos += 4
+        items = []
+        for _ in range(n):
+            v, pos = _decode_node(buf, pos)
+            items.append(v)
+        return tuple(items), pos
+    if tag == 8:
+        (n,) = struct.unpack_from("<I", buf, pos)
+        pos += 4
+        d = {}
+        for _ in range(n):
+            (kn,) = struct.unpack_from("<I", buf, pos)
+            pos += 4
+            k = bytes(buf[pos:pos + kn]).decode("utf-8")
+            pos += kn
+            v, pos = _decode_node(buf, pos)
+            d[k] = v
+        return d, pos
+    raise ContractError(f"corrupt canonical wire tag {tag}")
+
+
+def encode_canonical(obj: Any) -> bytes:
+    """Encode a canonical tree to pickle-free binary bytes for IPC."""
+    out = bytearray()
+    _encode_node(obj, out)
+    return bytes(out)
+
+
+def decode_canonical(data: bytes | memoryview) -> Any:
+    """Decode binary bytes produced by encode_canonical()."""
+    mv = memoryview(data)
+    val, pos = _decode_node(mv, 0)
+    if pos != len(mv):
+        raise ContractError(f"trailing bytes in canonical wire payload ({len(mv) - pos} extra)")
+    return val
+
+
 # ---------------------------------------------------------------------------
 # Chain, betas, and aux_spec validation
 # ---------------------------------------------------------------------------
@@ -289,8 +439,56 @@ def normalize_aux_spec(spec: Any) -> dict:
     return spec
 
 
+def validate_aux_spec(aux_spec: dict, dim: int) -> None:
+    """Validate numerical parameters inside `aux_spec` (mean/diag/cov/dim/k/parts)."""
+    spec = normalize_aux_spec(aux_spec)
+    kind = spec["kind"]
+    if kind == "none":
+        return
+    if kind == "normal":
+        if "diag" in spec and "cov" in spec:
+            raise ContractError("normal aux_spec cannot specify both 'diag' and 'cov'")
+        if "mean" in spec:
+            m = np.asarray(spec["mean"], dtype=float)
+            if m.ndim not in (0, 1) or (m.ndim == 1 and m.shape != (dim,)) or not np.all(np.isfinite(m)):
+                raise ContractError(f"normal aux_spec 'mean' must be finite scalar or shape ({dim},), got {m.shape}")
+        if "diag" in spec:
+            d = np.asarray(spec["diag"], dtype=float)
+            if d.ndim not in (0, 1) or (d.ndim == 1 and d.shape != (dim,)) or not np.all(np.isfinite(d)) or not np.all(d > 0.0):
+                raise ContractError(f"normal aux_spec 'diag' must be strictly positive finite scalar or shape ({dim},)")
+        if "cov" in spec:
+            cov = np.asarray(spec["cov"], dtype=float)
+            if cov.shape != (dim, dim) or not np.all(np.isfinite(cov)):
+                raise ContractError(f"normal aux_spec 'cov' must be finite array of shape ({dim}, {dim}), got {cov.shape}")
+            if not np.allclose(cov, cov.T, atol=1e-8, rtol=1e-6):
+                raise ContractError("normal aux_spec 'cov' must be symmetric")
+            try:
+                np.linalg.cholesky(cov)
+            except np.linalg.LinAlgError as e:
+                raise ContractError(f"normal aux_spec 'cov' must be strictly positive definite: {e}") from None
+        return
+    if kind == "unit_sphere":
+        raw_d = spec.get("dim", dim)
+        if type(raw_d) is bool or not isinstance(raw_d, (int, np.integer)) or int(raw_d) < 2:
+            raise ContractError(f"unit_sphere aux_spec 'dim' must be integer >= 2, got {raw_d!r}")
+        return
+    if kind == "uniform_discrete":
+        raw_k = spec.get("k")
+        if type(raw_k) is bool or not isinstance(raw_k, (int, np.integer)) or int(raw_k) < 2:
+            raise ContractError(f"uniform_discrete aux_spec requires integer k >= 2, got {raw_k!r}")
+        return
+    if kind == "product":
+        parts = spec.get("parts")
+        if not isinstance(parts, (list, tuple)) or not parts:
+            raise ContractError("product aux_spec requires non-empty 'parts' list")
+        for sub_spec in parts:
+            validate_aux_spec(normalize_aux_spec(sub_spec), dim)
+        return
+
+
 def validate_aux(aux_spec: dict, aux: Any, walkers: int, dim: int, is_1d: bool) -> None:
-    """Verify `aux` value conforms to declared `aux_spec`."""
+    """Verify `aux_spec` parameters and that `aux` value conforms to declared `aux_spec`."""
+    validate_aux_spec(aux_spec, dim)
     kind = aux_spec["kind"]
     if kind == "none":
         if aux is not None:
@@ -313,16 +511,12 @@ def validate_aux(aux_spec: dict, aux: Any, walkers: int, dim: int, is_1d: bool) 
             raise ContractError(f"unit_sphere aux must have unit norm, got norms {norms}")
         return
     if kind == "uniform_discrete":
-        k = int(aux_spec.get("k", 0))
-        if k < 2:
-            raise ContractError(f"uniform_discrete aux_spec requires integer k >= 2, got {k!r}")
+        k = int(aux_spec["k"])
         if type(aux) is not int or not (0 <= aux < k):
             raise ContractError(f"uniform_discrete(k={k}) aux must be int in [0, {k}), got {aux!r}")
         return
     if kind == "product":
-        parts = aux_spec.get("parts")
-        if not isinstance(parts, (list, tuple)) or not parts:
-            raise ContractError("product aux_spec requires non-empty 'parts' list")
+        parts = aux_spec["parts"]
         if not isinstance(aux, (list, tuple)) or len(aux) != len(parts):
             raise ContractError(f"product aux must have {len(parts)} elements")
         for sub_spec, sub_aux in zip(parts, aux):
@@ -414,7 +608,7 @@ class Counter:
         t_start = _now()
         try:
             lp = float(self._model.log_density(x, propto=False, jacobian=True))
-        except RuntimeError:
+        except (RuntimeError, OverflowError, FloatingPointError):
             self.eval_s += _now() - t_start
             return -math.inf
         self.eval_s += _now() - t_start
@@ -428,7 +622,7 @@ class Counter:
         t_start = _now()
         try:
             lp, grad = self._model.log_density_gradient(x, propto=False, jacobian=True)
-        except RuntimeError:
+        except (RuntimeError, OverflowError, FloatingPointError):
             self.eval_s += _now() - t_start
             return -math.inf, np.full(self.dim, math.nan)
         self.eval_s += _now() - t_start
@@ -446,7 +640,7 @@ class Counter:
         t_start = _now()
         try:
             lp, hv = self._model.log_density_hessian_vector_product(x, vec, propto=False, jacobian=True)
-        except RuntimeError:
+        except (RuntimeError, OverflowError, FloatingPointError):
             self.eval_s += _now() - t_start
             return -math.inf, np.full(self.dim, math.nan)
         self.eval_s += _now() - t_start
@@ -463,7 +657,7 @@ class Counter:
         t_start = _now()
         try:
             lp, g, h = self._model.log_density_hessian(x, propto=False, jacobian=True)
-        except RuntimeError:
+        except (RuntimeError, OverflowError, FloatingPointError):
             self.eval_s += _now() - t_start
             return -math.inf, np.full(self.dim, math.nan), np.full((self.dim, self.dim), math.nan)
         self.eval_s += _now() - t_start
@@ -816,6 +1010,8 @@ def _open_bridgestan(spec: dict):
 
 
 def main(argv: list[str]) -> int:
+    from . import ipc
+
     phase = argv[0]
     spec = json.loads(Path(argv[1]).read_text())
     caps = set(spec.get("capabilities") or ())
@@ -823,13 +1019,15 @@ def main(argv: list[str]) -> int:
     if phase == "adapt":
         model = _open_bridgestan(spec)
         budget = Budget(spec["chains"], spec["draws"], spec["max_evaluations"], spec["max_seconds"])
-        run_adapt_phase(model, Path(spec["submission"]), budget, int(spec["run_seed"]), bundle_dir, capabilities=caps)
+        ipc.run_adapt_phase_isolated(
+            model, Path(spec["submission"]), budget, int(spec["run_seed"]), bundle_dir, capabilities=caps
+        )
         return 0
     if phase == "sample":
         model = _open_bridgestan(spec)
         budget = Budget(spec["chains"], spec["draws"], spec["max_evaluations"], spec["max_seconds"])
         adapt_meta = json.loads((bundle_dir / "adapt_meta.json").read_text())
-        draws, _ = run_sample_phase(
+        draws, _ = ipc.run_sample_phase_isolated(
             model, Path(spec["submission"]), budget, int(spec["run_seed"]), bundle_dir, adapt_meta,
             capabilities=caps, replay_count=int(spec.get("replay_steps", REPLAY_STEPS)),
         )
@@ -839,7 +1037,7 @@ def main(argv: list[str]) -> int:
         model = _open_bridgestan(spec)
         adapt_meta = json.loads((bundle_dir / "adapt_meta.json").read_text())
         sample_meta = json.loads((bundle_dir / "sample_meta.json").read_text())
-        rep = run_replay_phase(
+        rep = ipc.run_replay_phase_isolated(
             model, Path(spec["submission"]), int(spec["run_seed"]), bundle_dir,
             adapt_meta, sample_meta, capabilities=caps,
         )

@@ -22,8 +22,9 @@ Every rep gets a verdict from the correctness gate (next section): right, wrong 
 
 | column | meaning |
 |---|---|
-| `ess_per_eval` | credited ESS divided by every density and gradient evaluation, warmup included. It does not depend on load, depends on the machine only through floating-point results, and does not let a sampler hide work in warmup. It is the primary speed. It needs complete counts: for CmdStan, the count read from every saved warmup and sampling row with thin = 1 (see below), or the logdensity adapter's own count. An adapter that cannot count all its evaluations says why in `timing.uncounted`, and the rep has no `ess_per_eval`. |
-| `ess_per_s` | credited ESS divided by the sum of the record's `chain_s` entries. For CmdStan each entry is that chain's own time (warmup plus sampling), and for adapters that record each chain's own time this removes the effect of parallel dispatch. For a `sample()` submission each entry is `wall_s / chains` (see below). For nutpie every entry is the wall time of the whole batch, so the sum is chains × wall time and does not remove parallel dispatch. It does not remove the effect of machine load. W-109 and W-133 used this convention ("stanza sum"). It is the secondary speed. |
+| `ess_per_cost` | **Primary efficiency:** credited ESS divided by target-calibrated cost `n_density + r_m * n_gradient (+ r_hvp * n_hvp + r_hess * n_hess)`, warmup included, where `r_m >= 1.0` is measured once per model through BridgeStan (`models/costs.json`). Missing `r_m` is a hard error. Checkpoint `cost_to_gate` (earliest prefix checkpoint passing the 0.1-SD gate) is also recorded per rep and compared via paired hierarchical bootstrap. |
+| `ess_per_eval` | Diagnostic 1:1 efficiency: credited ESS divided by every density and gradient evaluation, warmup included. It does not depend on load, depends on the machine only through floating-point results, and does not let a sampler hide work in warmup. Needs complete counts; an adapter that cannot count all evaluations sets `timing.uncounted`. |
+| `ess_per_s` | credited ESS divided by the sum of the record's `chain_s` entries. For CmdStan and `logdensity`, each entry is that chain's own time (warmup plus sampling), removing parallel dispatch. For nutpie every entry is the wall time of the whole batch. `overhead_ratio` (`overhead_s / eval_s`) is printed alongside. |
 
 Never compare numbers that use different conventions. A report states which one it uses.
 
@@ -104,43 +105,50 @@ The old walnutpie arms (W-63 to W-133) used Pathfinder inits listed in `scratch/
 
 ## The log-density seam
 
-The `logdensity` adapter (`harness/adapters/logdensity.py`) runs a sampling algorithm written in Python against any core model, through BridgeStan. It is the interface of the benchmark in BENCH.md. A submission is one file that defines
+The `logdensity` adapter (`harness/adapters/logdensity.py`) runs a Markov chain sampler written in Python against any core model, through BridgeStan, using the Slice 2 `adapt`/`transition` kernel ABI (`harness/logdensity.py`) over out-of-process brokered oracle IPC (`harness/ipc.py`). A submission is one file that defines
 
 ```python
-def sample(problem: Problem, budget: Budget, rng: numpy.random.Generator) -> numpy.ndarray:
-    ...  # returns unconstrained draws of shape (budget.chains, budget.draws, problem.dim)
+def adapt(oracle: Oracle, budget: Budget, rng: numpy.random.Generator) -> tuple[tuning, chain0, betas, aux_spec]:
+    ...
+
+def transition(tuning, chain: Chain, oracle: Oracle, rng: numpy.random.Generator) -> Chain | tuple[np.ndarray, Any]:
+    ...
 ```
 
 with these types from `harness/logdensity.py`:
 
 ```python
-@dataclass(frozen=True)
-class Problem:
+class Oracle:
     dim: int
-    log_density: Callable[[np.ndarray], float]
-    log_density_gradient: Callable[[np.ndarray], tuple[float, np.ndarray]]
-    initial_points: np.ndarray  # (chains, dim), one starting point per chain
+    block_shape: tuple[tuple[int, ...], ...] | None  # None unless capability 'block_shape' enabled
+    log_density(theta) -> float
+    log_density_gradient(theta) -> tuple[float, np.ndarray]
+    hvp(theta, v) -> tuple[float, np.ndarray]        # requires priced 'hvp' capability
+    hess(theta) -> tuple[float, np.ndarray, np.ndarray]  # requires priced 'hess' capability
 
 @dataclass(frozen=True)
 class Budget:
-    chains: int           # independent chains to return
-    draws: int            # draws per chain to return
-    max_evaluations: int  # calls to log_density plus log_density_gradient, all chains, warmup included
-    max_seconds: float    # wall time of the whole sample() call
+    chains: int           # independent runs in the rep (informational)
+    draws: int            # post-warmup transition() calls for this run
+    max_evaluations: int  # total oracle calls for this run (adapt + transition combined)
+    max_seconds: float    # wall time limit for this run
+
+@dataclass(frozen=True)
+class Chain:
+    position: np.ndarray  # (dim,) for single walker or (K, dim) for K walkers
+    aux: Any = None       # typed auxiliary Markov state matching aux_spec
 ```
 
 The contract:
 
-- The density is on the unconstrained space, with the Jacobian of the constraining transform and all constants (BridgeStan with `jacobian=True, propto=False`). theta must be a float array of shape (dim,).
-- A point the model rejects (Stan raises a domain error) has log density −inf and a NaN gradient. This is how Stan's own samplers treat it. The submission never sees the exception.
-- The harness counts every call. Density and gradient calls count the same, one evaluation each, against one limit. The call that would exceed `max_evaluations`, and any call after `max_seconds`, raises `BudgetExceeded`. From then on every call raises, and the run fails even if the submission catches the error. A run that overruns `max_seconds` after its last call fails at the end.
-- The defaults are `max_evaluations` = chains × (warmup + draws) × 1023, a chosen cap: 1023 is the number of leapfrog steps in a full NUTS tree of depth 10. It is not the most NUTS can spend, since a depth-10 transition makes 1024 gradients before any step-size search. The other default is `max_seconds` = 1800. `--opt max_evals=N` and `--opt max_seconds=S` change them. A rep run with other limits than these, or whose record drops a limit or a count, is wrong in the score; its total must equal its density plus gradient calls, every count must be a non-negative integer, and it may not be marked `uncounted`. The submission is killed 300 s after `max_seconds`.
-- `initial_points` are uniform on (−2, 2), Stan's default, from a generator seeded by the rep's seed. `rng` is a second, independent generator from the same seed. A submission that needs more streams spawns them from `rng`.
-- The return value must have exactly the shape (chains, draws, dim). Every returned draw must be a point the submission passed to `log_density` or `log_density_gradient`, bit for bit, and whose log density was finite; the harness keeps a hash of every evaluated point, in call order. A chain's draws must keep the order in which they were first evaluated, and no point may appear in two chains. These checks rule out draws the submission did not pay for and exact copies of a chain. Only evaluated points pass, and only when they meet both conditions. Returning evaluated points in another order fails, even when they are evaluated again in that order, since the first evaluation fixes the order; a point that repeats keeps the index of its first evaluation. Freshly evaluated finite points can pass when they still meet both conditions, so a shuffled or copied chain whose points are each moved by a float step to a new, distinct point and evaluated in return order can pass. An average of evaluated points can pass if it is itself evaluated and meets both conditions, and fails if it is not evaluated (BENCH.md, "Ways to game the score"). The harness maps every draw to the constrained space with BridgeStan (`param_constrain`, with transformed parameters and generated quantities) and writes one CSV per chain. A draw that cannot be mapped is written as NaN, which fails the gate.
-- The submission may import only numpy, scipy and the standard modules math, typing, dataclasses, functools, itertools, collections and `__future__`, and may not name the builtins `open`, `exec`, `eval`, `compile`, `__import__`, `breakpoint`, `input`, `globals` or `vars`. An AST check enforces both before the run. It is a lint, not a sandbox (see BENCH.md).
-- The submission runs in a child process, `python -m harness.logdensity spec.json`, with `OMP_NUM_THREADS=1`. Its stdout and stderr go to `submission.log` in the rep directory.
+- The density is on the unconstrained space, with the Jacobian of the constraining transform and all constants (BridgeStan with `jacobian=True, propto=False`). `theta` must be a float array of shape `(dim,)`.
+- A point the model rejects (Stan raises a domain error) has log density `−inf` and a NaN gradient. The submission never sees the exception.
+- The harness counts every call in the parent process over a Unix socketpair (`harness/ipc.py`), so neither `Counter` nor BridgeStan exists in the submission's process. Every call is charged before evaluation, at rejected points too, and `adapt` vs. `transition` counts are recorded separately (`adapt_*`, `transition_*`).
+- The defaults are `max_evaluations` = chains × (warmup + draws) × 1023 and `max_seconds` = 1800. `--opt max_evals=N` and `--opt max_seconds=S` override them (non-grid limits are marked wrong by `apin score`).
+- `adapt()` runs in one clean child process (`OMP_NUM_THREADS=1`), validates `(tuning, chain0, betas, aux_spec)`, checks `chain0` finite provenance, and serializes `tuning` canonically (no pickle) with a SHA-256 digest. `transition()` runs in a second clean child process with derived per-step RNGs, per-step finite provenance checking, and post-run `tuning` SHA-256 verification. A third clean child process replays ~20 random steps plus a 3-step contiguous window bit-for-bit (unbilled).
+- The submission may import only `numpy`, `scipy`, and standard modules `math`, `typing`, `dataclasses`, `functools`, `itertools`, `collections`, and `__future__`, and may not name `open`, `exec`, `eval`, `compile`, `__import__`, `breakpoint`, `input`, `globals`, or `vars`. An AST check enforces both before execution (a lint, not an OS container sandbox).
 
-`timing.wall_s` runs from loading the submission file to converting what `sample()` returns into an array. Loading the model and constraining the draws are excluded. The chains share one process, so each `chain_s` entry is `wall_s / chains` and `ess_per_s` is ESS per second of the single core the submission ran on. A CmdStan run's `wall_s` covers, by default, four concurrent chain processes: the harness starts one process per chain and leaves core placement to the operating system. So compare `ess_per_s` (chain time) or `ess_per_eval` between a submission and CmdStan, never a wall time. `timing.evaluations` holds the count, and `timing.extra` holds the density and gradient counts apart and the limits in force.
+`timing.wall_s` is the sum of per-chain `adapt + sample` times (`chain_s` holds each chain's time); model compilation and post-run constraining are excluded. `timing.evaluations` holds total calls and `timing.extra` holds split `adapt_*`/`transition_*` counts, `eval_s`, `overhead_s`, `overhead_ratio`, `walkers`, `betas`, `tempered`, `tuning_sha256`, `replay_singles`, `replay_window`, and `bridgestan_key`.
 
 CmdStan's gradient count (`adapters/cmdstan.py`, `gradients`) follows the CmdStan 2.39 source in `stan/src/stan/mcmc/hmc`:
 
@@ -151,7 +159,7 @@ CmdStan's gradient count (`adapters/cmdstan.py`, `gradients`) follows the CmdSta
 `examples/samplers/` holds two submissions: `hmc.py`, HMC with a diagonal metric, a step size tuned by dual averaging in warmup and a jittered number of steps, and `ula_wrong.py`, the unadjusted Langevin algorithm with a large step, which is wrong on purpose. Run one with
 
 ```bash
-uv run apin run --sampler logdensity --label hmc --opt sampler=examples/samplers/hmc.py --models easy/small
+uv run apin run logdensity --label hmc --opt sampler=examples/samplers/hmc.py --models easy/small
 ```
 
 The first run of each model builds a BridgeStan library, which takes one to two minutes per model; later runs reuse it from `build/`. The BridgeStan tree is the one the `bridgestan` Python package keeps (it downloads it on first use) unless `--opt bridgestan=PATH` or `BRIDGESTAN` names another.

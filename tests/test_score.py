@@ -506,3 +506,24 @@ def test_split_adapt_transition_counts_must_sum_to_total(tmp_path, grid):
     _rewrite(d, lambda t: t["extra"].update(adapt_density_evals=100, transition_density_evals=100))
     got = _reasons(tmp_path, grid)
     assert got[("m1", 0)][0] == "wrong" and "adapt/transition" in got[("m1", 0)][1]
+
+
+def test_verified_multiwalker_is_scored_and_checkpoints_recorded(tmp_path, grid):
+    """Slice 4 unlock + Review 1 #4: invariance_verified enables multiwalker scoring; checkpoints & paired CI work."""
+    for r in range(2):
+        for m in ("m1", "m2"):
+            write_rep(tmp_path, "base", m, r, grid, evaluations=100_000, seed_rng=100 + r)
+            d = write_rep(tmp_path, "nrpt_ok", m, r, grid, evaluations=50_000, seed_rng=100 + r)
+            rec = json.loads((d / "run.json").read_text())
+            rec["timing"]["extra"]["walkers"] = 4
+            rec["timing"]["extra"]["tempered"] = True
+            rec["timing"]["extra"]["invariance_verified"] = True
+            (d / "run.json").write_text(json.dumps(rec))
+    out = score.score(tmp_path, tmp_path / "s", grid, baseline="base", log=lambda *_: None)
+    nrpt_runs = [r for r in out["per_run"] if r["label"] == "nrpt_ok"]
+    assert all(r["status"] == "right" for r in nrpt_runs)
+    assert all(r["first_pass_draws"] is not None and math.isfinite(r["cost_to_gate"]) for r in nrpt_runs)
+    rank_nrpt = next(r for r in out["ranking"] if r["label"] == "nrpt_ok")
+    assert rank_nrpt["right"] == 2
+    assert math.isfinite(rank_nrpt["speed_cost_p"])
+    assert math.isfinite(rank_nrpt["gate_speed"]) and rank_nrpt["gate_speed"] > 1.5

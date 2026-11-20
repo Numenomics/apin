@@ -36,7 +36,7 @@ Only `right` earns speed credit. A model is right when every rep is right, wrong
 
 **Rule 4. Missing is failing.** The score is computed over a declared grid of models and reps. A missing or failed rep makes its model wrong. `apin run` reuses a saved rep only when its seed, its submission and its budget match the request. The score accepts a rep only when its model, rep, seed, base seed and budget match its grid cell; it checks the rep's submission against the submission file only when it is given that file (`--submission`). Without it, a rep with an old digest can score right.
 
-**Rule 5. A submission sees the interface and nothing else, and everything it does is charged.** The interface is `sample(problem, budget, rng)`. Every call is counted. The clock runs from loading the submission to converting what it returns. The interface cannot show that the returned draws are a Markov chain's or that the chains are independent, so results under it are provisional, and no official round runs on it.
+**Rule 5. A submission sees the input-blind `oracle` and nothing else, and everything it does is charged.** The interface is `adapt(oracle, budget, rng) -> (tuning, chain0, betas, aux_spec)` and `transition(tuning, chain, oracle, rng) -> chain_next`. Every call—both in `adapt()` and in `transition()`—is counted in the parent harness process over a private Unix socketpair (`harness/ipc.py`), so neither `Counter` nor the target model exists in the submission's address space. `adapt()`, `transition()`, and unbilled `replay()` run in separate clean child processes with `OMP_NUM_THREADS=1`, frozen-`tuning` SHA-256 verification, and per-step finite provenance checking. OS-level container/network sandboxing for untrusted external submissions remains Slice 6.
 
 ## How the code meets the rules
 
@@ -187,35 +187,37 @@ The checks on a record catch stale, damaged and mismatched records: a rep from a
 
 ### Rule 5: the seam and its limits
 
-`harness/logdensity.py` hands the submission two plain functions and a copy of its budget. The limits the harness enforces and the shape it expects are copied before the submission runs.
+`harness/logdensity.py` and `harness/ipc.py` isolate the submission in dedicated child processes (`adapt`, `sample`, and `replay`) and expose an input-blind `Oracle` over a Unix socketpair.
 
-- Every call to `log_density` or `log_density_gradient` is charged before it is evaluated, at a rejected point too.
-- A call past the limit raises BudgetExceeded, and the run fails even if the submission catches it.
-- The clock starts before the submission file is loaded and stops after the return value is converted to an array. An overrun fails the run at the end, even if no call came after it.
-- Every returned draw must be a point the submission evaluated with a finite log density (provenance). Points must keep the order in which they were first evaluated, and no point may appear in two chains. That is all provenance verifies. It does not verify that the order is a Markov chain's: a submission can evaluate its draws again in any order, at points one float step away, and return them in that order. Nor does it verify that the chains are independent.
-
-This protects the counts from a submission that makes a mistake. It does not protect them from one that sets out to cheat. In-process Python cannot stop determined introspection. A submission can reach the counter through closure cells, the garbage collector or the stack. An official round therefore reads every submission before it trusts the result. Process isolation is listed under "Not built yet".
+- Every call to `log_density`, `log_density_gradient`, or an opted-in higher-order method (`hvp`, `hess`) is charged in the parent harness before it is evaluated, at a rejected point too.
+- A call past the limit raises `BudgetExceeded`, and the run fails even if the submission catches it.
+- `adapt()` and `transition()` run in separate child processes, so module globals or native caches cannot cross the adapt/sample boundary. `tuning` is serialized canonically (no pickle) and SHA-256 verified before and after sampling.
+- Every walker position returned by `transition()` that was not already in `chain.position` must have been evaluated finitely during that step (per-step finite provenance), and ~20 single steps plus a short contiguous window are replayed bit-for-bit in a third fresh process.
+- Because `Counter` and the model (`BridgeStan` or `AnalyticTarget`) live strictly in the parent process, Python closure introspection (`__closure__`, `gc.get_objects()`, stack frames) cannot reach them. An OS-level container without filesystem or network access is still required before grading untrusted third-party submissions (Slice 6).
 
 ## The task
 
 Write one Python file that defines
 
 ```python
-def sample(problem: Problem, budget: Budget, rng: numpy.random.Generator) -> numpy.ndarray:
-    ...  # unconstrained draws of shape (budget.chains, budget.draws, problem.dim)
+def adapt(oracle: Oracle, budget: Budget, rng: numpy.random.Generator) -> tuple[tuning, chain0, betas, aux_spec]:
+    ...
+
+def transition(tuning, chain: Chain, oracle: Oracle, rng: numpy.random.Generator) -> Chain | tuple[np.ndarray, Any]:
+    ...
 ```
 
-`Problem` and `Budget` are in `harness/logdensity.py`. PROTOCOL.md, "The log-density seam", gives the full contract. In short:
+`Oracle`, `Budget`, and `Chain` are in `harness/logdensity.py`. PROTOCOL.md, "The log-density seam", gives the full contract. In short:
 
-- `problem.log_density(theta)` and `problem.log_density_gradient(theta)` evaluate the model on the unconstrained space, with the Jacobian and all constants. A point the model rejects gives −inf.
-- `problem.initial_points` has one starting point per chain, uniform on (−2, 2).
-- Every returned draw must be a point the submission evaluated with a finite log density.
+- `oracle.log_density(theta)` and `oracle.log_density_gradient(theta)` evaluate the model on the unconstrained space, with the Jacobian and all constants. A point the model rejects gives −inf.
+- `adapt()` returns canonical frozen `tuning`, an evaluated `chain0 = (position, aux)`, inverse temperatures `betas` (in `(0, 1]` with at least one `1.0`), and `aux_spec` declaring the stationary law of `aux`.
+- Every new position returned by `transition()` must have been evaluated with a finite log density during that call.
 
 Run a submission on the public models with
 
 ```bash
-uv run apin run --sampler logdensity --label mine --opt sampler=path/to/mine.py --models public --reps 5
-uv run apin run --sampler cmdstan --label cmdstan --models public --reps 5
+uv run apin run logdensity --label mine --opt sampler=path/to/mine.py --models public --reps 5
+uv run apin run cmdstan --label cmdstan --models public --reps 5
 uv run apin score --baseline cmdstan --models public --reps 5
 ```
 
@@ -245,7 +247,7 @@ Each rep gives the submission the budget of its model in `models/manifest.json`:
 | evaluations | 4 × (warmup + draws) × 1023 | a chosen cap: 1023 is the number of leapfrog steps in a full tree of depth 10 (see below) |
 | time | 1800 s on one core | `OMP_NUM_THREADS=1` and the BLAS equivalents; the process is killed 300 s later |
 
-A density call and a gradient call count the same. Both counts are recorded (`density_evals`, `gradient_evals`).
+A target-calibrated cost unit (`cost = n_density + r_m * n_gradient`, with `r_m >= 1.0` frozen in `models/costs.json`) is the primary speed denominator; 1:1 `ess_per_eval` and `ess_per_s` are reported alongside. Both counts are recorded (`density_evals`, `gradient_evals`), split into `adapt_*` and `transition_*`.
 
 The evaluation cap is a choice, not the most NUTS can spend. A NUTS transition that reaches depth 10 makes 1024 gradients (its 1023 leapfrog steps and one at its start), before any step-size search, so a NUTS chain that hits the depth limit on every iteration would exceed the cap. The evaluation limit stops a submission that thins by a factor of thousands. The time limit stops one that spends its time in numpy between evaluations.
 
@@ -392,7 +394,7 @@ What the run shows:
 
 ## Not built yet
 
-- Process isolation. The submission runs in a child process with the rights of the user who runs it. It shares that process with the counter, so it can reach the counter by introspection. A real sandbox would run the submission in a separate process, without file or network access, and serve the density over a pipe.
+- OS-level container sandbox. Out-of-process brokered oracle IPC (`harness/ipc.py`) keeps `Counter` and the model out of the submission's process and isolates `adapt`, `sample`, and `replay` into fresh workers, but the child still runs with the caller's filesystem/network permissions. A full Slice 6 container/seccomp sandbox is required before grading untrusted external PRs.
 - A secret held-out set. The held-out models are in the public repository.
 - Models that are not Stan programs. The seam works through BridgeStan, so every model must be a `.stan` file.
 - A replicate check on the references. The halves rule compares two halves of one build, and nothing compares two independent builds of a reference. An error that both halves share is found only when a correct sampler fails against it, as on radon_vis and bym2_offset_only.

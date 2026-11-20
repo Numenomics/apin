@@ -88,13 +88,38 @@ class AnalyticTarget:
         return lp
 
     def log_density_gradient(self, x: np.ndarray, propto: bool = False, jacobian: bool = True) -> tuple[float, np.ndarray]:
-        z = self.to_latent(np.asarray(x, dtype=float))
-        lp_z, gz = self._latent_log_density_grad(z)
-        if not math.isfinite(lp_z) or not np.all(np.isfinite(gz)):
+        arr = np.asarray(x, dtype=float)
+        if not np.all(np.isfinite(arr)):
             return -math.inf, np.full(self.dim, math.nan)
-        lp = float(lp_z + self._log_jac_inv)
-        gx = (gz @ self._Q.T) / self._scale
+        try:
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                z = self.to_latent(arr)
+                if not np.all(np.isfinite(z)):
+                    return -math.inf, np.full(self.dim, math.nan)
+                lp_z, gz = self._latent_log_density_grad(z)
+                if not math.isfinite(lp_z) or not np.all(np.isfinite(gz)):
+                    return -math.inf, np.full(self.dim, math.nan)
+                lp = float(lp_z + self._log_jac_inv)
+                gx = (gz @ self._Q.T) / self._scale
+        except (OverflowError, FloatingPointError):
+            return -math.inf, np.full(self.dim, math.nan)
+        if not math.isfinite(lp) or not np.all(np.isfinite(gx)):
+            return -math.inf, np.full(self.dim, math.nan)
         return lp, np.asarray(gx, dtype=float)
+
+    def _latent_dispersed_starts(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        """Default overdispersed latent starts away from equilibrium (finite log-density)."""
+        base = self._latent_exact_draws(n, rng)
+        signs = rng.choice([-1.0, 1.0], size=(n, 1))
+        return 1.5 * base + 2.5 * signs
+
+    def dispersed_starts(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        """Draw `n` finite overdispersed starting positions in observed coordinates."""
+        return self.from_latent(self._latent_dispersed_starts(n, rng))
+
+    def params_key(self) -> tuple:
+        """Immutable parameter tuple identifying this target's latent null law (for threshold caching)."""
+        return (self.family, self.dim)
 
     def exact_draws(self, n: int, rng: np.random.Generator) -> np.ndarray:
         return self.from_latent(self._latent_exact_draws(n, rng))
@@ -131,6 +156,13 @@ class IllCondGaussian(AnalyticTarget):
 
     def _latent_exact_draws(self, n: int, rng: np.random.Generator) -> np.ndarray:
         return rng.standard_normal((n, self.dim)) * self.stds[None, :]
+
+    def _latent_dispersed_starts(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        signs = rng.choice([-1.0, 1.0], size=(n, 1))
+        return (2.5 * signs + 1.5 * rng.standard_normal((n, self.dim))) * self.stds[None, :]
+
+    def params_key(self) -> tuple:
+        return (self.family, self.dim, round(float(self.stds[-1] ** 2), 6))
 
     def _latent_tempered_draws(self, n: int, beta: float, rng: np.random.Generator) -> np.ndarray:
         return rng.standard_normal((n, self.dim)) * (self.stds / math.sqrt(beta))[None, :]
@@ -190,6 +222,15 @@ class NealsFunnel(AnalyticTarget):
         x = rng.standard_normal((n, self.dim - 1)) * np.exp(0.5 * v)
         return np.concatenate([v, x], axis=1)
 
+    def _latent_dispersed_starts(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        # Start in the wide mouth (v > 0, well away from the narrow neck v < -6)
+        v = rng.uniform(0.8 * self.v_sd, 1.8 * self.v_sd, size=(n, 1))
+        x = rng.standard_normal((n, self.dim - 1)) * np.exp(0.5 * v)
+        return np.concatenate([v, x], axis=1)
+
+    def params_key(self) -> tuple:
+        return (self.family, self.dim, round(self.v_sd, 6))
+
     def latent_functionals(self, z: np.ndarray) -> dict[str, np.ndarray]:
         v = z[..., 0]
         # Scaled radial statistic x / exp(v/2) ~ N(0, I) exactly, plus explicit neck indicator v < -6!
@@ -231,14 +272,20 @@ class Banana(AnalyticTarget):
 
     def _latent_log_density_grad(self, z: np.ndarray) -> tuple[float, np.ndarray]:
         z0, z1 = float(z[0]), float(z[1])
+        if abs(z0) > 1e70 or abs(z1) > 1e100:
+            return -math.inf, np.full(self.dim, math.nan)
         mu1 = self.b * (z0 * z0 - self.s0 * self.s0)
         r1 = z1 - mu1
+        if abs(r1) > 1e100:
+            return -math.inf, np.full(self.dim, math.nan)
         lp = -0.5 * (z0 / self.s0) ** 2 - 0.5 * (r1 / self.s1) ** 2
         g = np.empty(self.dim, dtype=float)
         g[0] = -z0 / (self.s0 ** 2) + (r1 / (self.s1 ** 2)) * (2.0 * self.b * z0)
         g[1] = -r1 / (self.s1 ** 2)
         if self.dim > 2:
             rest = z[2:]
+            if np.any(np.abs(rest) > 1e100):
+                return -math.inf, np.full(self.dim, math.nan)
             lp -= 0.5 * float(rest @ rest)
             g[2:] = -rest
         return lp, g
@@ -250,6 +297,18 @@ class Banana(AnalyticTarget):
             return np.concatenate([z0, z1], axis=1)
         rest = rng.standard_normal((n, self.dim - 2))
         return np.concatenate([z0, z1, rest], axis=1)
+
+    def _latent_dispersed_starts(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        signs = rng.choice([-1.0, 1.0], size=(n, 1))
+        z0 = rng.normal(2.0 * self.s0, 0.5 * self.s0, size=(n, 1)) * signs
+        z1 = self.b * (z0 ** 2 - self.s0 ** 2) + rng.normal(0.0, 1.5 * self.s1, size=(n, 1))
+        if self.dim == 2:
+            return np.concatenate([z0, z1], axis=1)
+        rest = rng.normal(0.0, 1.5, size=(n, self.dim - 2))
+        return np.concatenate([z0, z1, rest], axis=1)
+
+    def params_key(self) -> tuple:
+        return (self.family, self.dim, round(self.s0, 6), round(self.s1, 6), round(self.b, 6))
 
     def latent_functionals(self, z: np.ndarray) -> dict[str, np.ndarray]:
         z0, z1 = z[..., 0], z[..., 1]
@@ -287,7 +346,11 @@ class HybridRosenbrock(AnalyticTarget):
     def _latent_log_density_grad(self, z: np.ndarray) -> tuple[float, np.ndarray]:
         z0 = float(z[0])
         rest = z[1:]
+        if abs(z0) > 1e70 or np.any(np.abs(rest) > 1e100):
+            return -math.inf, np.full(self.dim, math.nan)
         diff = rest - z0 * z0
+        if np.any(np.abs(diff) > 1e100):
+            return -math.inf, np.full(self.dim, math.nan)
         lp = -self.a * (z0 - self.mu) ** 2 - self.b * float(diff @ diff)
         g = np.empty(self.dim, dtype=float)
         g[0] = -2.0 * self.a * (z0 - self.mu) + 4.0 * self.b * z0 * float(np.sum(diff))
@@ -298,6 +361,15 @@ class HybridRosenbrock(AnalyticTarget):
         z0 = rng.normal(self.mu, self.s0, size=(n, 1))
         rest = (z0 ** 2) + rng.normal(0.0, self.sb, size=(n, self.dim - 1))
         return np.concatenate([z0, rest], axis=1)
+
+    def _latent_dispersed_starts(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        signs = rng.choice([-1.0, 1.0], size=(n, 1))
+        z0 = self.mu + signs * rng.normal(2.0 * self.s0, 0.5 * self.s0, size=(n, 1))
+        rest = (z0 ** 2) + rng.normal(0.0, 1.5 * self.sb, size=(n, self.dim - 1))
+        return np.concatenate([z0, rest], axis=1)
+
+    def params_key(self) -> tuple:
+        return (self.family, self.dim, round(self.a, 6), round(self.b, 6), round(self.mu, 6))
 
     def latent_functionals(self, z: np.ndarray) -> dict[str, np.ndarray]:
         z0 = z[..., 0]
@@ -342,6 +414,13 @@ class StudentT(AnalyticTarget):
 
     def _latent_exact_draws(self, n: int, rng: np.random.Generator) -> np.ndarray:
         return rng.standard_t(self.nu, size=(n, self.dim))
+
+    def _latent_dispersed_starts(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        signs = rng.choice([-1.0, 1.0], size=(n, 1))
+        return 2.5 * signs + 1.5 * rng.standard_normal((n, self.dim))
+
+    def params_key(self) -> tuple:
+        return (self.family, self.dim, round(self.nu, 6))
 
     def latent_functionals(self, z: np.ndarray) -> dict[str, np.ndarray]:
         z0 = z[..., 0]
@@ -406,6 +485,15 @@ class GaussianMixture(AnalyticTarget):
     def _latent_exact_draws(self, n: int, rng: np.random.Generator) -> np.ndarray:
         comps = rng.choice(2, size=n, p=self.w)
         return self.mus[comps] + rng.standard_normal((n, self.dim))
+
+    def _latent_dispersed_starts(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        # Start all chains near component 0 shifted outward to test mode crossing and mixing
+        z = rng.normal(0.0, 1.5, size=(n, self.dim))
+        z[:, 0] = self.mus[0, 0] - 1.5 + rng.normal(0.0, 1.0, size=n)
+        return z
+
+    def params_key(self) -> tuple:
+        return (self.family, self.dim, round(self.sep, 6), tuple(round(float(x), 6) for x in self.w))
 
     def _latent_tempered_draws(self, n: int, beta: float, rng: np.random.Generator) -> np.ndarray:
         """Exact draws from pi(z)^beta using envelope q(z) proportional to sum_i w_i^beta N(mu_i, I)^beta."""

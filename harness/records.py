@@ -96,8 +96,14 @@ def paired_hierarchical_bootstrap(
         acc = 0.0
         for j in m_pick:
             a, b = cleaned[j]
-            ma = float(np.mean(a[rng.integers(0, len(a), size=len(a))]))
-            mb = float(np.mean(b[rng.integers(0, len(b), size=len(b))]))
+            if len(a) == len(b):
+                # Resample matched seed pairs together so paired comparisons preserve seed blocking
+                idx = rng.integers(0, len(a), size=len(a))
+                ma = float(np.mean(a[idx]))
+                mb = float(np.mean(b[idx]))
+            else:
+                ma = float(np.mean(a[rng.integers(0, len(a), size=len(a))]))
+                mb = float(np.mean(b[rng.integers(0, len(b), size=len(b))]))
             acc += math.log(ma / mb)
         boot_logs[b_idx] = acc / m
 

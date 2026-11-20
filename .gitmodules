@@ -22,4 +22,3 @@
 [submodule "upstream/posteriordb"]
 	path = upstream/posteriordb
 	url = https://github.com/stan-dev/posteriordb.git
-	branch = master

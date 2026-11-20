@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from harness import cost, grid, logdensity, models, sampler, score
+from harness import cost, grid, ipc, logdensity, models, sampler, score
 from harness.logdensity import (
     Budget,
     BudgetExceeded,
@@ -271,6 +271,49 @@ def test_invalid_betas_and_aux_rejected(tmp_path):
 
     with pytest.raises(ContractError, match="unit norm"):
         execute_run(FakeModel(), (bad_unit_sphere, _stay_transition), Budget(1, 5, 50, 60.0), 1, tmp_path)
+
+    # Review 2 #3: validate numerical parameters in normal/unit_sphere/uniform_discrete aux_spec
+    for bad_spec in (
+        {"kind": "normal", "diag": [-1.0, 1.0, 1.0]},
+        {"kind": "normal", "diag": [1.0, 1.0]},  # wrong shape
+        {"kind": "normal", "cov": np.array([[1.0, 2.0, 0.0], [2.0, 1.0, 0.0], [0.0, 0.0, 1.0]])},  # non-SPD
+        {"kind": "normal", "cov": np.array([[1.0, 0.5, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])},  # asymmetric
+        {"kind": "normal", "diag": [1.0, 1.0, 1.0], "cov": np.eye(3)},  # both diag and cov
+        {"kind": "normal", "mean": [1.0, 2.0]},  # wrong shape
+        {"kind": "unit_sphere", "dim": 1},
+        {"kind": "uniform_discrete", "k": True},
+    ):
+        with pytest.raises(ContractError):
+            logdensity.validate_aux_spec(bad_spec, dim=3)
+
+
+def test_ipc_execute_run_isolated_end_to_end_and_blocks_smuggling(tmp_path):
+    """Out-of-process brokered oracle runs valid HMC cleanly and blocks globals & counter introspection."""
+    draws, summary = ipc.execute_run_isolated(
+        FakeModel(), EXAMPLES / "hmc.py", Budget(1, 30, 50_000, 30.0), run_seed=11, work_dir=tmp_path / "ok",
+        replay_count=5,
+    )
+    assert draws.shape == (1, 30, 3)
+    assert summary["adapt"]["gradient_evals"] > 0 and summary["sample"]["gradient_evals"] > 0
+    assert summary["replay"]["replayed_singles"] == 5
+
+    smuggle = tmp_path / "smuggle.py"
+    smuggle.write_text(
+        "import numpy as np\n"
+        "_G = None\n"
+        "def adapt(oracle, budget, rng):\n"
+        "    global _G\n"
+        "    _G = 1\n"
+        "    x = np.zeros(oracle.dim)\n"
+        "    oracle.log_density(x)\n"
+        "    return {}, (x, None), [1.0], 'none'\n"
+        "def transition(tuning, chain, oracle, rng):\n"
+        "    if _G is None:\n"
+        "        raise RuntimeError('smuggled global did not survive')\n"
+        "    return chain.position, None\n"
+    )
+    with pytest.raises(RuntimeError, match="smuggled global did not survive"):
+        ipc.execute_run_isolated(FakeModel(), smuggle, Budget(1, 5, 500, 30.0), run_seed=12, work_dir=tmp_path / "bad")
 
 
 def test_example_hmc_and_ula_on_fake_model(tmp_path):

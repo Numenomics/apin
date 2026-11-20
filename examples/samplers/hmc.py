@@ -31,13 +31,13 @@ class StepSize:
         self.t += 1
         eta = 1 / (self.t + T0)
         self.hbar = (1 - eta) * self.hbar + eta * (TARGET_ACCEPT - accept)
-        log_eps = self.mu - math.sqrt(self.t) / GAMMA * self.hbar
+        log_eps = max(-20.0, min(5.0, self.mu - math.sqrt(self.t) / GAMMA * self.hbar))
         w = self.t**-KAPPA
         self.log_bar = w * log_eps + (1 - w) * self.log_bar
         self.eps = math.exp(log_eps)
 
     def final(self) -> float:
-        return math.exp(self.log_bar)
+        return math.exp(max(-20.0, min(5.0, self.log_bar)))
 
 
 def _steps(eps: float, rng: np.random.Generator, jitter: bool = True) -> int:
@@ -55,7 +55,7 @@ def _hmc_step(grad, x: np.ndarray, lp: float, g: np.ndarray, eps: float, n: int,
     for i in range(n):
         x1 = x1 + eps * inv_m * p1
         lp1, g1 = grad(x1)
-        if not math.isfinite(lp1):
+        if not (math.isfinite(lp1) and np.all(np.isfinite(g1))):
             return x, lp, g, 0.0
         if i < n - 1:
             p1 = p1 + eps * g1
@@ -81,7 +81,7 @@ def _find_finite_init(oracle, rng: np.random.Generator) -> tuple[np.ndarray, flo
 def adapt(oracle, budget, rng):
     x, lp, g = _find_finite_init(oracle, rng)
     inv_m = np.ones(oracle.dim, dtype=float)
-    warmup = max(10, int(budget.draws))
+    warmup = max(10, min(1000, int(budget.draws)))
     updates = {int(0.3 * warmup): int(0.1 * warmup), int(0.7 * warmup): int(0.3 * warmup)}
     history = np.empty((warmup, oracle.dim), dtype=float)
     step = StepSize(0.1)

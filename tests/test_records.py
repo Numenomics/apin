@@ -67,6 +67,13 @@ def test_paired_hierarchical_bootstrap():
     res_tie = records.paired_hierarchical_bootstrap(tie, n_boot=500, seed=0, margin=1.05)
     assert res_tie["p_value"] > 0.5
 
+    # Review 1 #4: identical matched measurements across wide rep scales must give exact [1.0, 1.0] paired CI!
+    identical = [([10.0, 1.0, 5.0, 20.0, 2.0], [10.0, 1.0, 5.0, 20.0, 2.0])]
+    res_id = records.paired_hierarchical_bootstrap(identical, n_boot=1000, seed=0, margin=1.0)
+    assert res_id["ratio"] == pytest.approx(1.0)
+    assert res_id["ci_lo"] == pytest.approx(1.0)
+    assert res_id["ci_hi"] == pytest.approx(1.0)
+
 
 def test_blum_hardt_ladder():
     ladder = records.BlumHardtLadder(step=0.05, initial_best=1.0)

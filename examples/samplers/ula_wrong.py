@@ -37,7 +37,7 @@ def adapt(oracle, budget, rng):
     x, lp, g = _find_finite_init(oracle, rng)
     inv_m = np.ones(oracle.dim, dtype=float)
     h = 0.05
-    warmup = max(20, int(budget.draws))
+    warmup = max(20, min(1000, int(budget.draws)))
     history = np.empty((warmup, oracle.dim), dtype=float)
     for i in range(warmup):
         if i in (int(0.3 * warmup), int(0.7 * warmup)):
