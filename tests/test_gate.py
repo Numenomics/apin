@@ -106,26 +106,15 @@ def test_a_two_valued_variable_is_compared_exactly():
     assert v.status == "wrong" and v.reason == "exact" and v.function == "square"
 
 
-def test_copied_chains_are_caught_by_the_heuristic(ref):
-    """S6: one chain copied four times, the copies shifted by c * 1e-10, also reordered."""
-    rng = np.random.default_rng(6)
-    one = ar1(rng, 1000, 1, 0.0)
-    for order in (np.arange(1000), rng.permutation(1000)):
-        x = np.concatenate([one[order] + c * 1e-10 for c in range(4)], axis=1)
-        v = gate.check(with_lp(x), ref)
-        assert v.status == "unproven" and "near-identical" in v.reason, v.label()
-
-
-def test_copies_the_heuristic_misses_fail_the_calibration(ref):
-    """Rule 2: copies shifted by 1e-3 SD escape the heuristic; each rep may look right, but over the
-    reps they scatter twice as far as the claimed SE says, and the model is not right."""
+def test_copied_or_dependent_chains_fail_calibration(ref):
+    """Slice 2 removes the _copies heuristic (process isolation prevents cross-chain copying by
+    construction), and calibration in judge() still catches dependent chains across reps."""
     rng = np.random.default_rng(7)
     verdicts = []
     for _ in range(3):
         one = ar1(rng, 5000, 1, 0.0)
         x = np.concatenate([one + c * 1e-3 * SIGMA for c in range(4)], axis=1)
         verdicts.append(gate.check(with_lp(x), ref, reps=3))
-    assert all("near-identical" not in v.reason for v in verdicts)
     m = gate.judge(verdicts, ref, reps=3)
     assert m.status == "unproven" and m.calibration > 2.5, m
 

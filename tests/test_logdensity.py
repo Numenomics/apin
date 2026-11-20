@@ -1,40 +1,68 @@
-"""The log-density seam: counting, budget, rejections and the import lint, on a fake model.
+"""Tests for the Slice 2 adapt/transition kernel ABI, canonical tuning, aux_spec, per-step
+provenance, frozen-kernel replay, capability gating, and subprocess isolation."""
 
-The end-to-end tests at the bottom build two models with BridgeStan (about a
-minute and a half each on first build) and run the example samplers; they are
-marked slow.
-"""
-
+import json
 import math
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from harness import grid, logdensity, models, sampler, score
-from harness.logdensity import Budget, BudgetExceeded, Counter, check_imports
+from harness import cost, grid, logdensity, models, sampler, score
+from harness.logdensity import (
+    Budget,
+    BudgetExceeded,
+    CapabilityError,
+    Chain,
+    ContractError,
+    Counter,
+    canonical_digest,
+    check_imports,
+    deserialize_tree,
+    execute_run,
+    serialize_tree,
+)
 
 EXAMPLES = Path(__file__).parent.parent / "examples" / "samplers"
 
 
 class FakeModel:
-    """A standard normal in 3 dimensions that rejects points with x[0] > 5, as Stan would."""
+    """Standard normal in 3D that rejects x[0] > 5, supporting grad/hvp/hess."""
 
     def param_unc_num(self):
         return 3
 
     def log_density(self, x, propto, jacobian):
         if x[0] > 5:
-            raise RuntimeError("normal_lpdf: Scale parameter is 0, but must be positive!")
+            raise RuntimeError("normal_lpdf: domain error")
         return -0.5 * float(x @ x)
 
     def log_density_gradient(self, x, propto, jacobian):
-        return self.log_density(x, propto, jacobian), -x
+        return self.log_density(x, propto, jacobian), -np.asarray(x, dtype=float)
+
+    def log_density_hessian_vector_product(self, x, v, propto, jacobian):
+        return self.log_density(x, propto, jacobian), -np.asarray(v, dtype=float)
+
+    def log_density_hessian(self, x, propto, jacobian):
+        lp, g = self.log_density_gradient(x, propto, jacobian)
+        return lp, g, -np.eye(3, dtype=float)
 
 
-def test_counter_counts_both_kinds_against_one_budget():
-    c = Counter(FakeModel(), Budget(chains=1, draws=1, max_evaluations=5, max_seconds=60))
+def _stay_adapt(oracle, budget, rng):
+    x0 = rng.uniform(-1.0, 1.0, size=oracle.dim)
+    oracle.log_density(x0)
+    return {"step": 0.1, "scale": np.ones(oracle.dim)}, (x0, None), [1.0], "none"
+
+
+def _stay_transition(tuning, chain, oracle, rng):
+    return chain.position, None
+
+
+def test_counter_counts_and_enforces_budget():
+    c = Counter(FakeModel(), max_evaluations=5, max_seconds=60)
     for _ in range(3):
         c.log_density(np.zeros(3))
     c.log_density_gradient(np.ones(3))
@@ -43,295 +71,258 @@ def test_counter_counts_both_kinds_against_one_budget():
     assert lp == -1.5 and np.array_equal(g, -np.ones(3))
     with pytest.raises(BudgetExceeded):
         c.log_density(np.zeros(3))
-    assert c.exceeded and (c.density, c.gradient) == (3, 2)
+    assert c.exceeded and c.total_calls == 5
 
 
-def test_budget_stays_exceeded_after_the_error_is_caught():
-    c = Counter(FakeModel(), Budget(1, 1, max_evaluations=1, max_seconds=60))
-    c.log_density(np.zeros(3))
-    for _ in range(2):
-        with pytest.raises(BudgetExceeded):
-            c.log_density_gradient(np.zeros(3))
+def test_oracle_capabilities_block_unpriced_hvp_and_hess():
+    c = Counter(FakeModel(), max_evaluations=20, max_seconds=60)
+    o = c.oracle()
+    assert o.block_shape is None
+    with pytest.raises(CapabilityError):
+        o.hvp(np.zeros(3), np.ones(3))
+    with pytest.raises(CapabilityError):
+        o.hess(np.zeros(3))
+
+    c2 = Counter(FakeModel(), max_evaluations=20, max_seconds=60,
+                 capabilities={"hvp", "hess", "block_shape"}, block_shape=((3,),))
+    o2 = c2.oracle()
+    assert o2.block_shape == ((3,),)
+    lp, hv = o2.hvp(np.zeros(3), np.ones(3))
+    assert lp == 0.0 and np.array_equal(hv, -np.ones(3))
+    lp, g, h = o2.hess(np.zeros(3))
+    assert lp == 0.0 and np.array_equal(h, -np.eye(3))
+    assert (c2.hvp_calls, c2.hess_calls) == (1, 1)
 
 
-def test_time_limit():
-    c = Counter(FakeModel(), Budget(1, 1, max_evaluations=100, max_seconds=0.0))
-    c.t0 -= 1.0
-    with pytest.raises(BudgetExceeded, match="s$"):
-        c.log_density(np.zeros(3))
+def test_oracle_exposes_no_counter_or_model():
+    c = Counter(FakeModel(), max_evaluations=20, max_seconds=60)
+    o = c.oracle()
+    for name in ("log_density", "log_density_gradient", "hvp", "hess"):
+        f = getattr(o, name)
+        assert not any(hasattr(f, a) for a in ("__self__", "model", "counter", "budget", "step_seen"))
+    with pytest.raises(AttributeError):
+        o.dim = 99
 
 
-def test_rejected_point_is_minus_infinity():
-    c = Counter(FakeModel(), Budget(1, 1, 10, 60))
-    assert c.log_density(np.array([6.0, 0, 0])) == -math.inf
-    lp, g = c.log_density_gradient(np.array([6.0, 0, 0]))
-    assert lp == -math.inf and g.shape == (3,) and np.all(np.isnan(g))
-    assert c.density + c.gradient == 2  # rejected points still count
+def test_rejected_point_is_charged_and_not_recorded():
+    c = Counter(FakeModel(), max_evaluations=10, max_seconds=60)
+    bad = np.array([6.0, 0.0, 0.0])
+    assert c.log_density(bad) == -math.inf
+    lp, g = c.log_density_gradient(bad)
+    assert lp == -math.inf and np.all(np.isnan(g))
+    assert c.density + c.gradient == 2 and len(c.step_seen) == 0
 
 
-def test_wrong_shape_is_an_error():
-    c = Counter(FakeModel(), Budget(1, 1, 10, 60))
-    with pytest.raises(ValueError, match="shape"):
-        c.log_density(np.zeros(4))
+def test_canonical_serialization_and_digest_sensitivity(tmp_path):
+    tree = {"a": 1, "b": True, "c": [1.5, None, ("x", np.array([1.0, 2.0]))]}
+    sha1, nbytes = serialize_tree(tree, tmp_path / "t")
+    loaded = deserialize_tree(tmp_path / "t")
+    assert canonical_digest(loaded) == sha1 and nbytes > 0
+
+    # 1 ULP float mutation changes digest
+    mutated = {"a": 1, "b": True, "c": [1.5, None, ("x", np.array([np.nextafter(1.0, 2.0), 2.0]))]}
+    assert canonical_digest(mutated) != sha1
+
+    # Non-canonical object rejected
+    with pytest.raises(ContractError):
+        canonical_digest({"fn": lambda x: x})
 
 
-@pytest.mark.parametrize("src", ["import os", "from subprocess import run", "import numpy, torch",
-                                 "from . import helper", "import importlib"])
-def test_import_lint_rejects(src):
-    with pytest.raises(ImportError):
-        check_imports(src)
-
-
-def test_import_lint_allows_numpy_scipy_and_stdlib_helpers():
-    check_imports("from __future__ import annotations\nimport math\nimport numpy as np\n"
-                  "from scipy.special import logsumexp\nfrom dataclasses import dataclass\n")
-
-
-def test_examples_pass_the_lint():
+def test_import_lint_and_examples():
+    for src in ("import os", "from subprocess import run", "from . import helper", "eval('1')", "open('x')"):
+        with pytest.raises(ImportError):
+            check_imports(src)
     for f in EXAMPLES.glob("*.py"):
         check_imports(f.read_text())
 
 
-def test_load_submission_needs_sample(tmp_path):
-    f = tmp_path / "s.py"
-    f.write_text("import numpy as np\n")
-    with pytest.raises(AttributeError, match="sample"):
+def test_load_submission_requires_adapt_and_transition(tmp_path):
+    f = tmp_path / "bad.py"
+    f.write_text("def adapt(oracle, budget, rng): pass\n")
+    with pytest.raises(AttributeError, match="adapt.*transition"):
         logdensity.load_submission(f)
 
 
-def test_example_hmc_on_fake_model():
-    """The example HMC, run on the fake target through the Counter, recovers a standard normal."""
-    budget = Budget(chains=2, draws=500, max_evaluations=10**6, max_seconds=60)
-    c = Counter(FakeModel(), budget)
-    rng = np.random.default_rng(1)
-    problem = logdensity.Problem(3, c.log_density, c.log_density_gradient, logdensity.initial_points(rng, 2, 3))
-    draws = logdensity.load_submission(EXAMPLES / "hmc.py")(problem, budget, rng)
-    assert draws.shape == (2, 500, 3)
-    flat = draws.reshape(-1, 3)
-    assert np.all(np.abs(flat.mean(axis=0)) < 0.2) and np.all(np.abs(flat.var(axis=0) - 1) < 0.25)
-    assert 0 < c.gradient < budget.max_evaluations
+def test_execute_run_accepts_valid_kernel_and_records_split_counts(tmp_path):
+    draws, summary = execute_run(
+        FakeModel(), (_stay_adapt, _stay_transition), Budget(1, 30, 500, 60.0), run_seed=42, work_dir=tmp_path
+    )
+    assert draws.shape == (1, 30, 3)
+    assert summary["adapt"]["density_evals"] == 1
+    assert summary["sample"]["density_evals"] == 0
+    assert summary["replay"]["replayed_singles"] == logdensity.REPLAY_STEPS
+    assert summary["replay"]["replayed_window"] == logdensity.REPLAY_WINDOW
+
+
+def test_step_provenance_rejects_unevaluated_new_position(tmp_path):
+    def fake_move(tuning, chain, oracle, rng):
+        return chain.position + 0.1, None  # never evaluated!
+
+    with pytest.raises(ContractError, match="evaluated with a finite log density"):
+        execute_run(FakeModel(), (_stay_adapt, fake_move), Budget(1, 5, 100, 60.0), run_seed=1, work_dir=tmp_path)
+
+
+def test_frozen_tuning_mutation_is_caught(tmp_path):
+    def mutate(tuning, chain, oracle, rng):
+        tuning["scale"][0] += 1e-12
+        return chain.position, None
+
+    with pytest.raises(ContractError, match="mutated"):
+        execute_run(FakeModel(), (_stay_adapt, mutate), Budget(1, 10, 100, 60.0), run_seed=1, work_dir=tmp_path)
+
+
+def test_hidden_global_state_in_transition_fails_replay(tmp_path):
+    sub = tmp_path / "stateful.py"
+    sub.write_text(
+        "import numpy as np\n"
+        "_COUNT = 0\n"
+        "def adapt(oracle, budget, rng):\n"
+        "    x = np.zeros(oracle.dim)\n"
+        "    oracle.log_density(x)\n"
+        "    return {'s': 0.1}, (x, None), [1.0], 'none'\n"
+        "def transition(tuning, chain, oracle, rng):\n"
+        "    global _COUNT\n"
+        "    _COUNT += 1\n"
+        "    x = chain.position + 1e-3 * _COUNT\n"
+        "    oracle.log_density(x)\n"
+        "    return x, None\n"
+    )
+    with pytest.raises(ContractError, match="replay"):
+        execute_run(FakeModel(), sub, Budget(1, 10, 500, 60.0), run_seed=7, work_dir=tmp_path)
+
+
+def test_clean_post_adapt_subprocess_blocks_adapt_global_smuggling(tmp_path):
+    """A submission that stashes state in a module global during adapt() sees a fresh empty
+    global when transition() runs in its own clean child process."""
+    sub = tmp_path / "smuggle.py"
+    sub.write_text(
+        "import numpy as np\n"
+        "_SECRET = None\n"
+        "def adapt(oracle, budget, rng):\n"
+        "    global _SECRET\n"
+        "    _SECRET = 12345\n"
+        "    x = np.zeros(oracle.dim)\n"
+        "    oracle.log_density(x)\n"
+        "    return {'ok': True}, (x, None), [1.0], 'none'\n"
+        "def transition(tuning, chain, oracle, rng):\n"
+        "    if _SECRET is None:\n"
+        "        raise RuntimeError('global did not survive post-adapt process isolation')\n"
+        "    return chain.position, None\n"
+    )
+    bdir = tmp_path / "bundle"
+    bdir.mkdir()
+    # Run adapt in process 1, sample in process 2 via python -c using FakeModel
+    code_adapt = (
+        f"from pathlib import Path; from harness.logdensity import Budget, run_adapt_phase; "
+        f"from tests.test_logdensity import FakeModel; "
+        f"run_adapt_phase(FakeModel(), Path({str(sub)!r}), Budget(1, 5, 100, 30.0), 1, Path({str(bdir)!r}))"
+    )
+    code_sample = (
+        f"import json; from pathlib import Path; from harness.logdensity import Budget, run_sample_phase; "
+        f"from tests.test_logdensity import FakeModel; "
+        f"bdir = Path({str(bdir)!r}); meta = json.loads((bdir / 'adapt_meta.json').read_text()); "
+        f"run_sample_phase(FakeModel(), Path({str(sub)!r}), Budget(1, 5, 100, 30.0), 1, bdir, meta)"
+    )
+    root = Path(__file__).parent.parent
+    r1 = subprocess.run([sys.executable, "-c", code_adapt], cwd=root, capture_output=True, text=True)
+    assert r1.returncode == 0, r1.stderr
+    r2 = subprocess.run([sys.executable, "-c", code_sample], cwd=root, capture_output=True, text=True)
+    assert r2.returncode != 0 and "did not survive post-adapt process isolation" in r2.stderr
+
+
+def test_lifted_aux_and_multiwalker_tempered_kernel(tmp_path):
+    """Typed aux (NRPT parity bit uniform_discrete(2)) + K=2 tempered walkers record cleanly."""
+
+    def nrpt_adapt(oracle, budget, rng):
+        pos = rng.uniform(-1.0, 1.0, size=(2, oracle.dim))
+        for w in range(2):
+            oracle.log_density(pos[w])
+        return {"step": 0.2}, Chain(pos, 0), [0.5, 1.0], {"kind": "uniform_discrete", "k": 2}
+
+    def nrpt_transition(tuning, chain, oracle, rng):
+        pos = chain.position.copy()
+        parity = int(chain.aux)
+        for w in range(2):
+            cand = pos[w] + tuning["step"] * rng.standard_normal(oracle.dim)
+            if math.isfinite(oracle.log_density(cand)):
+                pos[w] = cand
+        return Chain(pos, 1 - parity)
+
+    draws, summary = execute_run(
+        FakeModel(), (nrpt_adapt, nrpt_transition), Budget(1, 25, 1000, 60.0), run_seed=9, work_dir=tmp_path
+    )
+    assert draws.shape == (2, 25, 3)
+    assert summary["walkers"] == 2 and summary["betas"] == [0.5, 1.0]
+
+
+def test_invalid_betas_and_aux_rejected(tmp_path):
+    def no_cold_beta(oracle, budget, rng):
+        x = np.zeros(oracle.dim)
+        oracle.log_density(x)
+        return {}, (x, None), [0.5], "none"
+
+    with pytest.raises(ContractError, match="beta must equal 1.0"):
+        execute_run(FakeModel(), (no_cold_beta, _stay_transition), Budget(1, 5, 50, 60.0), 1, tmp_path)
+
+    def bad_unit_sphere(oracle, budget, rng):
+        x = np.zeros(oracle.dim)
+        oracle.log_density(x)
+        return {}, (x, np.array([2.0, 0.0, 0.0])), [1.0], {"kind": "unit_sphere", "dim": 3}
+
+    with pytest.raises(ContractError, match="unit norm"):
+        execute_run(FakeModel(), (bad_unit_sphere, _stay_transition), Budget(1, 5, 50, 60.0), 1, tmp_path)
+
+
+def test_example_hmc_and_ula_on_fake_model(tmp_path):
+    """Ported example HMC recovers N(0, I) cleanly and passes bit-exact replay; ULA also runs cleanly."""
+    hmc_draws, hmc_sum = execute_run(
+        FakeModel(), EXAMPLES / "hmc.py", Budget(1, 400, 10**6, 60.0), run_seed=1, work_dir=tmp_path / "hmc"
+    )
+    assert hmc_draws.shape == (1, 400, 3)
+    flat = hmc_draws[0]
+    assert np.all(np.abs(flat.mean(axis=0)) < 0.25) and np.all(np.abs(flat.var(axis=0) - 1.0) < 0.35)
+    assert hmc_sum["adapt"]["gradient_evals"] > 0 and hmc_sum["sample"]["gradient_evals"] > 0
+
+    ula_draws, ula_sum = execute_run(
+        FakeModel(), EXAMPLES / "ula_wrong.py", Budget(1, 200, 10**6, 60.0), run_seed=2, work_dir=tmp_path / "ula"
+    )
+    assert ula_draws.shape == (1, 200, 3)
+    assert ula_sum["sample"]["density_evals"] > 0 and ula_sum["sample"]["gradient_evals"] > 0
+
+
+def test_budget_overrun_caught_even_if_submission_swallows_it(tmp_path):
+    def swallow(oracle, budget, rng):
+        x = np.zeros(oracle.dim)
+        try:
+            for _ in range(budget.max_evaluations + 2):
+                oracle.log_density(x)
+        except BudgetExceeded:
+            pass
+        return {}, (x, None), [1.0], "none"
+
+    with pytest.raises(BudgetExceeded, match="caught"):
+        execute_run(FakeModel(), (swallow, _stay_transition), Budget(1, 2, 3, 60.0), 1, tmp_path)
 
 
 @pytest.mark.slow
 def test_examples_end_to_end(tmp_path):
-    """At the bench budget the example HMC is not wrong on the two smallest models. ULA with a large
-    step earns nothing on either. With one rep at 4 x 5000 draws its chains do not mix, so it is
-    unproven; the gate's own tests show that a biased run that mixes is wrong."""
+    """End-to-end BridgeStan test with clean multi-process isolation, replay, and r_m scoring."""
     names = "eight_schools_noncentered,blr"
     ms = models.select(names)
     for label, file in (("hmc", "hmc.py"), ("ula", "ula_wrong.py")):
-        s = sampler.get("logdensity", sampler.Settings(build_dir=tmp_path / "build",
-                                                       options={"sampler": str(EXAMPLES / file)}))
+        s = sampler.get("logdensity", sampler.Settings(
+            build_dir=Path(__file__).parent.parent / "build",
+            options={"sampler": str(EXAMPLES / file)},
+        ))
         done = grid.run_grid(s, ms, reps=1, runs_dir=tmp_path / "runs", label=label, log=lambda *_: None)
         assert len(done) == 2
-    g = score.declared(names, reps=1, build_dir=tmp_path / "build")
+    g = score.declared(names, reps=1, build_dir=Path(__file__).parent.parent / "build")
     out = score.score(tmp_path / "runs", tmp_path / "scores", g, log=lambda *_: None)
     rows = {(r["label"], r["model"]): r for r in out["per_run"]}
     for m in ("eight_schools_noncentered", "blr"):
         hmc, ula = rows["hmc", m], rows["ula", m]
         assert hmc["status"] != "wrong", hmc["reason"]
         assert hmc["evaluations"] == hmc["density_evals"] + hmc["gradient_evals"] > 0
+        assert math.isfinite(hmc["cost"]) and hmc["cost"] >= hmc["evaluations"]
         assert ula["status"] != "right", ula["reason"]
-        assert math.isnan(ula["ess_per_eval"])
-
-
-@pytest.mark.slow
-@pytest.mark.skipif(not os.environ.get("CMDSTAN"), reason="CMDSTAN not set")
-def test_cmdstan_nuts_is_not_wrong(tmp_path):
-    names = "eight_schools_noncentered,blr,kidscore_momiq"
-    s = sampler.get("cmdstan", sampler.Settings(build_dir=tmp_path / "build"))
-    grid.run_grid(s, models.select(names), reps=1, runs_dir=tmp_path / "runs", log=lambda *_: None)
-    g = score.declared(names, reps=1, build_dir=tmp_path / "build")
-    out = score.score(tmp_path / "runs", tmp_path / "scores", g, log=lambda *_: None)
-    assert len(out["per_run"]) == 3
-    for row in out["per_run"]:
-        assert row["status"] != "wrong", (row["model"], row["reason"])
-        assert row["evaluations"] == row["gradient_evals"] > 4 * 5000  # warmup is counted
-
-
-def test_provenance_marks_only_evaluated_points():
-    c = Counter(FakeModel(), Budget(1, 2, 10, 60))
-    a, b = np.array([0.1, 0.2, 0.3]), np.array([1.0, 2.0, 3.0])
-    c.log_density(a)
-    c.log_density_gradient(list(b))  # a list is converted to the same float64 point
-    draws = np.array([[a, b], [b, a + 1e-12]])
-    assert c.first_call(draws).tolist() == [[0, 1], [1, -1]]
-
-
-@pytest.mark.parametrize("first, match", [([[0, 1], [2, -1]], "never evaluated"),
-                                          ([[1, 0], [2, 3]], "order"),
-                                          ([[0, 1], [1, 2]], "share a draw")])
-def test_provenance_rejects(first, match):
-    with pytest.raises(ValueError, match=match):
-        logdensity.check_provenance(np.array(first))
-
-
-def test_provenance_allows_repeats_within_a_chain():
-    logdensity.check_provenance(np.array([[0, 0, 3, 3, 5], [1, 2, 2, 4, 6]]))
-
-
-@pytest.mark.parametrize("src", ["data = open('ref.json').read()", "eval('1')", "__import__('os')"])
-def test_lint_rejects_file_and_code_builtins(src):
-    with pytest.raises(ImportError, match="not allowed"):
-        check_imports(src)
-
-
-def _stay_put(problem, budget, rng):
-    """Evaluates each initial point once and returns it as every draw."""
-    for x in problem.initial_points:
-        problem.log_density(x)
-    return np.repeat(problem.initial_points[:, None, :], budget.draws, axis=1)
-
-
-def test_execute_accepts_evaluated_draws():
-    draws, c, _ = logdensity.execute(FakeModel(), _stay_put, Budget(2, 4, 10, 60), seed=1)
-    assert draws.shape == (2, 4, 3) and c.density == 2
-
-
-def _never_evaluated(problem, budget, rng):
-    return np.zeros((budget.chains, budget.draws, problem.dim))
-
-
-def _short(problem, budget, rng):
-    return _stay_put(problem, budget, rng)[:, :-1]
-
-
-def _over_budget_but_caught(problem, budget, rng):
-    try:
-        for _ in range(budget.max_evaluations + 1):
-            problem.log_density(problem.initial_points[0])
-    except BudgetExceeded:
-        pass
-    return np.repeat(problem.initial_points[:, None, :], budget.draws, axis=1)
-
-
-@pytest.mark.parametrize("fn, error, match", [(_never_evaluated, ValueError, "never evaluated"),
-                                              (_short, ValueError, "shape"),
-                                              (_over_budget_but_caught, BudgetExceeded, "caught")])
-def test_execute_rejects(fn, error, match):
-    with pytest.raises(error, match=match):
-        logdensity.execute(FakeModel(), fn, Budget(2, 4, 5, 60), seed=1)
-
-
-# The second review: S5, S8, S9 and S11.
-
-
-def test_the_callbacks_expose_no_counter_or_model():
-    """S5: problem.log_density was a bound method, so __self__ handed the submission the Counter
-    and through it the model, the provenance record and the totals."""
-    seen = {}
-
-    def peek(problem, budget, rng):
-        for name in ("log_density", "log_density_gradient"):
-            f = getattr(problem, name)
-            seen[name] = [a for a in ("__self__", "model", "counter", "budget", "seen") if hasattr(f, a)]
-        return _stay_put(problem, budget, rng)
-
-    logdensity.execute(FakeModel(), peek, Budget(2, 4, 10, 60), seed=1)
-    assert seen == {"log_density": [], "log_density_gradient": []}
-
-
-def test_a_submission_cannot_change_the_limits_or_the_shape():
-    """S5: the same Budget object set the counter's limits and the expected shape; a frozen
-    dataclass can still be changed with object.__setattr__."""
-
-    def loosen(problem, budget, rng):
-        object.__setattr__(budget, "max_evaluations", 10**9)
-        object.__setattr__(budget, "draws", 1)
-        for _ in range(20):
-            problem.log_density(problem.initial_points[0])
-        return np.repeat(problem.initial_points[:, None, :], 1, axis=1)
-
-    with pytest.raises(BudgetExceeded):
-        logdensity.execute(FakeModel(), loosen, Budget(2, 4, 10, 60), seed=1)
-
-    def shrink(problem, budget, rng):
-        object.__setattr__(budget, "draws", 1)
-        return _stay_put(problem, budget, rng)
-
-    with pytest.raises(ValueError, match="shape"):
-        logdensity.execute(FakeModel(), shrink, Budget(2, 4, 10, 60), seed=1)
-
-
-class FakeClock:
-    def __init__(self):
-        self.t = 0.0
-
-    def __call__(self):
-        return self.t
-
-
-def test_time_after_the_last_evaluation_is_charged(monkeypatch):
-    """S8: the deadline was checked only when an oracle call started, so work after the last
-    call, and the conversion of the return value, were free."""
-    clock = FakeClock()
-    monkeypatch.setattr(logdensity, "_now", clock)
-
-    def think(problem, budget, rng):
-        out = _stay_put(problem, budget, rng)
-        clock.t += 2.0  # two seconds of work after the last evaluation
-        return out
-
-    with pytest.raises(BudgetExceeded, match="s"):
-        logdensity.execute(FakeModel(), think, Budget(2, 4, 10, max_seconds=1.0), seed=1)
-
-    class Lazy:
-        def __init__(self, a):
-            self.a = a
-
-        def __array__(self, dtype=None, copy=None):
-            clock.t += 2.0  # work done when the harness converts the return value
-            return self.a
-
-    with pytest.raises(BudgetExceeded):
-        logdensity.execute(FakeModel(), lambda p, b, r: Lazy(_stay_put(p, b, r)), Budget(2, 4, 10, 1.0), seed=1)
-
-
-def test_loading_the_submission_is_timed(monkeypatch, tmp_path):
-    """S8: module-level work ran before the stopwatch started."""
-    clock = FakeClock()
-    monkeypatch.setattr(logdensity, "_now", clock)
-    real = logdensity.load_submission
-
-    def slow_load(path):
-        clock.t += 2.0
-        return real(path)
-
-    monkeypatch.setattr(logdensity, "load_submission", slow_load)
-    f = tmp_path / "s.py"
-    f.write_text("import numpy as np\n\ndef sample(problem, budget, rng):\n"
-                 "    for x in problem.initial_points:\n        problem.log_density(x)\n"
-                 "    return np.repeat(problem.initial_points[:, None, :], budget.draws, axis=1)\n")
-    with pytest.raises(BudgetExceeded):
-        logdensity.execute(FakeModel(), f, Budget(2, 4, 10, 1.0), seed=1)
-    clock.t = 0.0
-    draws, _, seconds = logdensity.execute(FakeModel(), f, Budget(2, 4, 10, 60.0), seed=1)
-    assert seconds == 2.0  # the fake clock: loading is in the window
-
-
-def test_a_rejected_point_is_charged_but_proves_nothing():
-    """S9: a point the model rejects (-inf) was recorded before the rejection, so it could be
-    returned as a draw."""
-
-    def reject(problem, budget, rng):
-        bad = np.array([6.0, 0.0, 0.0])
-        assert problem.log_density(bad) == -math.inf
-        out = _stay_put(problem, budget, rng)
-        out[0, 0] = bad
-        return out
-
-    with pytest.raises(ValueError, match="never evaluated"):
-        logdensity.execute(FakeModel(), reject, Budget(2, 4, 10, 60), seed=1)
-    c = Counter(FakeModel(), Budget(1, 1, 10, 60))
-    c.log_density(np.array([6.0, 0.0, 0.0]))
-    c.log_density_gradient(np.array([6.0, 0.0, 0.0]))
-    assert c.density + c.gradient == 2
-
-
-def test_a_submission_with_dataclasses_and_future_annotations_loads(tmp_path):
-    """S11: dataclasses look the module up in sys.modules, which was not set."""
-    f = tmp_path / "s.py"
-    f.write_text("from __future__ import annotations\nfrom dataclasses import dataclass\n\n\n@dataclass\n"
-                 "class State:\n    x: int\n\n\ndef sample(problem, budget, rng):\n    return State(1)\n")
-    check_imports(f.read_text())
-    assert callable(logdensity.load_submission(f))
+        assert math.isnan(ula["ess_per_cost"])

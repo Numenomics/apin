@@ -33,7 +33,7 @@ and, with tolerance TOLERANCE (in reference SDs of the function),
 tolerance is called right with probability at most ALPHA_RIGHT, however many quantities there
 are. Both tests trust s_j, so they run only when the chains look mixed: rank-normalized split
 R-hat (bulk and folded, whichever is defined) below RHAT_MAX and bulk and tail ESS at least
-MIN_ESS on every series, and no two chains near-identical (a heuristic, see _copies).
+MIN_ESS on every series. Cross-chain copying is prevented by per-chain process isolation and checked via calibration in judge().
 
 A model is right when every rep is right and the realized errors agree with the claimed
 standard errors (judge, the calibration test), wrong when any rep is wrong, unproven otherwise.
@@ -45,7 +45,6 @@ import math
 from dataclasses import asdict, dataclass, fields
 
 import numpy as np
-from scipy.spatial import cKDTree
 from scipy.special import ndtri
 from scipy.stats import chi2
 
@@ -60,9 +59,6 @@ ALPHA_CALIBRATION = 0.001  # rate at which a correct, mixed model is refused for
 RHAT_MAX = 1.01
 MIN_ESS = 400
 EXACT = 1e-6  # agreement asked of a quantity whose reference value is exact
-COPY_DISTANCE = 1e-6  # in reference SDs, max norm
-COPY_FRACTION = 0.01
-COPY_SERIES = 20
 SPLIT_Z = 5.0  # in MCSEs of the more confident half: the reference's halves disagree beyond this
 
 
@@ -197,9 +193,6 @@ def check(draws: dict[str, np.ndarray], ref: Reference, reps: int = 1, tolerance
     if np.isnan(esses).any() or ess_min < MIN_ESS:
         i = int(np.argmax(np.isnan(esses))) if np.isnan(esses).any() else int(np.nanargmin(esses))
         return Verdict("unproven", "ess", ref.series[i], **{**base, "ess": float(esses[i])})
-    pair = _copies(s, ref)
-    if pair:
-        return Verdict("unproven", "near-identical chains (heuristic)", f"chains {pair[0]} and {pair[1]}", **base)
 
     absval = np.abs(np.where(checked, err, 0.0))
     # a quantity the reference's halves disagree on can keep the run from right, not make it wrong
@@ -216,25 +209,6 @@ def check(draws: dict[str, np.ndarray], ref: Reference, reps: int = 1, tolerance
     reason = "" if status == "right" else "disputed" if split[i, j] else "unproven"
     return Verdict(status, reason, ref.series[i], FUNCTIONS[j],
                    float(err[i, j]), float(upper[i, j]), **base)
-
-
-def _copies(s: np.ndarray, ref: Reference) -> tuple[int, int] | None:
-    """A heuristic for chains that are copies of each other, perturbed or reordered (S6).
-
-    Two chains are flagged when more than COPY_FRACTION of the draws of one have a draw of the
-    other within COPY_DISTANCE reference SDs in every one of the first COPY_SERIES standardised
-    variables and lp__. Independent chains of a continuous posterior essentially never come that
-    close; a copy shifted by more than COPY_DISTANCE escapes this check and is left to the
-    calibration test in judge(). It is a heuristic, not a proof."""
-    pick = list(range(min(COPY_SERIES, len(ref.names)))) + ([len(ref.series) - 1] if ref.has_lp else [])
-    pts = np.transpose(s[pick], (2, 1, 0))  # (chains, draws, k)
-    trees = [cKDTree(p) for p in pts]
-    for a in range(len(pts)):
-        for b in range(a + 1, len(pts)):
-            d, _ = trees[b].query(pts[a], k=1, p=math.inf, distance_upper_bound=COPY_DISTANCE)
-            if np.isfinite(d).mean() > COPY_FRACTION:
-                return a, b
-    return None
 
 
 def judge(verdicts: list[Verdict | None], ref: Reference, reps: int) -> ModelVerdict:

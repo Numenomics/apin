@@ -17,6 +17,7 @@ source = { editable = "." }
 dependencies = [
     { name = "bridgestan" },
     { name = "numpy" },
+    { name = "pyyaml" },
     { name = "scipy" },
 ]
 
@@ -35,6 +36,7 @@ requires-dist = [
     { name = "bridgestan", specifier = "==2.9.0" },
     { name = "numpy", specifier = "==2.5.5" },
     { name = "nutpie", marker = "extra == 'nutpie'", specifier = "==0.16.11" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "scipy", specifier = "==1.18.1" },
 ]
 provides-extras = ["nutpie"]
