@@ -17,6 +17,12 @@ KEPT_DECISIONS = {"keep", "keep_baseline", "keep_simpler"}
 # Explicit mapping from real-Stan score CSV labels to (lane, run_id, target_selector)
 # target_selector is either "final_kept" or "baseline".
 SCORE_LABEL_TARGETS: dict[str, tuple[str, str, str]] = {
+    "a0_glm53_dual": ("A0", "glm53_a0_dual_1h", "final_kept"),
+    "a1_glm53_dual": ("A1", "glm53_a1_dual_1h", "final_kept"),
+    "a2_glm53_dual": ("A2", "glm53_a2_dual_1h", "final_kept"),
+    "a3_glm53_symp": ("A3", "glm53_a3_symp_1h", "final_kept"),
+    "a4_glm53_dual": ("A4", "glm53_a4_dual_1h", "final_kept"),
+    "a3_glm53_pdmp_1h": ("A3", "glm53_pdmp_1h", "T0003"),
     "a0_glm53_groundup_1h": ("A0", "glm53_a0_groundup_1h", "final_kept"),
     "a1_glm53_1h": ("A1", "glm53_a1_1h", "final_kept"),
     "a2_muse13_1h": ("A2", "muse13_a2_1h", "final_kept"),
@@ -27,6 +33,7 @@ SCORE_LABEL_TARGETS: dict[str, tuple[str, str, str]] = {
 }
 
 SCORE_CSV_PATHS = (
+    Path("scores/dual_5lane_L1/per_model.csv"),
     Path("scores/multilane_1h_all/per_model.csv"),
     Path("scores/a1_real_with_glm53/per_model.csv"),
 )

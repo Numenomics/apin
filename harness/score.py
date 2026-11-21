@@ -479,10 +479,13 @@ def table(ranking: list[dict], models: list[dict], baseline: str | None, names: 
             f"| {r['rank']} | {r['label']} | {r['right']} of {r['of']} | {_speed(r, 'speed_cost')} | "
             f"{_speed(r, 'speed_eval')} | {_speed(r, 'speed_s')} | {oh} | {r['note']} |"
         )
+    tie_desc = (
+        "relative wall-clock ESS per second" if track == "L2"
+        else "relative ESS per cost unit (cost = n_density + r_m * n_gradient, calibrated per model via BridgeStan)"
+    )
     lines += [
         "",
-        f"Ranked by models passing the 0.1-SD bench gate, then by relative ESS per cost unit "
-        f"(cost = n_density + r_m * n_gradient, calibrated per model via BridgeStan) against "
+        f"Ranked by models passing the 0.1-SD bench gate, then by {tie_desc} against "
         f"{baseline or 'the baseline'} on models where both passed the gate. Passing the gate means "
         f"no checked functional exceeded 0.1 reference SDs at this budget; it is not a proof of exactness.",
         "",
