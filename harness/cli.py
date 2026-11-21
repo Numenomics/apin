@@ -140,7 +140,8 @@ def main(argv: list[str] | None = None) -> int:
     ae.add_argument("--codex-ref", action="append", default=[])
     ae.add_argument("--run-id", default="default")
     ae.add_argument("--seed", type=int)
-    ae.add_argument("--dim", type=int, default=6)
+    ae.add_argument("--dim", type=int, help="single-dimension override (e.g. --dim 16)")
+    ae.add_argument("--dims", default="6,20", help="comma-separated Tier 1 dimension ladder (default: 6,20)")
     ae.add_argument("--repeats", type=int, default=2, help="paired Tier 1 suites per trial (default: 2)")
     ae.add_argument("--horizon-steps", type=int, default=500,
                     help="sampling horizon for amortizing adapt_cost in Tier 1 (default: 500)")
@@ -219,9 +220,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"record valid: {meta['entry_id']} ({meta['track']}, {meta['license']})")
         return 0
     if a.cmd == "autoresearch":
+        dims_tuple = (a.dim,) if a.dim is not None else tuple(int(x.strip()) for x in a.dims.split(",") if x.strip())
         row = autoresearch.evaluate_lane_trial(
             a.lane, a.hypothesis, codex_refs=a.codex_ref, seed=a.seed,
-            dim=a.dim, repeats=a.repeats, horizon_steps=a.horizon_steps,
+            dim=dims_tuple[0], dims=dims_tuple, repeats=a.repeats, horizon_steps=a.horizon_steps,
             run_id=a.run_id, allow_duplicate=a.allow_duplicate,
             submission_path=a.submission, dry_run=a.dry_run, use_queue=not a.no_queue,
         )
@@ -233,8 +235,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{row['trial_id']} [{row['lane']}] decision={row['decision']} "
               f"tier0={row['tier0_ok']} tier1={row['tier1_ok']} "
               f"soft_min={row.get('soft_min_eff')} ratio={row.get('ratio_vs_incumbent')} "
-              f"dim={row.get('dim')} repeats={row.get('repeats')} "
+              f"dims={','.join(str(x) for x in (row.get('dims') or []))} repeats={row.get('repeats')} "
               f"qwait={row.get('queue_wait_s')}s wall={row['wall_s']}s")
+        # pi-autoresearch / external-harness compatible METRIC lines
+        for mkey, rkey in (
+            ("soft_min_eff", "soft_min_eff"),
+            ("ratio_vs_incumbent", "ratio_vs_incumbent"),
+            ("short_horizon_soft_min", "short_horizon_soft_min"),
+            ("long_horizon_soft_min", "long_horizon_soft_min"),
+            ("median_adapt_cost", "median_adapt_cost"),
+            ("overhead_ratio", "overhead_ratio"),
+            ("b2_max", "b2_max"),
+        ):
+            val = row.get(rkey)
+            if val is not None:
+                print(f"METRIC {mkey}={val}")
         return 0 if row["tier0_ok"] else 1
     return 2
 

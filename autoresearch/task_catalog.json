@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "updated": "2026-11-21",
+  "tasks": [
+    {
+      "id": "a3-pdmp-blackbox",
+      "lane": "A3",
+      "priority": 10,
+      "title": "Black-box non-reversible PDMP (Boomerang / Zig-Zag / BPS) with exact invariance",
+      "codex_refs": ["pdmp-boomerang-zigzag"],
+      "goal": "Implement and benchmark a black-box PDMP (Boomerang elliptical flow around a learned Gaussian reference or automatic-thinning / Metropolis-adjusted Zig-Zag/BPS) using declared aux_spec, passing Tier 0/1 global-balance invariance at dims=(6,20) and real Stan posteriors.",
+      "bottlenecks": ["black-box thinning bounds", "refreshment rate vs reducibility", "cost per effective sample vs HMC"],
+      "starting_file": "autoresearch/lanes/A3/submission.py"
+    },
+    {
+      "id": "a2-funnel-neck-survival",
+      "lane": "A2",
+      "priority": 10,
+      "title": "Crack eight_schools_centered & pilots funnels without harming Gaussian ESS/cost",
+      "codex_refs": ["walnuts-drghmc"],
+      "goal": "Evolve multiscale transition dynamics (reversible WALNUTS micro-step halving, DRGHMC, or adaptive-refresh GHMC+Barker) that pass eight_schools_centered (R-hat < 1.01, zero bias) while keeping >= 0.9x a1_diag ESS/cost on blr/gp_regr/garch11.",
+      "bottlenecks": ["eight_schools_centered R-hat 1.014 -> < 1.01", "avoiding Barker cost drag on easy Gaussians"],
+      "starting_file": "autoresearch/lanes/A2/submission.py"
+    },
+    {
+      "id": "a1-heavy-tail-robust-fisher",
+      "lane": "A1",
+      "priority": 9,
+      "title": "Unify Fisher low-rank preconditioning with heavy-tail MAD/score robustness & fast warmup",
+      "codex_refs": ["fisher-low-rank"],
+      "goal": "Combine robust diagonal scaling (MAD / Fisher score-variance) with low-rank correlation adaptation that beats a1_diag on all 4 passing Stan models AND improves dim=20 StudentT(nu=1.5) and banana without triggering funnel bias on eight_schools_centered.",
+      "bottlenecks": ["StudentT(nu=1.5) infinite variance", "banana curvature false low-rank", "Pathfinder/L-BFGS warmup seeding"],
+      "starting_file": "autoresearch/lanes/A1/submission.py"
+    },
+    {
+      "id": "a3-higher-order-symplectic-ghmc",
+      "lane": "A3",
+      "priority": 8,
+      "title": "Higher-order symplectic splitting + persistent-momentum GHMC / dynamic trajectory (MAMS/ChEES)",
+      "codex_refs": ["mams-microcanonical"],
+      "goal": "Test McLachlan/BCSS splitting, persistent-momentum GHMC, MAMS (unit_sphere aux_spec), and ChEES/NUTS-style trajectory adaptation across dims=(6,20) and 5 public Stan models.",
+      "bottlenecks": ["2-stage gradient overhead vs step-size gain", "momentum persistence tuning", "high-dim scaling"],
+      "starting_file": "autoresearch/lanes/A3/submission.py"
+    },
+    {
+      "id": "a0-ground-up-no-priors",
+      "lane": "A0",
+      "priority": 7,
+      "title": "Ground-up MCMC sampler from scratch (no priors) passing >= 4/5 public Stan models",
+      "codex_refs": [],
+      "goal": "Starting from the 43-line isotropic RWM stub in Lane A0, evolve a gradient-capable sampler from first principles that beats diagonal HMC across dims=(6,20) and passes >= 4/5 public Stan posteriors.",
+      "bottlenecks": ["scaling past d=6 where RWM collapses", "exact aux_spec invariance", "real Stan R-hat convergence"],
+      "starting_file": "autoresearch/lanes/A0/submission.py"
+    }
+  ]
+}

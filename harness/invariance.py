@@ -238,6 +238,9 @@ class InvarianceResult:
     dispersed_ess_min: float = 0.0
     adapt_cost_amortized: float = 0.0
     horizon_steps: int = 500
+    short_horizon_eff: float = 0.0   # H_short = 150 (rewards genuinely fast warmup)
+    long_horizon_eff: float = 0.0    # H_long = 1000 (rewards steady-state sampling)
+    dual_horizon_eff: float = 0.0    # geom mean of short & long horizon efficiencies
 
 
 def _omnibus_threshold(n_funcs: int, alpha: float) -> float:
@@ -342,6 +345,39 @@ def calibrated_omnibus_threshold(
     return thresh
 
 
+_RANK_THRESH_CACHE: dict[tuple[int, int, int, float], float] = {}
+
+
+def _calibrated_rank_threshold(n_chains: int, n_ranks: int, n_checks: int, alpha: float,
+                               *, n_null: int = 4000) -> float:
+    """Finite-sample calibrated max-|z| cutoff for discrete-uniform Gandy-Scott rank tests."""
+    key = (int(n_chains), int(n_ranks), int(n_checks), round(float(alpha), 8))
+    cached = _RANK_THRESH_CACHE.get(key)
+    if cached is not None:
+        return cached
+    m_bins = n_ranks + 1
+    var_u = (m_bins * m_bins - 1.0) / (12.0 * m_bins * m_bins)
+    sd_mean_u = math.sqrt(var_u / n_chains)
+    grid = (np.arange(m_bins) + 0.5) / m_bins
+    abs_dev = np.abs(grid - 0.5)
+    mu_abs = float(np.mean(abs_dev))
+    sd_abs = math.sqrt(float(np.var(abs_dev)) / n_chains)
+
+    seed_bytes = hashlib.sha256(repr(("rank_null", key)).encode("utf-8")).digest()
+    rng = np.random.default_rng(int.from_bytes(seed_bytes[:8], "little"))
+    n_pairs = max(1, (n_checks + 1) // 2)
+    max_z = np.zeros(n_null, dtype=float)
+    for _ in range(n_pairs):
+        u = (rng.integers(0, m_bins, size=(n_null, n_chains)) + 0.5) / m_bins
+        z_loc = np.abs(np.mean(u, axis=1) - 0.5) / sd_mean_u
+        z_spr = np.abs(np.mean(np.abs(u - 0.5), axis=1) - mu_abs) / sd_abs
+        max_z = np.maximum(max_z, np.maximum(z_loc, z_spr))
+    emp = float(np.quantile(max_z, 1.0 - alpha))
+    thresh = max(_omnibus_threshold(n_checks, alpha), emp)
+    _RANK_THRESH_CACHE[key] = thresh
+    return thresh
+
+
 def _gandy_scott_rank_check(
     target: AnalyticTarget,
     final_pos: np.ndarray,
@@ -416,7 +452,7 @@ def _gandy_scott_rank_check(
 
     if not checks:
         return True, ""
-    thresh = _omnibus_threshold(len(checks), alpha)
+    thresh = _calibrated_rank_threshold(n_chains, n_ranks, len(checks), alpha)
     worst_name, worst_z = max(checks, key=lambda kv: kv[1])
     if worst_z > thresh:
         return False, f"rank test rejected on {worst_name}: |z|={worst_z:.2f} > {thresh:.2f}"
@@ -691,12 +727,18 @@ def check_target_invariance(
     disp_trans_cost = _counter_cost(disp_counter, r_grad)
     cost_total = adapt_cost + inv_trans_cost + disp_trans_cost
     adapt_amort = adapt_cost * (float(k_steps) / float(horizon_steps)) if horizon_steps > 0 else adapt_cost
-    cost_per_chain = max(1.0, adapt_amort + (disp_trans_cost / max(1, n_disp)))
+    disp_trans_per_chain = disp_trans_cost / max(1, n_disp)
+    cost_per_chain = max(1.0, adapt_amort + disp_trans_per_chain)
+    cost_short = max(1.0, adapt_cost * (float(k_steps) / 150.0) + disp_trans_per_chain)
+    cost_long = max(1.0, adapt_cost * (float(k_steps) / 1000.0) + disp_trans_per_chain)
     max_adapt_cost = max(200_000.0, float(adapt_draws) * 1024.0 * max(1.0, r_grad))
     adapt_cap_ok = adapt_cost <= max_adapt_cost
 
     disp_ess_min = float(min(ess_effs)) if ess_effs else 0.0
     emp_eff = disp_ess_min / cost_per_chain
+    short_eff = disp_ess_min / cost_short
+    long_eff = disp_ess_min / cost_long
+    dual_eff = math.sqrt(max(short_eff, 0.0) * max(long_eff, 0.0))
 
     total_elapsed = adapt_elapsed + trans_elapsed
     total_eval_s = adapt_counter.eval_s + inv_counter.eval_s + disp_counter.eval_s
@@ -735,6 +777,9 @@ def check_target_invariance(
         dispersed_ess_min=disp_ess_min,
         adapt_cost_amortized=adapt_amort,
         horizon_steps=int(horizon_steps),
+        short_horizon_eff=short_eff,
+        long_horizon_eff=long_eff,
+        dual_horizon_eff=dual_eff,
     )
 
 

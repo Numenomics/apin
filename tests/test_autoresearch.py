@@ -175,3 +175,26 @@ def test_horizon_amortization_and_simplicity_and_queue(tmp_path, monkeypatch):
     assert events[1][0].endswith(":exit") and events[2][0].endswith(":enter")
     assert events[2][1] >= events[1][1] - 1e-4
 
+
+def test_aux_spec_ndarray_json_and_dual_horizon_and_dim_ladder():
+    """Verify aux_spec ndarray JSON coercion, dual-horizon metrics, calibrated rank cutoff, and dims=(6,20)."""
+    import numpy as np
+    from harness import logdensity
+
+    spec = logdensity.normalize_aux_spec({"kind": "normal", "diag": np.array([1.0, 2.0, 3.0])})
+    assert spec["diag"] == [1.0, 2.0, 3.0]
+    assert json.dumps(spec)  # must be JSON-serializable without TypeError
+
+    suite = autoresearch._build_tier1_suite(6, seed=11, dims=(6, 20))
+    assert len(suite) == 13  # 8 targets at d=6 + 5 targets at d=20
+    assert any(t.dim == 20 for t in suite) and any(t.dim == 6 for t in suite)
+
+    tgt = shapes.IllCondGaussian(4, seed=9, rotated=True, kappa=10.0)
+    r = invariance.check_target_invariance(
+        tgt, A1_SUB, seed=9, n_chains=24, k_steps=10, adapt_draws=40, lane="A1", isolated=False,
+    )
+    assert r.short_horizon_eff > 0.0 and r.long_horizon_eff > 0.0 and r.dual_horizon_eff > 0.0
+    assert r.long_horizon_eff >= r.short_horizon_eff  # larger horizon dilutes adapt_cost more
+    assert abs(r.dual_horizon_eff - (r.short_horizon_eff * r.long_horizon_eff) ** 0.5) < 1e-12
+
+

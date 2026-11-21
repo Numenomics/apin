@@ -72,8 +72,9 @@ def _write_results_tsv(ledger_path: Path, tsv_path: Path) -> None:
     rows = _load_ledger(ledger_path)
     cols = [
         "trial_id", "timestamp", "candidate_sha", "loc", "magic_constants",
-        "dim", "seed", "repeats", "k_steps", "adapt_draws", "horizon_steps",
+        "dim", "dims", "seed", "repeats", "k_steps", "adapt_draws", "horizon_steps",
         "tier0_ok", "tier1_ok", "soft_min_eff", "incumbent_soft_min", "ratio_vs_incumbent",
+        "short_horizon_soft_min", "long_horizon_soft_min", "median_adapt_cost",
         "b2_max", "overhead_ratio", "queue_wait_s", "decision", "archive_cells",
         "codex_refs", "hypothesis",
     ]
@@ -83,6 +84,7 @@ def _write_results_tsv(ledger_path: Path, tsv_path: Path) -> None:
         for r in rows:
             flat = {
                 **r,
+                "dims": ",".join(str(x) for x in (r.get("dims") or [])),
                 "archive_cells": ",".join(r.get("archive_cells") or []),
                 "codex_refs": ",".join(r.get("codex_refs") or []),
             }
@@ -130,7 +132,7 @@ def _eval_tier0(
     for tgt in smoke_targets:
         res = invariance.check_target_invariance(
             tgt, sub_path, seed=seed + 23, n_chains=48, k_steps=12, adapt_draws=80,
-            alpha=0.001, lane=lane, isolated=True, horizon_steps=horizon_steps,
+            alpha=0.0005, lane=lane, isolated=True, horizon_steps=horizon_steps,
         )
         checks.append({
             "target": tgt.family, "passed": res.passed, "max_z": round(res.max_z, 3),
@@ -144,18 +146,30 @@ def _eval_tier0(
     return True, {"stage": "passed", "tuning_bytes": summary["adapt"]["tuning_bytes"], "checks": checks}
 
 
-def _build_tier1_suite(dim: int, seed: int) -> list[shapes.AnalyticTarget]:
-    """Fresh aligned + rotated Tier 1 suite covering all non-multimodal shape classes."""
-    return [
-        shapes.IllCondGaussian(dim, seed + 1, rotated=False, kappa=50.0),
-        shapes.IllCondGaussian(dim, seed + 2, rotated=True, kappa=50.0),
-        shapes.NealsFunnel(dim, seed + 3, rotated=True, v_sd=2.0),
-        shapes.Banana(dim, seed + 4, rotated=True),
-        shapes.HybridRosenbrock(dim, seed + 5, rotated=False, b=5.0),
-        shapes.StudentT(dim, seed + 6, rotated=False, nu=1.5),
-        shapes.StudentT(dim, seed + 7, rotated=True, nu=3.0),
-        shapes.GaussianMixture(dim, seed + 8, rotated=True, separation=2.5),
+def _build_tier1_suite(dim: int, seed: int, dims: tuple[int, ...] | None = None) -> list[shapes.AnalyticTarget]:
+    """Fresh aligned + rotated Tier 1 suite, optionally with a higher-dim scaling ladder."""
+    ladder = tuple(dims) if dims else (int(dim),)
+    d0 = ladder[0]
+    targets: list[shapes.AnalyticTarget] = [
+        shapes.IllCondGaussian(d0, seed + 1, rotated=False, kappa=50.0),
+        shapes.IllCondGaussian(d0, seed + 2, rotated=True, kappa=50.0),
+        shapes.NealsFunnel(d0, seed + 3, rotated=True, v_sd=2.0),
+        shapes.Banana(d0, seed + 4, rotated=True),
+        shapes.HybridRosenbrock(d0, seed + 5, rotated=False, b=5.0),
+        shapes.StudentT(d0, seed + 6, rotated=False, nu=1.5),
+        shapes.StudentT(d0, seed + 7, rotated=True, nu=3.0),
+        shapes.GaussianMixture(d0, seed + 8, rotated=True, separation=2.5),
     ]
+    for idx, d_hi in enumerate(ladder[1:], start=1):
+        off = 20 * idx
+        targets.extend([
+            shapes.IllCondGaussian(d_hi, seed + off + 1, rotated=True, kappa=50.0),
+            shapes.NealsFunnel(d_hi, seed + off + 2, rotated=True, v_sd=2.0),
+            shapes.Banana(d_hi, seed + off + 3, rotated=True),
+            shapes.HybridRosenbrock(d_hi, seed + off + 4, rotated=False, b=5.0),
+            shapes.StudentT(d_hi, seed + off + 5, rotated=True, nu=3.0),
+        ])
+    return targets
 
 
 def _eval_tier1_suite(
@@ -172,17 +186,24 @@ def _eval_tier1_suite(
     """Evaluate a submission across a fresh aligned + rotated analytic suite via isolated workers."""
     per_target = []
     by_class: dict[str, list[float]] = {}
+    by_class_short: dict[str, list[float]] = {}
+    by_class_long: dict[str, list[float]] = {}
     all_ok = True
     b2_worst = 0.0
     oh_vals = []
+    adapt_vals = []
     for i, tgt in enumerate(suite):
         res = invariance.check_target_invariance(
             tgt, sub_path, seed=seed + 100 * i, n_chains=n_chains, k_steps=k_steps,
             adapt_draws=adapt_draws, lane=lane, isolated=True, horizon_steps=horizon_steps,
         )
+        # Dual-horizon geometric mean (H_short=150 & H_long=1000) rewards genuine fast warmup
+        # without letting warmup starvation hijack steady-state sampling quality.
+        eff_val = res.dual_horizon_eff if res.dual_horizon_eff > 0 else res.empirical_efficiency
         per_target.append({
-            "family": tgt.family, "rotated": tgt.rotated, "passed": res.passed,
-            "emp_eff": res.empirical_efficiency, "b2_max": res.b2_max,
+            "family": tgt.family, "dim": tgt.dim, "rotated": tgt.rotated, "passed": res.passed,
+            "emp_eff": eff_val, "short_horizon_eff": res.short_horizon_eff,
+            "long_horizon_eff": res.long_horizon_eff, "b2_max": res.b2_max,
             "max_z": res.max_z, "z_threshold": res.z_threshold,
             "adapt_cost": res.adapt_cost, "adapt_cost_amortized": res.adapt_cost_amortized,
             "cost_per_chain": res.cost_per_chain, "overhead_ratio": res.overhead_ratio,
@@ -192,17 +213,31 @@ def _eval_tier1_suite(
             all_ok = False
         b2_worst = max(b2_worst, res.b2_max)
         oh_vals.append(res.overhead_ratio)
+        adapt_vals.append(res.adapt_cost)
         if not tgt.multimodal:
-            by_class.setdefault(tgt.family, []).append(res.empirical_efficiency)
+            by_class.setdefault(tgt.family, []).append(eff_val)
+            by_class_short.setdefault(tgt.family, []).append(res.short_horizon_eff)
+            by_class_long.setdefault(tgt.family, []).append(res.long_horizon_eff)
 
     class_geo = {
         c: float(np.exp(np.mean(np.log(np.maximum(vs, 1e-18))))) for c, vs in by_class.items()
     }
+    class_short = {
+        c: float(np.exp(np.mean(np.log(np.maximum(vs, 1e-18))))) for c, vs in by_class_short.items()
+    }
+    class_long = {
+        c: float(np.exp(np.mean(np.log(np.maximum(vs, 1e-18))))) for c, vs in by_class_long.items()
+    }
     soft_min = invariance.soft_min_power_mean(list(class_geo.values()), p=-4.0) if all_ok else 0.0
+    short_sm = invariance.soft_min_power_mean(list(class_short.values()), p=-4.0) if all_ok else 0.0
+    long_sm = invariance.soft_min_power_mean(list(class_long.values()), p=-4.0) if all_ok else 0.0
     geomean = float(np.exp(np.mean(np.log(np.maximum(list(class_geo.values()), 1e-18))))) if class_geo else 0.0
     return {
         "passed": all_ok,
         "soft_min_eff": soft_min,
+        "short_horizon_soft_min": short_sm,
+        "long_horizon_soft_min": long_sm,
+        "median_adapt_cost": float(np.median(adapt_vals)) if adapt_vals else 0.0,
         "geomean_eff": geomean,
         "b2_max": b2_worst,
         "overhead_ratio": float(np.median(oh_vals)) if oh_vals else 0.0,
@@ -245,10 +280,21 @@ def _eval_tier1_multi(
         float(np.exp(np.mean(np.log(np.maximum([r["soft_min_eff"] for r in runs], 1e-18)))))
         if all_ok else 0.0
     )
+    short_sm = (
+        float(np.exp(np.mean(np.log(np.maximum([r["short_horizon_soft_min"] for r in runs], 1e-18)))))
+        if all_ok else 0.0
+    )
+    long_sm = (
+        float(np.exp(np.mean(np.log(np.maximum([r["long_horizon_soft_min"] for r in runs], 1e-18)))))
+        if all_ok else 0.0
+    )
     geomean = float(np.exp(np.mean(np.log(np.maximum(list(by_class.values()), 1e-18))))) if by_class else 0.0
     return {
         "passed": all_ok,
         "soft_min_eff": soft_min,
+        "short_horizon_soft_min": short_sm,
+        "long_horizon_soft_min": long_sm,
+        "median_adapt_cost": float(np.median([r["median_adapt_cost"] for r in runs])),
         "geomean_eff": geomean,
         "b2_max": max(r["b2_max"] for r in runs),
         "overhead_ratio": float(np.median([r["overhead_ratio"] for r in runs])),
@@ -281,7 +327,7 @@ def _eval_class_paired_multi(
             )
             if not res.passed:
                 return False, 0.0
-            vals.append(res.empirical_efficiency)
+            vals.append(res.dual_horizon_eff if res.dual_horizon_eff > 0 else res.empirical_efficiency)
     if not vals:
         return False, 0.0
     return True, float(np.exp(np.mean(np.log(np.maximum(vals, 1e-18)))))
@@ -314,6 +360,7 @@ def evaluate_lane_trial(
     codex_refs: list[str] | None = None,
     seed: int | None = None,
     dim: int = 6,
+    dims: tuple[int, ...] | None = None,
     n_chains: int = 48,
     k_steps: int = 16,
     adapt_draws: int = 100,
@@ -358,6 +405,7 @@ def evaluate_lane_trial(
         snap_path.write_text(raw_text)
         cand_sha, cand_ast_sha, cand_loc, cand_consts = _submission_stats(snap_path)
 
+    dim_ladder = tuple(int(x) for x in dims) if dims else (int(dim),)
     base_meta = {
         "trial_id": trial_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -367,7 +415,8 @@ def evaluate_lane_trial(
         "loc": cand_loc,
         "magic_constants": cand_consts,
         "judge_digest": _judge_digest(),
-        "dim": int(dim),
+        "dim": dim_ladder[0],
+        "dims": list(dim_ladder),
         "seed": seed,
         "repeats": repeats,
         "k_steps": int(k_steps),
@@ -429,7 +478,7 @@ def evaluate_lane_trial(
             return _append_row(ledger_path, tsv_path, row)
 
         # Tier 1: paired fresh suites for candidate AND incumbent on identical fresh seeds
-        suites = [(seed + r * 7919, _build_tier1_suite(dim, seed + r * 7919)) for r in range(repeats)]
+        suites = [(seed + r * 7919, _build_tier1_suite(dim_ladder[0], seed + r * 7919, dims=dim_ladder)) for r in range(repeats)]
         try:
             cand_res = _eval_tier1_multi(
                 snap_path, suites, n_chains=n_chains, k_steps=k_steps,
@@ -522,6 +571,9 @@ def evaluate_lane_trial(
         "tier1_ok": cand_res["passed"],
         "soft_min_eff": round(cand_res["soft_min_eff"], 6),
         "incumbent_soft_min": round(inc_res["soft_min_eff"], 6) if inc_res else round(cand_res["soft_min_eff"], 6),
+        "short_horizon_soft_min": round(cand_res.get("short_horizon_soft_min", 0.0), 6),
+        "long_horizon_soft_min": round(cand_res.get("long_horizon_soft_min", 0.0), 6),
+        "median_adapt_cost": round(cand_res.get("median_adapt_cost", 0.0), 1),
         "ratio_vs_incumbent": round(ratio, 4) if math.isfinite(ratio) else None,
         "b2_max": round(cand_res["b2_max"], 5),
         "overhead_ratio": round(cand_res["overhead_ratio"], 3),

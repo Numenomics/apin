@@ -425,8 +425,20 @@ def validate_betas(betas: Any, walkers: int) -> np.ndarray:
     return arr
 
 
+def _to_json_plain(obj: Any) -> Any:
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, dict):
+        return {k: _to_json_plain(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_json_plain(v) for v in obj]
+    return obj
+
+
 def normalize_aux_spec(spec: Any) -> dict:
-    """Normalize shorthand aux_spec ('none') to canonical dict and validate vocabulary."""
+    """Normalize shorthand aux_spec ('none') to JSON-plain canonical dict and validate vocabulary."""
     if spec is None or spec == "none":
         return {"kind": "none"}
     if not isinstance(spec, dict) or "kind" not in spec:
@@ -434,9 +446,10 @@ def normalize_aux_spec(spec: Any) -> dict:
     kind = spec["kind"]
     if kind not in ALLOWED_AUX_KINDS:
         raise ContractError(f"unknown aux_spec kind {kind!r}; allowed: {', '.join(ALLOWED_AUX_KINDS)}")
-    # Ensure spec itself is canonical
-    canonical_digest(spec)
-    return spec
+    plain = _to_json_plain(spec)
+    # Ensure spec itself is canonical and JSON-serializable
+    canonical_digest(plain)
+    return plain
 
 
 def validate_aux_spec(aux_spec: dict, dim: int) -> None:

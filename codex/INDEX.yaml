@@ -219,6 +219,16 @@ repositories:
     axes: [1, 7]
     role: Composable transform algebra + L-BFGS zoom line search (Muon excluded)
 
+  - id: zigzag-boomerang-jl
+    tier: 2
+    url: https://github.com/mschauer/ZigZagBoomerang.jl
+    license: MIT
+    reuse_policy: direct_port_with_attribution
+    checkout: .codex_cache/ZigZagBoomerang.jl
+    commit: 691afe2200fa99d762b58f5c5fd7894cc9342294
+    axes: [3, 4]
+    role: Non-reversible PDMP MCMC (Boomerang, Zig-Zag, Bouncy Particle Sampler, Sticky PDMPs)
+
   # --- Tier 3: License-Quarantined (NEVER clone) ---
   - id: pigeons-jl
     tier: 3
@@ -401,3 +411,28 @@ cards:
     reuse_policy: clean_room_from_paper
     evidence: [Syed2022_NRPT]
     test_ids: [tier2_tempered_mixture_invariance, tier2_multimodal_column]
+
+  - id: pdmp-boomerang-zigzag
+    card: cards/pdmp-boomerang-zigzag.md
+    axis: 3
+    lanes: [A3, A2, A0]
+    phase: both
+    requires: [grad]
+    state_schema:
+      tuning: [ref_mean, ref_scale_or_cov, horizon_t, refresh_rate, thinning_margin]
+      aux_spec: normal_or_rademacher_or_unit_sphere
+    invariance_obligations:
+      kernel_class: nonreversible_lifted
+      must_freeze_after_adapt: true
+      key_risk: Violated Poisson thinning upper bound causes silent bias; exactness requires either provable/adaptive thinning or discrete-time Metropolis adjustment on the joint (x, v) law
+    cost:
+      extra_evals_per_step: variable_per_horizon
+      overhead_order: O(d)
+    incompatible_with: [gandy_scott_reversibility_test]
+    source:
+      repo: zigzag-boomerang-jl
+      path: src/boomerang.jl
+      symbol: pdmp_inner
+    reuse_policy: direct_port_with_attribution
+    evidence: [Bierkens2020_Boomerang, Corbella2022_AutoZigZag]
+    test_ids: [tier0_joint_stationarity, tier1_high_dim_ladder]
