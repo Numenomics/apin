@@ -27,33 +27,51 @@ def _nutpie():
 class Adapter(Sampler):
     name = "nutpie"
 
+    def __init__(self, settings):
+        super().__init__(settings)
+        self._compiled_cache: dict[str, object] = {}
+
     def check(self) -> None:
         _nutpie()
 
     def describe(self) -> dict:
-        return {"nutpie": _nutpie().__version__}
+        return {"nutpie": _nutpie().__version__, "adaptation": self.opt("adaptation", "diag")}
 
     def run(self, req: RunRequest) -> Timing:
         nutpie = _nutpie()
+        adaptation = self.opt("adaptation", "diag")
+        stan_key = str(req.model.stan_file.resolve())
+        base_compiled = self._compiled_cache.get(stan_key)
+        if base_compiled is None:
+            base_compiled = nutpie.compile_stan_model(filename=stan_key)
+            self._compiled_cache[stan_key] = base_compiled
         data = json.loads(req.data_file.read_text())
-        compiled = nutpie.compile_stan_model(filename=str(req.model.stan_file)).with_data(**data)
+        compiled = base_compiled.with_data(**data)
         t0 = time.perf_counter()
-        res = nutpie.sample(compiled, chains=req.chains, tune=req.warmup, draws=req.draws, seed=req.seed,
-                            cores=req.chains, save_warmup=False, progress_bar=False)
+        res = nutpie.sample(
+            compiled, chains=req.chains, tune=req.warmup, draws=req.draws, seed=req.seed,
+            cores=req.chains, save_warmup=True, progress_bar=False, adaptation=adaptation,
+        )
         wall = time.perf_counter() - t0
         post, stats = res["posterior"], res["sample_stats"]
         columns, per_chain = flatten_posterior(post)
         n_steps = stats["n_steps"].values if "n_steps" in stats else None
         diverging = stats["diverging"].values if "diverging" in stats else None
+        warmup_steps = None
+        if "warmup_sample_stats" in res and "n_steps" in res["warmup_sample_stats"]:
+            warmup_steps = int(res["warmup_sample_stats"]["n_steps"].values.sum())
         for c in range(req.chains):
             cols = columns + (["n_leapfrog__"] if n_steps is not None else [])
             mat = per_chain[c] if n_steps is None else np.column_stack([per_chain[c], n_steps[c]])
             write_csv(req.out_dir / f"chain_{c}.csv", cols, mat)
-        return Timing(wall_s=wall, chain_s=[wall] * req.chains, warmup_s=[None] * req.chains,
-                      sampling_s=[None] * req.chains,
-                      grads_sampling=int(n_steps.sum()) if n_steps is not None else None, grads_warmup=None,
-                      divergences=int(diverging.sum()) if diverging is not None else None,
-                      extra={"chain_s_is_wall": True})
+        return Timing(
+            wall_s=wall, chain_s=[wall] * req.chains, warmup_s=[None] * req.chains,
+            sampling_s=[None] * req.chains,
+            grads_sampling=int(n_steps.sum()) if n_steps is not None else None,
+            grads_warmup=warmup_steps,
+            divergences=int(diverging.sum()) if diverging is not None else None,
+            extra={"chain_s_is_wall": True, "adaptation": adaptation},
+        )
 
 
 def flatten_posterior(post) -> tuple[list[str], list[np.ndarray]]:

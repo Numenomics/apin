@@ -79,6 +79,17 @@ class Adapter(Sampler):
             return ["sh", "-c", 'exec "$@" > "$0" 2>&1', str(logs[c]), *self.argv(so, req, c)]
 
         wall = cmdstan.run_chains(argv, req.chains)
+        # stan_cli omits the trailing newline on its last row; terminate cleanly when complete.
+        for c in range(req.chains):
+            csv_path = req.out_dir / f"chain_{c}.csv"
+            raw = csv_path.read_bytes()
+            if raw and not raw.endswith(b"\n"):
+                first_nl = raw.find(b"\n")
+                last_nl = raw.rfind(b"\n")
+                if first_nl > 0 and last_nl >= first_nl:
+                    n_cols = raw[:first_nl].count(b",") + 1
+                    if raw[last_nl + 1:].count(b",") + 1 == n_cols:
+                        csv_path.write_bytes(raw + b"\n")
         warm, samp, chain, gw, gs = [], [], [], 0, 0
         for log in logs:
             blocks = parse_stanzas(log.read_text())
