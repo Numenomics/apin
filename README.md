@@ -77,12 +77,20 @@ uv run apin codex validate                                # validate codex/INDEX
 uv run apin invariance --sampler examples/samplers/hmc.py # calibrated exact-draw invariance & dispersed-start mixing
 uv run apin records validate records/<release>/<track>/<slug>
 uv run apin autoresearch eval --lane A1 --run-id my_run --repeats 2 --hypothesis "..."
-uv run apin autoresearch eval --lane A1 --run-id my_run --dry-run --hypothesis "pre-check"
-# Validate a Lane A1 (`adapt_metric`) submission directly on real Stan posteriors:
+uv run apin autoresearch eval --lane A4 --run-id my_a4 --dims 6,20 --repeats 2 --hypothesis "..."
+uv run apin autoresearch eval-s1 --upstream walnutpie --allowed-path src/ --hypothesis "..." --dry-run
+uv run apin autoresearch eval-s2 --upstream math --allowed-path stan/math/rev/ --hypothesis "..." --dry-run
+uv run apin autoresearch eval-s3 --mode reference
+uv run apin track run --track L3 --sampler examples/samplers/hmc.py --dims 6,12
+uv run apin track run --track L4 --sampler examples/samplers/ula_wrong.py --dims 6
+uv run apin track run --track L5 --sampler examples/samplers/elliptical_rwm_l5.py --dims 6,12
+uv run apin score --models public --reps 3 --baseline cmdstan --track L2
+# Validate Lane A1 (`adapt_metric`) or Lane A4 (`adapt_transport`) submissions on real Stan posteriors:
 uv run apin run logdensity --label a1_cand --opt sampler=autoresearch/lanes/A1/submission.py --opt lane=A1 --models blr,gp_regr --reps 3
+uv run apin run logdensity --label a4_cand --opt sampler=autoresearch/lanes/A4/submission.py --opt lane=A4 --models blr,eight_schools_centered --reps 3
 ```
 
-Autoresearch lanes (`A0` ground-up full sampler, `A1` preconditioning/metric, `A2` multiscale/funnel dynamics, `A3` integrators/momentum/trajectories) each isolate `incumbent.py`, `archive/`, `ledger.jsonl`, and `results.tsv` per `--run-id`, snapshot `submission.py` at trial start, amortize Tier 1 `adapt_cost` to a 500-step sampling horizon (`--horizon-steps`), and serialize concurrent host evals through a built-in FIFO lock (`harness/queue.py`, bypass with `--no-queue` or `APIN_NO_QUEUE=1`). Note: OS-level container sandboxing and a private sealed holdout remain Slice 6.
+Autoresearch lanes cover all algorithmic islands (**`A0`** ground-up full sampler, **`A1`** preconditioning/metric, **`A2`** multiscale/funnel dynamics, **`A3`** integrators/momentum/trajectories/PDMPs, **`A4`** warm-start & diffeomorphic nonlinear transport with automatic finite-diff Jacobian verification) plus systems & calibration lanes (**`S1`** upstream sampler patches, **`S2`** gradient/compiler speed with finite-diff + byte-identical draw canary, **`S3`** rewind calibration & agent grading via AUARC). Benchmark tracks cover **`L1`** (cost units), **`L2`** (wall-clock `ESS/s` + machine fingerprint), **`L3`** (Haar rotation + extreme `1e-2..1e2` scale stress), **`L4`** (unadjusted kernels, segregated from L1), **`L5`** (density-only `n_gradient == 0`), and **`S2`** (pure systems). Note: OS-level container sandboxing and a private sealed holdout remain Slice 6.
 
 The first logdensity run of each model builds a BridgeStan library, one to two minutes per model.
 

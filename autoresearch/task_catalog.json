@@ -51,6 +51,46 @@
       "goal": "Starting from the 43-line isotropic RWM stub in Lane A0, evolve a gradient-capable sampler from first principles that beats diagonal HMC across dims=(6,20) and passes >= 4/5 public Stan posteriors.",
       "bottlenecks": ["scaling past d=6 where RWM collapses", "exact aux_spec invariance", "real Stan R-hat convergence"],
       "starting_file": "autoresearch/lanes/A0/submission.py"
+    },
+    {
+      "id": "a4-nonlinear-transport-warmstart",
+      "lane": "A4",
+      "priority": 10,
+      "title": "Warm-start & nonlinear diffeomorphic transport (un-funneling + sinh-arcsinh + L-BFGS)",
+      "codex_refs": ["fisher-low-rank"],
+      "goal": "Evolve a fast frozen diffeomorphic transport map T: z -> theta in Lane A4 (verified automatically by round-trip inverse and finite-diff Jacobian checks) that un-funnels NealsFunnel / eight_schools_centered and whitens rotated Gaussians across dims=(6,20).",
+      "bottlenecks": ["adapt_cost on short horizon H=150", "exact triangular funnel unwarping", "heavy-tail sinh-arcsinh stability"],
+      "starting_file": "autoresearch/lanes/A4/submission.py"
+    },
+    {
+      "id": "s1-upstream-sampler-patches",
+      "lane": "S1",
+      "priority": 7,
+      "title": "Upstream sampler patches (walnutpie / stan / nuts-rs) under allowed_paths & statistical gate",
+      "codex_refs": ["walnuts-drghmc", "fisher-low-rank"],
+      "goal": "Optimize upstream C++/Rust sampler adaptation or trajectory control on owner fork branches, passing upstream unit tests and apin statistical gate.",
+      "bottlenecks": ["walnutpie arma11 macro-time abort", "low-rank Fisher shrinkage in Stan/nutpie"],
+      "starting_file": "autoresearch/lanes/S1/program.md"
+    },
+    {
+      "id": "s2-gradient-compiler-speed",
+      "lane": "S2",
+      "priority": 8,
+      "title": "Gradient & compiler wall-clock optimization (stan-math / stanc3 / bridgestan) with byte-identical canary",
+      "codex_refs": [],
+      "goal": "Cut wall-clock per gradient evaluation in stan-math / stanc3 / bridgestan under clean-rebuild, finite-difference parity, and byte-identical draw canary (R-008 exact-math waiver).",
+      "bottlenecks": ["clean rebuild enforcement (W-27)", "Eigen reverse-mode aliasing"],
+      "starting_file": "autoresearch/lanes/S2/program.md"
+    },
+    {
+      "id": "s3-rewind-calibration-auarc",
+      "lane": "S3",
+      "priority": 6,
+      "title": "Rewind calibration & agent grading (AUARC across invariance & transport bug-fix tasks)",
+      "codex_refs": [],
+      "goal": "Grade agent models and harness configurations on reproducible rewind tasks where base fails hidden invariance/efficiency checks and reference passes.",
+      "bottlenecks": ["expanding upstream commit-pair rewind tasks", "AUARC tracking across agent models"],
+      "starting_file": "autoresearch/lanes/S3/tasks.json"
     }
   ]
 }

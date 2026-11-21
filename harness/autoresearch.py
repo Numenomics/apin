@@ -579,6 +579,7 @@ def evaluate_lane_trial(
         "overhead_ratio": round(cand_res["overhead_ratio"], 3),
         "queue_wait_s": round(queue_wait_s, 3),
         "archive_cells": archived_cells,
+        "by_class": {k: round(v, 6) for k, v in cand_res["by_class"].items()},
         "decision": decision,
         "wall_s": round(time.perf_counter() - t0, 3),
     }

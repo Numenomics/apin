@@ -7,7 +7,10 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import autoresearch, cost, grid, invariance, models, queue, records, reference, sampler, score, shapes
+from . import (
+    autoresearch, cost, grid, invariance, models, queue, records, reference,
+    rewind, sampler, score, shapes, systems_lanes, tracks,
+)
 from .models import ROOT
 
 
@@ -89,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--base-seed", type=int, default=grid.BASE_SEED)
     s.add_argument("--build", type=Path, default=ROOT / "build")
     s.add_argument("--costs", type=Path, default=cost.COSTS_PATH, help="path to frozen models/costs.json")
+    s.add_argument("--track", choices=("L1", "L2", "L5"), default="L1",
+                   help="leaderboard track: L1 (cost units), L2 (wall-clock ESS/s + host fingerprint), L5 (density-only)")
     s.add_argument("--submission", action="append", default=[], metavar="LABEL=PATH",
                    help="the submission file of a label; every rep of it must record its sha256 (repeatable)")
 
@@ -150,6 +155,44 @@ def main(argv: list[str] | None = None) -> int:
     ae.add_argument("--dry-run", action="store_true", help="lint & check duplicates without writing a ledger row")
     ae.add_argument("--no-queue", action="store_true", help="bypass the host FIFO evaluation lock")
 
+    as1 = ar_sub.add_parser("eval-s1", help="evaluate Lane S1 upstream sampler patch")
+    as1.add_argument("--upstream", required=True, help="upstream submodule name (e.g. walnutpie, stan, nuts-rs)")
+    as1.add_argument("--hypothesis", required=True)
+    as1.add_argument("--allowed-path", action="append", default=[], dest="allowed_paths")
+    as1.add_argument("--build-cmd")
+    as1.add_argument("--test-cmd")
+    as1.add_argument("--bench-cmd")
+    as1.add_argument("--run-id", default="default")
+    as1.add_argument("--dry-run", action="store_true")
+
+    as2 = ar_sub.add_parser("eval-s2", help="evaluate Lane S2 gradient/compiler speed patch")
+    as2.add_argument("--upstream", required=True, help="upstream submodule name (e.g. math, stan, stanc3, bridgestan)")
+    as2.add_argument("--hypothesis", required=True)
+    as2.add_argument("--allowed-path", action="append", default=[], dest="allowed_paths")
+    as2.add_argument("--clean-build-cmd")
+    as2.add_argument("--test-cmd")
+    as2.add_argument("--run-id", default="default")
+    as2.add_argument("--dry-run", action="store_true")
+
+    as3 = ar_sub.add_parser("eval-s3", help="run Lane S3 rewind calibration & agent grading (AUARC)")
+    as3.add_argument("--mode", choices=("base", "reference", "custom"), default="reference")
+    as3.add_argument("--tasks", type=Path, default=rewind.DEFAULT_TASKS_PATH)
+    as3.add_argument("--submission", action="append", default=[], metavar="TASK_ID=PATH",
+                     help="custom submission for one rewind task (repeatable)")
+    as3.add_argument("--run-id", default="calibration")
+    as3.add_argument("--out", type=Path)
+
+    tr = sub.add_parser("track", help="run specialized benchmark tracks (L3 stress, L4 unadjusted, L5 density-only)")
+    tr_sub = tr.add_subparsers(dest="track_cmd", required=True)
+    tr_run = tr_sub.add_parser("run", help="run a submission on Track L3, L4, or L5")
+    tr_run.add_argument("--track", choices=("L3", "L4", "L5"), required=True)
+    tr_run.add_argument("--sampler", type=Path, required=True)
+    tr_run.add_argument("--lane", help="optional lane wrapper (e.g. A1, A4)")
+    tr_run.add_argument("--dims", default="6,12", help="comma-separated dimensions (default: 6,12)")
+    tr_run.add_argument("--seed", type=int, default=20261121)
+    tr_run.add_argument("--chains", type=int, default=48)
+    tr_run.add_argument("--out", type=Path)
+
     a = ap.parse_args(argv)
     if a.cmd == "list":
         print("samplers:", ", ".join(sorted(sampler.registry())))
@@ -179,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
         subs = dict(x.split("=", 1) for x in a.submission)
         try:
             score.score(a.runs, a.out, g, a.baseline, a.labels.split(",") if a.labels else None,
-                        submissions={k: Path(v) for k, v in subs.items()})
+                        submissions={k: Path(v) for k, v in subs.items()}, track=a.track)
         except ValueError as e:
             raise SystemExit(f"apin score: {e}") from None
         return 0
@@ -219,7 +262,54 @@ def main(argv: list[str] | None = None) -> int:
         meta = records.validate_record_dir(a.path)
         print(f"record valid: {meta['entry_id']} ({meta['track']}, {meta['license']})")
         return 0
+    if a.cmd == "track":
+        dims_tuple = tuple(int(x.strip()) for x in a.dims.split(",") if x.strip())
+        if a.track == "L3":
+            rep = tracks.run_track_l3(
+                a.sampler, dims=dims_tuple, seed=a.seed, n_chains=a.chains, lane=a.lane, out_dir=a.out,
+            )
+            print(tracks.format_track_markdown(rep))
+            return 0 if rep["passed_all_invariance"] else 1
+        if a.track == "L4":
+            rep = tracks.run_track_l4(
+                a.sampler, dims=dims_tuple, seed=a.seed, n_chains=a.chains, lane=a.lane, out_dir=a.out,
+            )
+            print(tracks.format_track_markdown(rep))
+            return 0
+        if a.track == "L5":
+            rep = tracks.run_track_l5(
+                a.sampler, dims=dims_tuple, seed=a.seed, n_chains=a.chains, out_dir=a.out,
+            )
+            print(tracks.format_track_markdown(rep))
+            return 0 if (rep.get("passed_density_only") and rep.get("passed_all_invariance")) else 1
+        return 2
     if a.cmd == "autoresearch":
+        if a.ar_cmd == "eval-s1":
+            row = systems_lanes.evaluate_s1_trial(
+                a.upstream, a.hypothesis, allowed_paths=a.allowed_paths,
+                build_cmd=a.build_cmd, test_cmd=a.test_cmd, bench_cmd=a.bench_cmd,
+                run_id=a.run_id, dry_run=a.dry_run,
+            )
+            print(f"{row['trial_id']} [S1:{a.upstream}] decision={row['decision']} paths_ok={row.get('paths_ok')} wall={row['wall_s']}s")
+            return 0 if row["decision"] in ("dry_run_ok", "keep", "keep_tests_only") else 1
+        if a.ar_cmd == "eval-s2":
+            row = systems_lanes.evaluate_s2_trial(
+                a.upstream, a.hypothesis, allowed_paths=a.allowed_paths,
+                clean_build_cmd=a.clean_build_cmd, test_cmd=a.test_cmd,
+                run_id=a.run_id, dry_run=a.dry_run,
+            )
+            print(f"{row['trial_id']} [S2:{a.upstream}] decision={row['decision']} paths_ok={row.get('paths_ok')} wall={row['wall_s']}s")
+            return 0 if row["decision"] in ("dry_run_ok", "keep", "keep_verified") else 1
+        if a.ar_cmd == "eval-s3":
+            custom = dict(x.split("=", 1) for x in a.submission)
+            rep = rewind.evaluate_s3_suite(
+                {k: Path(v) for k, v in custom.items()} if custom else None,
+                mode=a.mode, tasks_path=a.tasks, run_id=a.run_id, out_dir=a.out,
+            )
+            print(f"[S3:{a.mode}] passed={rep['passed']}/{rep['total']} pass_rate={rep['pass_rate']} auarc={rep['auarc']}")
+            for r in rep["results"]:
+                print(f"  {'PASS' if r['passed'] else 'FAIL'} {r['task_id']:32s} eff={r['emp_eff']:.3g} ({r['reason']})")
+            return 0 if (rep["passed"] == rep["total"] if a.mode == "reference" else True) else 1
         dims_tuple = (a.dim,) if a.dim is not None else tuple(int(x.strip()) for x in a.dims.split(",") if x.strip())
         row = autoresearch.evaluate_lane_trial(
             a.lane, a.hypothesis, codex_refs=a.codex_ref, seed=a.seed,
@@ -250,6 +340,8 @@ def main(argv: list[str] | None = None) -> int:
             val = row.get(rkey)
             if val is not None:
                 print(f"METRIC {mkey}={val}")
+        for cls_name, cls_val in sorted((row.get("by_class") or {}).items()):
+            print(f"CLASS_METRIC {cls_name}={cls_val}")
         return 0 if row["tier0_ok"] else 1
     return 2
 

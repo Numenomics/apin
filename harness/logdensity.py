@@ -629,6 +629,8 @@ class Counter:
         return lp
 
     def log_density_gradient(self, theta) -> tuple[float, np.ndarray]:
+        if "density_only" in self.capabilities:
+            raise CapabilityError("oracle.log_density_gradient is disabled in Track L5 (density_only)")
         self._charge()
         self.gradient += 1
         x = self._point(theta)

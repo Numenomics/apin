@@ -17,6 +17,10 @@ function laneColor(lane) {
     A1: styles.getPropertyValue("--lane-A1").trim() || "#38bdf8",
     A2: styles.getPropertyValue("--lane-A2").trim() || "#a855f7",
     A3: styles.getPropertyValue("--lane-A3").trim() || "#10b981",
+    A4: styles.getPropertyValue("--lane-A4").trim() || "#ec4899",
+    S1: styles.getPropertyValue("--lane-S1").trim() || "#f97316",
+    S2: styles.getPropertyValue("--lane-S2").trim() || "#06b6d4",
+    S3: styles.getPropertyValue("--lane-S3").trim() || "#84cc16",
   };
   return map[lane] || styles.getPropertyValue("--lane-default").trim() || "#94a3b8";
 }

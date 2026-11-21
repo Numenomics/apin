@@ -665,7 +665,8 @@ def check_target_invariance(
             se_null = sd_true / math.sqrt(n_chains)
             z_val = abs(err) / se_null if se_null > 0 else (0.0 if err == 0 else math.inf)
             z_scores[f"{prefix}{name}"] = z_val
-            b2_vals[f"{prefix}{name}"] = (err / sd_true) ** 2 if sd_true > 0 else 0.0
+            rel_err = (err / sd_true) if sd_true > 0 else 0.0
+            b2_vals[f"{prefix}{name}"] = (rel_err * rel_err) if (math.isfinite(rel_err) and abs(rel_err) < 1e150) else math.inf
 
     # Auxiliary state stationarity & aux-position independence
     if aux_spec["kind"] != "none":

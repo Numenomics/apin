@@ -241,9 +241,169 @@ def run_a1_adapt(path: Path, oracle: logdensity.Oracle, budget: logdensity.Budge
     return tuning, (x0, None), [1.0], "none"
 
 
+def load_a4_submission(path: Path):
+    """Load a Lane A4 submission; enforce narrow diffeomorphic transport seam."""
+    path = Path(path)
+    logdensity.check_imports(path.read_text())
+    name = f"apin_a4_submission_{hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:8]}"
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    if hasattr(mod, "transition") or hasattr(mod, "adapt"):
+        raise ContractError(
+            f"Lane A4 submission {path.name} must define ONLY adapt_transport, forward, pullback_grad, "
+            "and inverse — it may not define transition() or adapt()"
+        )
+    for fn_name in ("adapt_transport", "forward", "pullback_grad", "inverse"):
+        if not callable(getattr(mod, fn_name, None)):
+            raise AttributeError(f"Lane A4 submission {path} must define callable {fn_name}(...)")
+    return mod
+
+
+def validate_a4_transport(mod, transport_tuning: Any, dim: int, rng: np.random.Generator) -> dict[str, Any]:
+    """Validate Lane A4 transport tuning, round-trip invertibility, and finite-diff Jacobian/log-det."""
+    if not isinstance(transport_tuning, dict):
+        raise ContractError(f"Lane A4 transport_tuning must be a dict, got {type(transport_tuning).__name__}")
+    if "eps" not in transport_tuning:
+        raise ContractError("Lane A4 transport_tuning must include positive finite 'eps'")
+    eps = float(transport_tuning["eps"])
+    if not math.isfinite(eps) or not (A1_EPS_MIN <= eps <= A1_EPS_MAX):
+        raise ContractError(f"Lane A4 'eps' must be finite in [{A1_EPS_MIN}, {A1_EPS_MAX}], got {eps!r}")
+
+    h_fd = 1e-6
+    n_probes = 3
+    for _ in range(n_probes):
+        z = rng.normal(0.0, 0.7, size=dim)
+        theta, ldj = mod.forward(transport_tuning, z)
+        theta = np.asarray(theta, dtype=np.float64)
+        ldj = float(ldj)
+        if theta.shape != (dim,) or not np.all(np.isfinite(theta)) or not math.isfinite(ldj):
+            raise ContractError("Lane A4 forward(tuning, z) returned non-finite or wrong-shape output")
+        z_back = np.asarray(mod.inverse(transport_tuning, theta), dtype=np.float64)
+        if z_back.shape != (dim,) or not np.all(np.isfinite(z_back)):
+            raise ContractError("Lane A4 inverse(tuning, theta) returned non-finite or wrong-shape output")
+        if float(np.max(np.abs(z_back - z))) > 1e-6 * (1.0 + float(np.max(np.abs(z)))):
+            raise ContractError(
+                f"Lane A4 inverse/forward round-trip failed: max_err={float(np.max(np.abs(z_back - z))):.3e}"
+            )
+        theta_back, _ = mod.forward(transport_tuning, z_back)
+        if float(np.max(np.abs(np.asarray(theta_back, dtype=np.float64) - theta))) > 1e-6 * (1.0 + float(np.max(np.abs(theta)))):
+            raise ContractError("Lane A4 forward(inverse(theta)) round-trip failed")
+
+        # Finite-difference Jacobian J_T(z) and gradient of log|det J_T(z)|
+        jac = np.empty((dim, dim), dtype=np.float64)
+        dldj_fd = np.empty(dim, dtype=np.float64)
+        for j in range(dim):
+            zp = z.copy()
+            zm = z.copy()
+            zp[j] += h_fd
+            zm[j] -= h_fd
+            tp, lp = mod.forward(transport_tuning, zp)
+            tm, lm = mod.forward(transport_tuning, zm)
+            jac[:, j] = (np.asarray(tp, dtype=np.float64) - np.asarray(tm, dtype=np.float64)) / (2.0 * h_fd)
+            dldj_fd[j] = (float(lp) - float(lm)) / (2.0 * h_fd)
+        sign, ldj_fd = np.linalg.slogdet(jac)
+        if sign == 0 or not math.isfinite(float(ldj_fd)):
+            raise ContractError("Lane A4 transport Jacobian is singular at probe point")
+        if abs(ldj - float(ldj_fd)) > 1e-4 * (1.0 + abs(float(ldj_fd))):
+            raise ContractError(
+                f"Lane A4 log_abs_det_jac mismatch: got {ldj:.6f}, finite-diff {float(ldj_fd):.6f}"
+            )
+        v = rng.standard_normal(dim)
+        pb = np.asarray(mod.pullback_grad(transport_tuning, z, v), dtype=np.float64)
+        pb_fd = jac.T @ v + dldj_fd
+        if pb.shape != (dim,) or not np.all(np.isfinite(pb)):
+            raise ContractError("Lane A4 pullback_grad returned non-finite or wrong-shape output")
+        err_pb = float(np.max(np.abs(pb - pb_fd)))
+        scale_pb = 1.0 + float(np.max(np.abs(pb_fd)))
+        if err_pb > 2e-3 * scale_pb:
+            raise ContractError(
+                f"Lane A4 pullback_grad mismatch: max_err={err_pb:.3e} vs finite-diff (scale {scale_pb:.3e})"
+            )
+
+    return dict(transport_tuning)
+
+
+def run_a4_adapt(path: Path, oracle: logdensity.Oracle, budget: logdensity.Budget,
+                 rng: np.random.Generator) -> tuple[dict[str, Any], tuple[np.ndarray, None], list[float], str]:
+    """Execute Lane A4 `adapt_transport()`, verify diffeomorphism, and wrap into kernel-v2 4-tuple."""
+    mod = load_a4_submission(path)
+    raw = mod.adapt_transport(oracle, budget, rng)
+    if not isinstance(raw, tuple) or len(raw) != 2:
+        raise ContractError("Lane A4 adapt_transport() must return a 2-tuple (transport_tuning, x0)")
+    transport_tuning, x0_raw = raw
+    check_rng = np.random.default_rng(1337)
+    tuning = validate_a4_transport(mod, transport_tuning, oracle.dim, check_rng)
+    x0 = np.array(x0_raw, dtype=np.float64, copy=True)
+    if x0.shape != (oracle.dim,) or not np.all(np.isfinite(x0)):
+        raise ContractError(f"Lane A4 x0 must be finite 1D array of shape ({oracle.dim},), got {x0.shape}")
+    # Also verify inverse works at x0
+    z0 = np.asarray(mod.inverse(tuning, x0), dtype=np.float64)
+    if z0.shape != (oracle.dim,) or not np.all(np.isfinite(z0)):
+        raise ContractError("Lane A4 inverse(tuning, x0) returned non-finite latent state")
+    return tuning, (x0, None), [1.0], "none"
+
+
+def make_a4_transition(path: Path) -> Callable:
+    """Return harness-owned verified reversible latent-space HMC transition for Lane A4."""
+    mod = load_a4_submission(path)
+
+    def a4_transition(tuning: dict[str, Any], chain: logdensity.Chain, oracle: logdensity.Oracle,
+                      rng: np.random.Generator) -> tuple[np.ndarray, None]:
+        x = chain.position
+        z = np.asarray(mod.inverse(tuning, x), dtype=np.float64)
+        if not np.all(np.isfinite(z)):
+            return x, None
+        theta0, ldj0 = mod.forward(tuning, z)
+        lp_th0, g_th0 = oracle.log_density_gradient(np.asarray(theta0, dtype=np.float64))
+        if not (math.isfinite(lp_th0) and math.isfinite(float(ldj0)) and np.all(np.isfinite(g_th0))):
+            return x, None
+        lp_z0 = float(lp_th0) + float(ldj0)
+        g_z0 = np.asarray(mod.pullback_grad(tuning, z, g_th0), dtype=np.float64)
+        if not np.all(np.isfinite(g_z0)):
+            return x, None
+
+        eps = float(tuning["eps"])
+        n = _a1_steps(eps, rng)
+        p = rng.standard_normal(z.size)
+        h0 = lp_z0 - 0.5 * float(p @ p)
+
+        z1, lp_z1, g_z1 = z, lp_z0, g_z0
+        theta1 = np.asarray(theta0, dtype=np.float64)
+        p1 = p + 0.5 * eps * g_z1
+        for i in range(n):
+            z1 = z1 + eps * p1
+            if not np.all(np.isfinite(z1)):
+                return x, None
+            theta1_raw, ldj1 = mod.forward(tuning, z1)
+            theta1 = np.asarray(theta1_raw, dtype=np.float64)
+            if not (np.all(np.isfinite(theta1)) and math.isfinite(float(ldj1))):
+                return x, None
+            lp_th1, g_th1 = oracle.log_density_gradient(theta1)
+            if not (math.isfinite(lp_th1) and np.all(np.isfinite(g_th1))):
+                return x, None
+            lp_z1 = float(lp_th1) + float(ldj1)
+            g_z1 = np.asarray(mod.pullback_grad(tuning, z1, g_th1), dtype=np.float64)
+            if not np.all(np.isfinite(g_z1)):
+                return x, None
+            if i < n - 1:
+                p1 = p1 + eps * g_z1
+        p1 = p1 + 0.5 * eps * g_z1
+        h1 = lp_z1 - 0.5 * float(p1 @ p1)
+        accept = math.exp(min(0.0, h1 - h0)) if math.isfinite(h1) else 0.0
+        if rng.uniform() < accept:
+            return theta1, None
+        return x, None
+
+    return a4_transition
+
+
 def resolve_lane_submission(path: Path, lane: str | None) -> tuple[Callable, Callable]:
-    """Resolve a submission path into (adapt, transition), locking Lane A1 to `a1_transition`."""
+    """Resolve a submission path into (adapt, transition), locking Lane A1/A4 to judge transitions."""
+    p = Path(path)
     if lane == "A1":
-        p = Path(path)
         return (lambda oracle, budget, rng: run_a1_adapt(p, oracle, budget, rng)), a1_transition
-    return logdensity.load_submission(Path(path))
+    if lane == "A4":
+        return (lambda oracle, budget, rng: run_a4_adapt(p, oracle, budget, rng)), make_a4_transition(p)
+    return logdensity.load_submission(p)

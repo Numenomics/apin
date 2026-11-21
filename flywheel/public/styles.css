@@ -11,6 +11,10 @@
   --lane-A1: #38bdf8;
   --lane-A2: #a855f7;
   --lane-A3: #10b981;
+  --lane-A4: #ec4899;
+  --lane-S1: #f97316;
+  --lane-S2: #06b6d4;
+  --lane-S3: #84cc16;
   --lane-default: #94a3b8;
   --verified: #facc15;
   --keep-bg: rgba(16, 185, 129, 0.16);
@@ -270,6 +274,10 @@ code {
 .lane-A1 { background: var(--lane-A1); }
 .lane-A2 { background: var(--lane-A2); }
 .lane-A3 { background: var(--lane-A3); }
+.lane-A4 { background: var(--lane-A4); }
+.lane-S1 { background: var(--lane-S1); }
+.lane-S2 { background: var(--lane-S2); }
+.lane-S3 { background: var(--lane-S3); }
 
 .shape {
   width: 10px;

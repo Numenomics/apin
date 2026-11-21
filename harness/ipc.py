@@ -690,6 +690,8 @@ def _worker_main(argv: list[str]) -> int:
                 rng = np.random.default_rng(np.random.SeedSequence(req["seed_seq"]))
                 if lane == "A1":
                     raw = judge.run_a1_adapt(sub_path, oracle, budget, rng)
+                elif lane == "A4":
+                    raw = judge.run_a4_adapt(sub_path, oracle, budget, rng)
                 else:
                     adapt_fn, _ = logdensity.load_submission(sub_path)
                     raw = adapt_fn(oracle, budget, rng)
@@ -732,6 +734,8 @@ def _worker_main(argv: list[str]) -> int:
                         if lane == "A1":
                             # Never even import submission.py inside the A1 transition worker!
                             transition_fn = judge.a1_transition
+                        elif lane == "A4":
+                            transition_fn = judge.make_a4_transition(Path(req["submission"]))
                         else:
                             _, transition_fn = logdensity.load_submission(Path(req["submission"]))
                         _send_msg(sock, TAG_RESP_OK, encode_canonical(True))

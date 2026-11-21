@@ -30,7 +30,7 @@ from typing import Callable
 
 import numpy as np
 
-from . import cmdstan, cost as cost_mod, gate, grid as grid_mod, models as models_mod, records, reference
+from . import cmdstan, cost as cost_mod, gate, grid as grid_mod, models as models_mod, records, reference, tracks
 from .reference import LP, Reference
 
 BOOTSTRAP = 2000
@@ -268,7 +268,8 @@ def count_problem(rec: dict, entry: Entry) -> str | None:
     return None
 
 
-def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid, digest: str | None = None) -> dict:
+def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid, digest: str | None = None,
+              track: str = "L1") -> dict:
     d = label_dir / entry.model / f"rep{rep}"
     row = {
         "label": label_dir.name, "model": entry.model, "rep": rep, "status": "wrong", "reason": "",
@@ -317,6 +318,8 @@ def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid, digest: str | No
     if problem:
         return wrong(f"rep{rep} {problem}")
     total, dens, grad, hvp, hess = extended_evaluation_counts(t)
+    if track == "L5" and (grad is None or grad > 0 or hvp > 0 or hess > 0):
+        return wrong(f"rep{rep} Track L5 forbids gradient/higher-order calls (got grad={grad}, hvp={hvp}, hess={hess})")
     if t.get("wall_s") is not None and t["wall_s"] > entry.max_seconds:
         return wrong(f"rep{rep} took {t['wall_s']:.0f} s, the limit is {entry.max_seconds:.0f} s")
 
@@ -392,9 +395,9 @@ def _mean(v) -> float:
     return float(np.mean(v)) if v and all(isinstance(x, (int, float)) and math.isfinite(x) for x in v) else math.nan
 
 
-def rank(models: list[dict], baseline: str | None, names: list[str], seed: int = 0) -> list[dict]:
-    """Rank by models passing the 0.1-SD gate, then by ess_per_cost ratio vs baseline (headline),
-    with 1:1 ess_per_eval and ess_per_s reported alongside."""
+def rank(models: list[dict], baseline: str | None, names: list[str], seed: int = 0,
+         track: str = "L1") -> list[dict]:
+    """Rank by models passing the 0.1-SD gate, then by ess_per_cost (L1/L5) or wall-clock ess_per_s (L2)."""
     by = {(m["label"], m["model"]): m for m in models}
     labels = list(dict.fromkeys(m["label"] for m in models))
     out = []
@@ -430,7 +433,10 @@ def rank(models: list[dict], baseline: str | None, names: list[str], seed: int =
             row[f"{key}_lo"], row[f"{key}_hi"] = boot["ci_lo"], boot["ci_hi"]
             row[f"{key}_p"] = boot["p_value"]
         out.append(row)
-    out.sort(key=lambda r: (-r["right"], -(r["speed_cost"] if math.isfinite(r["speed_cost"]) else (r["speed_eval"] if math.isfinite(r["speed_eval"]) else -math.inf))))
+    if track == "L2":
+        out.sort(key=lambda r: (-r["right"], -(r["speed_s"] if math.isfinite(r["speed_s"]) else -math.inf)))
+    else:
+        out.sort(key=lambda r: (-r["right"], -(r["speed_cost"] if math.isfinite(r["speed_cost"]) else (r["speed_eval"] if math.isfinite(r["speed_eval"]) else -math.inf))))
     for i, r in enumerate(out):
         r["rank"] = i + 1
     return out
@@ -449,9 +455,21 @@ def _bootstrap(pairs, seed: int) -> tuple[float, float]:
     return boot["ci_lo"], boot["ci_hi"]
 
 
-def table(ranking: list[dict], models: list[dict], baseline: str | None, names: list[str]) -> str:
+def table(ranking: list[dict], models: list[dict], baseline: str | None, names: list[str],
+          track: str = "L1", machine: dict | None = None) -> str:
     labels = [r["label"] for r in ranking]
-    lines = [
+    lines: list[str] = []
+    if track == "L2" and machine:
+        lines += [
+            f"Track L2 (wall-clock ESS/s) — host: {machine.get('cpu_model', 'unknown')} "
+            f"({machine.get('cpu_count')} cores, {machine.get('os')}, "
+            f"Python {machine.get('python')}, NumPy {machine.get('numpy')}, "
+            f"OMP_NUM_THREADS={machine.get('omp_num_threads')})",
+            "",
+        ]
+    elif track == "L5":
+        lines += ["Track L5 (density-only view of L1; `n_gradient == 0` strictly enforced)", ""]
+    lines += [
         "| rank | label | passed 0.1-SD gate | ESS/cost vs baseline [95 %] | ESS/eval (1:1) [95 %] | ESS/s [95 %] | overhead/eval | note |",
         "|---|---|---|---|---|---|---|---|",
     ]
@@ -510,7 +528,9 @@ def _write(path: Path, rows: list[dict], drop=("verdict", "cost_u", "eval", "sec
 
 
 def score(runs_dir: Path, out_dir: Path, g: Grid, baseline: str | None = None, labels: list[str] | None = None,
-          log=print, submissions: dict[str, Path] | None = None) -> dict:
+          log=print, submissions: dict[str, Path] | None = None, track: str = "L1") -> dict:
+    if track not in ("L1", "L2", "L5"):
+        raise ValueError(f"apin score supports tracks L1, L2, L5 (got {track!r}; use `apin track run` for L3/L4)")
     digests = {k: hashlib.sha256(Path(p).read_bytes()).hexdigest() for k, p in (submissions or {}).items()}
     label_dirs = sorted(p for p in Path(runs_dir).iterdir() if p.is_dir() and (not labels or p.name in labels))
     unknown = sorted(set(digests) - {ld.name for ld in label_dirs})
@@ -522,19 +542,22 @@ def score(runs_dir: Path, out_dir: Path, g: Grid, baseline: str | None = None, l
     names = list(g.entries)
     rows = []
     for ld in label_dirs:
-        lab = [score_rep(ld, g.entries[n], r, g, digests.get(ld.name)) for n in names for r in range(g.reps)]
+        lab = [score_rep(ld, g.entries[n], r, g, digests.get(ld.name), track=track) for n in names for r in range(g.reps)]
         ids = {r["identity"] for r in lab if r["identity"]}
         if len(ids) > 1:
             raise ValueError(f"label {ld.name!r} mixes {len(ids)} sampler identities (submission or options); "
                              "give each its own label")
         rows += lab
+    machine = tracks.machine_fingerprint() if track == "L2" else None
     models = per_model(rows, g)
-    ranking = rank(models, baseline, names)
-    tab = table(ranking, models, baseline, names)
+    ranking = rank(models, baseline, names, track=track)
+    tab = table(ranking, models, baseline, names, track=track, machine=machine)
     out_dir.mkdir(parents=True, exist_ok=True)
     _write(out_dir / "per_run.csv", rows)
     _write(out_dir / "per_model.csv", models)
     _write(out_dir / "ranking.csv", ranking)
     (out_dir / "table.md").write_text(tab)
+    if machine is not None:
+        (out_dir / "machine_fingerprint.json").write_text(json.dumps(machine, indent=2))
     log(tab)
-    return {"per_run": rows, "per_model": models, "ranking": ranking, "table": tab}
+    return {"per_run": rows, "per_model": models, "ranking": ranking, "table": tab, "track": track, "machine": machine}
