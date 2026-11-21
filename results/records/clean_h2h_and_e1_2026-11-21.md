@@ -88,3 +88,39 @@ Both `a1_diag` (`T0001`) and `a1_fisher_lr` (`T0005`) executed via `apin run log
 | `eight_schools_noncentered` | `0.0214/cost`, `160k` gate | **`0.0221/cost`**, **`115k`** gate | **1.03×** | **1.39×** |
 | `gp_regr` | `0.0375/cost`, `77k` gate | `0.0361/cost`, `77k` gate | 0.96× | 1.00× |
 | `eight_schools_centered` | `unproven`: R-hat 1.017 (`tau`) | `wrong`: `lp__` mean `e=-0.335` | — | — |
+
+---
+
+## 3. High-Iteration (`4 × 50 000` Draws, 10× Budget) Non-Sub-Second Verification (8 Fast Models × 5 Reps)
+
+Because 6–10 models in the 5 000-draw grid finished in `< 1.0 s` wall time (down to `0.03 s` for `pathfinder_only` and `0.11 s` for `nutpie`), we reran the 8 fastest models (`eight_schools_noncentered, blr, gp_regr, arma11, kidscore_momiq, logmesquite_logvash, garch11, wells_dist100_model`) at **`4 × 50 000` draws × 5 reps** using the new `apin score --draws 50000` override. Every `cmdstan` rep took `0.97–22.85 s` wall (`3.8–79.6 s` chain-seconds), and every `nutpie` arm took `2.5–45.3 s` chain-seconds.
+
+### Aggregate Ranking at 50 000 Draws (Paired Hierarchical Bootstrap vs. `cmdstan`)
+
+| Rank | Sampler | Passed 0.1-SD Gate (vs. 5k) | ESS/cost vs. CmdStan [95% CI] | Gate cost-speed [95% CI] | ESS/s vs. CmdStan [95% CI] |
+|---|---|---:|---:|---:|---:|
+| 1 | `cmdstan` | **8 / 8** (was 8 / 8) | `1.00` | `1.00` | `1.00` |
+| 2 | `nutpie_lowrank` | **7 / 8** (was 6 / 8) | **4.40×** `[2.21, 8.62]` (`p=0.000`) | **3.89×** `[1.82, 7.66]` (`p=0.0005`) | **3.76×** `[1.98, 7.09]` (`p=0.000`) |
+| 3 | `nutpie_diag` | **7 / 8** (was 6 / 8) | **1.52×** `[1.32, 1.77]` (`p=0.000`) | **1.43×** `[1.07, 1.90]` (`p=0.004`) | **1.45×** `[1.31, 1.61]` (`p=0.000`) |
+| 4 | `pathfinder_only` | **3 / 8** (was 4 / 8) | *uncounted* | *uncounted* | **11.8×** `[3.78, 78.5]` (`p=0.000`) |
+
+### Key Findings at 50 000 Draws
+1. **Amortizing sub-second startup overhead lifts wall-clock throughput cleanly:** On `blr`, `nutpie_lowrank` rose from `21 456/s` to **`35 124/s`** (+64%), `nutpie_diag` from `7 064/s` to **`11 052/s`** (+56%), and `cmdstan` from `5 349/s` to **`6 151/s`** (+15%).
+2. **MCMC arms get *stronger* with 10× draws while non-MCMC Pathfinder gets *weaker*:**
+   - `nutpie_lowrank` gained `eight_schools_noncentered` (`6/8 → 7/8`) and `nutpie_diag` gained `kidscore_momiq` (`6/8 → 7/8`). Both still failed `arma11` (`R-hat 1.525`; `nutpie_lowrank` rep3 took **`488.2 s`** vs. CmdStan's `3.33 s`).
+   - **`pathfinder_only` lost `blr` to Rule 2 calibration:** At 5k draws `blr` passed with calibration ratio `1.51×` (`p = 0.016`); at 50k draws (3.16× tighter MCSE), realized error variance jumped to **`4.10×` the claimed MCSE (`p = 2.8e-22`)**, rejecting the model. `arma11` worsened from `1.79×` (`p = 7.1e-4`) to **`2.65×` (`p = 1.4e-9`)**, and even passing `kidscore_momiq` drifted from `1.34×` (`p = 0.197`) to **`1.82×` (`p = 0.0068`)**. Only `gp_regr`, `kidscore_momiq`, and `wells_dist100_model` passed at 50k draws.
+
+---
+
+## 4. Autonomous Autoresearch Test: `GLM-5.3-Flash` (`zai-coding-plan/glm-5.3-flash`) on Lane A1
+
+To test an external lightweight model inside the hardened Karpathy-ratchet + paired MAP-Elites loop (`harness/autoresearch.py`, locked `harness/judge.py::a1_transition`), we ran `zai-coding-plan/glm-5.3-flash` (`variant=high`) on Lane A1 (`--run-id glm53_flash_a1`) starting from the E1 `T0005` Fisher low-rank incumbent (`185 LOC`).
+
+- **In-loop execution:** **12 trials in ~6.5 min**, zero crashes, zero Tier-0 failures, zero AST duplicates, zero rule violations (`RULINGS.md`), **7 keeps / 5 falsified**, reducing `autoresearch/lanes/A1/submission.py` from `185 → 159 LOC` (lean warmup caps `12/32/64`, pure draw-variance diagonal, single dual-averaging restart at `0.3w`, ridge-shrunk draw-covariance Woodbury correction, `U(-1,1)` init + `eps0=0.2`, `TARGET_ACCEPT=0.75` confirmed by a back-test in `T0012`, and `tau=0.35√(r/k)` / keep-gate `0.30`).
+- **Independent out-of-sample analytic verification (all targets passed 100%):**
+  - **Fresh `dim=6` (5 paired seeds `1001..1005`, 40/40 targets):** `GLM53_T0011` achieved **`1.556×`** soft-min over `E1_T0005` (won 5/5 seeds: `1.06–3.26×`) and **`3.537×`** over `T0001_diag` (won 5/5 seeds: `2.25–6.92×`).
+  - **Out-of-distribution `dim=16` (3 paired seeds `2001..2003`, 24/24 targets):** `GLM53_T0011` achieved **`1.025×`** over `E1_T0005` (`2.375×` over `T0001_diag`), beating `E1_T0005` on 5/6 families (`banana 1.40×`, `funnel 1.22×`, `gaussian_illcond 1.19×`, `mixture_crossable 1.09×`, `hybrid_rosenbrock 1.02×`) while regressing on heavy-tailed `student_t` (`0.45×`) because pure draw variance `var_x` diverges on `StudentT(nu=1.5)` where Fisher `var_g` remains bounded.
+- **Real-posterior validation (5 public Stan models × 3 reps via `apin run logdensity --opt lane=A1`):**
+  - **Passed 0.1-SD gate:** **4 / 5** (`blr`, `eight_schools_noncentered`, `gp_regr`, `garch11`), with **`1.57× [1.03, 3.29]` (`p = 0.001`)** `ESS/cost` over `a1_diag` (beating `a1_diag` on all 4 passing models: `blr 4.73×`, `garch11 1.16×`, `eight_schools_noncentered 1.07×`, `gp_regr 1.02×`; `a1_fisher_lr` was `1.61× [0.99, 3.44]`, `p = 0.035`).
+  - **Improved funnel safety:** On `eight_schools_centered`, `a1_glm53` returned **`unproven: R-hat 1.027`** (zero `wrong` verdicts), whereas `a1_fisher_lr` had triggered `wrong: lp__ mean e=-0.335`.
+

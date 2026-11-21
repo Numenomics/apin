@@ -1015,12 +1015,14 @@ def main(argv: list[str]) -> int:
     phase = argv[0]
     spec = json.loads(Path(argv[1]).read_text())
     caps = set(spec.get("capabilities") or ())
+    lane = spec.get("lane")
     bundle_dir = Path(spec["bundle_dir"])
     if phase == "adapt":
         model = _open_bridgestan(spec)
         budget = Budget(spec["chains"], spec["draws"], spec["max_evaluations"], spec["max_seconds"])
         ipc.run_adapt_phase_isolated(
-            model, Path(spec["submission"]), budget, int(spec["run_seed"]), bundle_dir, capabilities=caps
+            model, Path(spec["submission"]), budget, int(spec["run_seed"]), bundle_dir,
+            capabilities=caps, lane=lane,
         )
         return 0
     if phase == "sample":
@@ -1029,7 +1031,7 @@ def main(argv: list[str]) -> int:
         adapt_meta = json.loads((bundle_dir / "adapt_meta.json").read_text())
         draws, _ = ipc.run_sample_phase_isolated(
             model, Path(spec["submission"]), budget, int(spec["run_seed"]), bundle_dir, adapt_meta,
-            capabilities=caps, replay_count=int(spec.get("replay_steps", REPLAY_STEPS)),
+            capabilities=caps, replay_count=int(spec.get("replay_steps", REPLAY_STEPS)), lane=lane,
         )
         np.save(bundle_dir / "draws.npy", draws)
         return 0
@@ -1039,7 +1041,7 @@ def main(argv: list[str]) -> int:
         sample_meta = json.loads((bundle_dir / "sample_meta.json").read_text())
         rep = ipc.run_replay_phase_isolated(
             model, Path(spec["submission"]), int(spec["run_seed"]), bundle_dir,
-            adapt_meta, sample_meta, capabilities=caps,
+            adapt_meta, sample_meta, capabilities=caps, lane=lane,
         )
         (bundle_dir / "replay_meta.json").write_text(json.dumps(rep, indent=1))
         return 0

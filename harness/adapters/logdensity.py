@@ -95,6 +95,7 @@ class Adapter(Sampler):
         env = {**os.environ, "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
         caps = self.capabilities()
         replay_steps = int(self.opt("replay_steps") or logdensity.REPLAY_STEPS)
+        lane = self.opt("lane") or None
 
         rep_t0 = time.perf_counter()
         logs: list[str] = []
@@ -133,6 +134,7 @@ class Adapter(Sampler):
                     "bundle_dir": str(bdir),
                     "capabilities": caps,
                     "replay_steps": replay_steps,
+                    "lane": lane,
                 }
                 logs.append(_run_phase("adapt", base_spec, bdir / "spec_adapt.json", env, remaining + 30.0))
                 adapt_meta = json.loads((bdir / "adapt_meta.json").read_text())

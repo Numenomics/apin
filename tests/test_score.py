@@ -527,3 +527,13 @@ def test_verified_multiwalker_is_scored_and_checkpoints_recorded(tmp_path, grid)
     assert rank_nrpt["right"] == 2
     assert math.isfinite(rank_nrpt["speed_cost_p"])
     assert math.isfinite(rank_nrpt["gate_speed"]) and rank_nrpt["gate_speed"] > 1.5
+
+
+def test_declared_budget_override():
+    g_default = score.declared("blr", reps=1)
+    assert g_default.entries["blr"].warmup == 1000
+    assert g_default.entries["blr"].draws == 5000
+    g_custom = score.declared("blr", reps=1, warmup=2000, draws=50000)
+    assert g_custom.entries["blr"].warmup == 2000
+    assert g_custom.entries["blr"].draws == 50000
+

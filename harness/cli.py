@@ -83,6 +83,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--baseline", help="label to compute speed against")
     s.add_argument("--models", default="all", help="the grid: models with a reference among these")
     s.add_argument("--reps", type=int, default=3, help="reps in the grid; a rep that is not there is wrong")
+    s.add_argument("--warmup", type=int, help="override manifest warmup budget when scoring custom runs")
+    s.add_argument("--draws", type=int, help="override manifest draws budget when scoring custom runs")
     s.add_argument("--base-seed", type=int, default=grid.BASE_SEED)
     s.add_argument("--build", type=Path, default=ROOT / "build")
     s.add_argument("--costs", type=Path, default=cost.COSTS_PATH, help="path to frozen models/costs.json")
@@ -163,7 +165,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{len(done)} reps done, {len(failed)} failed")
         return 1 if failed else 0
     if a.cmd == "score":
-        g = score.declared(a.models, a.reps, a.base_seed, a.build, costs_path=a.costs)
+        g = score.declared(a.models, a.reps, a.base_seed, a.build, costs_path=a.costs,
+                           warmup=a.warmup, draws=a.draws)
         subs = dict(x.split("=", 1) for x in a.submission)
         try:
             score.score(a.runs, a.out, g, a.baseline, a.labels.split(",") if a.labels else None,

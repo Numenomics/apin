@@ -70,7 +70,9 @@ class Grid:
 
 def declared(spec: str = "all", reps: int = 5, base_seed: int = grid_mod.BASE_SEED,
              build_dir: Path = models_mod.ROOT / "build",
-             costs_path: Path = cost_mod.COSTS_PATH) -> Grid:
+             costs_path: Path = cost_mod.COSTS_PATH,
+             warmup: int | None = None,
+             draws: int | None = None) -> Grid:
     """The benchmark's grid: selected models with a reference, at manifest budgets and frozen r_m."""
     costs = cost_mod.load(costs_path)
     entries = {}
@@ -83,7 +85,8 @@ def declared(spec: str = "all", reps: int = 5, base_seed: int = grid_mod.BASE_SE
         data_sha = m.data_sha256 or ""
         bs_key = str((costs.get(m.name) or {}).get("bridgestan_key") or "")
         entries[m.name] = Entry(
-            m.name, ref, m.chains, m.warmup, m.draws,
+            m.name, ref, m.chains, m.warmup if warmup is None else warmup,
+            m.draws if draws is None else draws,
             lambda d, m=m: reference.log_density(m, d, build_dir, strict=False),
             cost_weights=weights, stan_sha256=stan_sha, data_sha256=data_sha, bridgestan_key=bs_key,
         )

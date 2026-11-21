@@ -17,7 +17,7 @@ import math
 
 import numpy as np
 
-TARGET_ACCEPT = 0.8
+TARGET_ACCEPT = 0.75
 PATH_LENGTH = 2.0
 MAX_STEPS = 256
 GAMMA, T0, KAPPA = 0.05, 10.0, 0.75
@@ -119,16 +119,9 @@ def _estimate_fisher_metric(xs: np.ndarray, gs: np.ndarray) -> tuple[np.ndarray,
     disp_ratio = float(np.percentile(g_norms, 95.0)) / max(float(np.median(g_norms)), 1e-12)
     alpha_global = 1.0 if disp_ratio <= 6.0 else max(0.0, (6.0 / disp_ratio) ** 2)
 
-    cov_xg = -np.mean(xc * gc, axis=0)
-    # Exact identity on any Gaussian: cov_xg == 1.0 (Stein's identity E[-x_j g_j] = 1).
-    # When Var(g_j) spikes from nonlinear curvature, |cov_xg / sqrt(var_x * var_g)| drops well below 1/sqrt(vx*vg)
-    # and var_x / (1/var_g) = var_x * var_g >> 1. Blend smoothly toward draw variance var_x when var_x * var_g is huge.
-    vg_excess = np.maximum(1.0, var_x * var_g)
-    stein_ok = np.clip(cov_xg, 0.0, 2.0) / np.maximum(1.0, cov_xg)
-    alpha_coord = alpha_global * stein_ok / np.sqrt(np.maximum(1.0, vg_excess / 4.0))
-    alpha_coord = np.clip(alpha_coord, 0.0, 1.0)
-
-    log_inv_d = (1.0 - 0.5 * alpha_coord) * np.log(var_x) - (0.5 * alpha_coord) * np.log(var_g)
+    # Pure draw-variance diagonal (Welford-style): the gradient-variance blend is ablated
+    # in this trial; the gated low-rank Fisher correction below remains active.
+    log_inv_d = np.log(var_x)
     inv_d = np.clip(np.exp(log_inv_d), 1e-6, 1e6)
 
     # Skip low-rank update if too few samples or strong funnel dispersion detected
@@ -139,53 +132,26 @@ def _estimate_fisher_metric(xs: np.ndarray, gs: np.ndarray) -> tuple[np.ndarray,
     ys = xc / sigma[None, :]
     ss = gc * sigma[None, :]
 
-    # Orthonormal basis Q for top-r subspace of centered, whitened [Ys, Ss]
+    # Orthonormal basis Q for the top-r draw-cloud principal subspace (scores ablated:
+    # at rank r == d the geometric-mean pipeline only injects independent estimator noise).
     r = min(d, MAX_RANK, max(1, k // 3))
-    stacked = np.concatenate([ys.T, ss.T], axis=1) / math.sqrt(k)  # (d, 2k)
-    q_full, _, _ = np.linalg.svd(stacked, full_matrices=False)
+    q_full, _, _ = np.linalg.svd(ys.T / math.sqrt(k), full_matrices=False)
     q = q_full[:, :r]
 
-    # Ridge-shrunk projected draw covariance A and score covariance B
+    # Ridge-shrunk projected draw covariance A: whitened, so A = I + correlation structure.
     ridge = min(0.35, (r + 2.0) / (k + r + 2.0))
     ay = ys @ q  # (k, r)
-    bs = ss @ q  # (k, r)
     a_mat = (1.0 - ridge) * ((ay.T @ ay) / k) + ridge * np.eye(r)
-    b_mat = (1.0 - ridge) * ((bs.T @ bs) / k) + ridge * np.eye(r)
     a_mat = 0.5 * (a_mat + a_mat.T)
-    b_mat = 0.5 * (b_mat + b_mat.T)
 
-    # Exact Riemannian / Fisher geometric mean: A^{1/2} (A^{1/2} B A^{1/2})^{-1/2} A^{1/2}
-    ea, va = np.linalg.eigh(a_mat)
-    ea = np.clip(ea, 1e-4, 1e4)
-    a_half = (va * np.sqrt(ea)[None, :]) @ va.T
-    w_mat = a_half @ b_mat @ a_half
-    w_mat = 0.5 * (w_mat + w_mat.T)
-    ew, vw = np.linalg.eigh(w_mat)
-    ew = np.clip(ew, 1e-4, 1e4)
-    w_inv_half = (vw * (1.0 / np.sqrt(ew))[None, :]) @ vw.T
-    m_sub_inv = a_half @ w_inv_half @ a_half
-    m_sub_inv = 0.5 * (m_sub_inv + m_sub_inv.T)
-
-    eigs, p_mat = np.linalg.eigh(m_sub_inv)
+    eigs, p_mat = np.linalg.eigh(a_mat)
     u_all = q @ p_mat  # (d, r) orthonormal candidate modes
 
-    # Directional Fisher-consistency gate: on linear/Gaussian correlations, -Corr(u^T y, u^T s) ~ 1
-    # and Var(u^T y) * Var(u^T s) ~ 1. On curved ridges (banana/Rosenbrock), scores are nonlinear
-    # in position so v_y * v_s >> 1 or |rho| << 1; damp those modes smoothly back toward 1.0.
-    uy = ys @ u_all  # (k, r)
-    us = ss @ u_all  # (k, r)
-    vy = np.mean(uy * uy, axis=0) + 1e-12
-    vs = np.mean(us * us, axis=0) + 1e-12
-    cov_ys = -np.mean(uy * us, axis=0)
-    rho = np.clip(cov_ys / np.sqrt(vy * vs), 0.0, 1.0)
-    mismatch = np.maximum(1.0, np.sqrt(vy * vs))
-    consistency = (rho ** 2) / mismatch
-
     # Soft-threshold gated log-eigenvalues toward 0 to suppress finite-sample noise
-    log_e = np.log(np.clip(eigs, 0.05, 20.0)) * consistency
-    tau = 0.25 * math.sqrt(r / max(k, 1))
+    log_e = np.log(np.clip(eigs, 0.05, 20.0))
+    tau = 0.35 * math.sqrt(r / max(k, 1))
     shrunk = np.sign(log_e) * np.maximum(0.0, np.abs(log_e) - tau)
-    keep = np.abs(shrunk) > 0.15
+    keep = np.abs(shrunk) > 0.30
     if not np.any(keep):
         return inv_d, None, None
 
@@ -198,7 +164,7 @@ def _estimate_fisher_metric(xs: np.ndarray, gs: np.ndarray) -> tuple[np.ndarray,
 
 def _find_finite_init(oracle, rng: np.random.Generator) -> tuple[np.ndarray, float, np.ndarray]:
     for _ in range(100):
-        x = rng.uniform(-2.0, 2.0, size=oracle.dim)
+        x = rng.uniform(-1.0, 1.0, size=oracle.dim)
         lp, g = oracle.log_density_gradient(x)
         if math.isfinite(lp) and np.all(np.isfinite(g)):
             return x, lp, g
@@ -217,13 +183,16 @@ def adapt_metric(oracle, budget, rng):
     updates = {int(0.3 * warmup): int(0.1 * warmup), int(0.7 * warmup): int(0.3 * warmup)}
     hist_x = np.empty((warmup, oracle.dim), dtype=float)
     hist_g = np.empty((warmup, oracle.dim), dtype=float)
-    step = StepSize(0.1)
+    step = StepSize(0.2)
     for i in range(warmup):
         if i in updates:
             s0 = updates[i]
             inv_d, u, eigs = _estimate_fisher_metric(hist_x[s0:i], hist_g[s0:i])
-            step = StepSize(step.eps)
-        w_cap = 24 if i < int(0.3 * warmup) else (48 if i < int(0.7 * warmup) else 96)
+            # Single dual-averaging restart (first metric update only): re-anchoring again
+            # at 0.7w discards accumulated hbar and re-noises the final eps estimate.
+            if i == int(0.3 * warmup):
+                step = StepSize(step.eps)
+        w_cap = 12 if i < int(0.3 * warmup) else (32 if i < int(0.7 * warmup) else 64)
         x, lp, g, accept = _warmup_hmc_step(
             oracle.log_density_gradient, x, lp, g, step.eps, _steps(step.eps, rng, max_steps=w_cap),
             inv_d, u, eigs, rng,
