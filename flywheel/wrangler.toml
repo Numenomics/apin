@@ -9,4 +9,4 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "apin-flywheel"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "d53402a0-da81-4743-9d4f-ac3986741312"

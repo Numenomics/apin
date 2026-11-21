@@ -12,3 +12,5 @@ autoresearch/lanes/*/archive/
 autoresearch/lanes/*/incumbent.py
 .apin_eval_queue.lock
 .apin_eval_queue.json
+flywheel/.wrangler/
+flywheel/node_modules/
