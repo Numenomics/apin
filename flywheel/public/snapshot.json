@@ -4404,9 +4404,9 @@
       "ratio_vs_incumbent": 1.0,
       "short_horizon_eff": 0.000207,
       "long_horizon_eff": 0.000422,
-      "real_stan_passed": null,
-      "real_stan_total": null,
-      "real_ess_per_cost": null,
+      "real_stan_passed": 4,
+      "real_stan_total": 5,
+      "real_ess_per_cost": 0.0240913,
       "overhead_ratio": 2.859,
       "b2_max": 0.10683,
       "dims": [
@@ -4440,10 +4440,47 @@
         "k_steps": 16,
         "adapt_draws": 100,
         "horizon_steps": 500,
-        "ast_sha": "6b48518ef53be205"
+        "ast_sha": "6b48518ef53be205",
+        "real_stan": {
+          "label": "a3_glm53_pdmp_1h",
+          "source_csv": "scores/multilane_1h_all/per_model.csv",
+          "real_overhead_ratio": 4.8756,
+          "models": {
+            "blr": {
+              "status": "right",
+              "reason": null,
+              "ess_per_cost": 0.0019310564484526368,
+              "overhead_ratio": 3.1070988384875573
+            },
+            "eight_schools_noncentered": {
+              "status": "right",
+              "reason": null,
+              "ess_per_cost": 0.018902236486479443,
+              "overhead_ratio": 7.289416807437526
+            },
+            "gp_regr": {
+              "status": "right",
+              "reason": null,
+              "ess_per_cost": 0.058338791888885244,
+              "overhead_ratio": 5.678719424059916
+            },
+            "garch11": {
+              "status": "right",
+              "reason": null,
+              "ess_per_cost": 0.017193129231568956,
+              "overhead_ratio": 2.4603585552274274
+            },
+            "eight_schools_centered": {
+              "status": "unproven",
+              "reason": "unproven: R-hat 1.270 on lp__",
+              "ess_per_cost": null,
+              "overhead_ratio": 5.842212200498158
+            }
+          }
+        }
       },
-      "metrics_json": "{\"adapt_draws\": 100, \"archive_cells\": [\"banana__oh_med\", \"funnel__oh_med\", \"gaussian_illcond__oh_med\", \"hybrid_rosenbrock__oh_med\", \"mixture_crossable__oh_med\", \"student_t__oh_med\"], \"ast_sha\": \"6b48518ef53be205\", \"horizon_steps\": 500, \"incumbent_soft_min\": 0.000295, \"judge_digest\": \"cc72bea8127b19f3\", \"k_steps\": 16, \"loc\": 89, \"magic_constants\": 28, \"median_adapt_cost\": 1770.0, \"queue_wait_s\": 0.0, \"repeats\": 2, \"seed\": 20261120, \"tier0_ok\": true, \"tier1_ok\": true, \"wall_s\": 40.142}",
-      "verified": 0,
+      "metrics_json": "{\"adapt_draws\": 100, \"archive_cells\": [\"banana__oh_med\", \"funnel__oh_med\", \"gaussian_illcond__oh_med\", \"hybrid_rosenbrock__oh_med\", \"mixture_crossable__oh_med\", \"student_t__oh_med\"], \"ast_sha\": \"6b48518ef53be205\", \"horizon_steps\": 500, \"incumbent_soft_min\": 0.000295, \"judge_digest\": \"cc72bea8127b19f3\", \"k_steps\": 16, \"loc\": 89, \"magic_constants\": 28, \"median_adapt_cost\": 1770.0, \"queue_wait_s\": 0.0, \"real_stan\": {\"label\": \"a3_glm53_pdmp_1h\", \"models\": {\"blr\": {\"ess_per_cost\": 0.0019310564484526368, \"overhead_ratio\": 3.1070988384875573, \"reason\": null, \"status\": \"right\"}, \"eight_schools_centered\": {\"ess_per_cost\": null, \"overhead_ratio\": 5.842212200498158, \"reason\": \"unproven: R-hat 1.270 on lp__\", \"status\": \"unproven\"}, \"eight_schools_noncentered\": {\"ess_per_cost\": 0.018902236486479443, \"overhead_ratio\": 7.289416807437526, \"reason\": null, \"status\": \"right\"}, \"garch11\": {\"ess_per_cost\": 0.017193129231568956, \"overhead_ratio\": 2.4603585552274274, \"reason\": null, \"status\": \"right\"}, \"gp_regr\": {\"ess_per_cost\": 0.058338791888885244, \"overhead_ratio\": 5.678719424059916, \"reason\": null, \"status\": \"right\"}}, \"real_overhead_ratio\": 4.8756, \"source_csv\": \"scores/multilane_1h_all/per_model.csv\"}, \"repeats\": 2, \"seed\": 20261120, \"tier0_ok\": true, \"tier1_ok\": true, \"wall_s\": 40.142}",
+      "verified": 1,
       "created_at": "2026-11-21T15:01:07.944559+00:00"
     },
     {
@@ -4495,6 +4532,111 @@
       "metrics_json": "{\"adapt_draws\": 100, \"archive_cells\": [], \"ast_sha\": \"6e5c110d0f3c2b75\", \"horizon_steps\": 500, \"incumbent_soft_min\": 0.000296, \"judge_digest\": \"cc72bea8127b19f3\", \"k_steps\": 16, \"loc\": 129, \"magic_constants\": 30, \"median_adapt_cost\": 601.0, \"queue_wait_s\": 0.0, \"repeats\": 2, \"seed\": 20261217, \"tier0_ok\": true, \"tier1_ok\": false, \"wall_s\": 65.51}",
       "verified": 0,
       "created_at": "2026-11-21T15:05:32.311049+00:00"
+    },
+    {
+      "id": "A3:glm53_pdmp_1h:T0003",
+      "parent_id": "A3:glm53_pdmp_1h:T0001",
+      "lane": "A3",
+      "run_id": "glm53_pdmp_1h",
+      "trial_id": "T0003",
+      "agent_model": "GLM-5.3-Flash",
+      "author": "GLM-5.3-Flash",
+      "title": "T0003: Trial 3: exact state-independent coin mixture (HMC descent p=0.6 | adjust...",
+      "hypothesis": "Trial 3: exact state-independent coin mixture (HMC descent p=0.6 | adjusted Boomerang orbit mini-steps w/ learned shrunk-Gaussian reference) fixes the position-gated kernel's reverse-pairing drift and beats the diag-HMC incumbent on dual-horizon soft-min",
+      "decision": "archive_only",
+      "soft_min_eff": 0.000262,
+      "ratio_vs_incumbent": 0.9296,
+      "short_horizon_eff": 0.000152,
+      "long_horizon_eff": 0.000452,
+      "real_stan_passed": null,
+      "real_stan_total": null,
+      "real_ess_per_cost": null,
+      "overhead_ratio": 3.899,
+      "b2_max": 0.11455,
+      "dims": [
+        6,
+        20
+      ],
+      "codex_refs": [
+        "pdmp-boomerang-zigzag"
+      ],
+      "code_sha": "e72f7d9cbd3bb931",
+      "metrics": {
+        "loc": 176,
+        "magic_constants": 52,
+        "wall_s": 73.467,
+        "queue_wait_s": 0.0,
+        "archive_cells": [
+          "funnel__oh_med",
+          "mixture_crossable__oh_med"
+        ],
+        "tier0_ok": true,
+        "tier1_ok": true,
+        "incumbent_soft_min": 0.000282,
+        "median_adapt_cost": 2485.0,
+        "judge_digest": "cc72bea8127b19f3",
+        "seed": 20261314,
+        "repeats": 2,
+        "k_steps": 16,
+        "adapt_draws": 100,
+        "horizon_steps": 500,
+        "ast_sha": "af6a468fa2cb5a64"
+      },
+      "metrics_json": "{\"adapt_draws\": 100, \"archive_cells\": [\"funnel__oh_med\", \"mixture_crossable__oh_med\"], \"ast_sha\": \"af6a468fa2cb5a64\", \"horizon_steps\": 500, \"incumbent_soft_min\": 0.000282, \"judge_digest\": \"cc72bea8127b19f3\", \"k_steps\": 16, \"loc\": 176, \"magic_constants\": 52, \"median_adapt_cost\": 2485.0, \"queue_wait_s\": 0.0, \"repeats\": 2, \"seed\": 20261314, \"tier0_ok\": true, \"tier1_ok\": true, \"wall_s\": 73.467}",
+      "verified": 0,
+      "created_at": "2026-11-21T15:25:30.791630+00:00"
+    },
+    {
+      "id": "A3:glm53_pdmp_1h:T0004",
+      "parent_id": "A3:glm53_pdmp_1h:T0001",
+      "lane": "A3",
+      "run_id": "glm53_pdmp_1h",
+      "trial_id": "T0004",
+      "agent_model": "GLM-5.3-Flash",
+      "author": "GLM-5.3-Flash",
+      "title": "T0004: Trial 4: raise HMC coin share to p=0.75 - recover studentT/banana descent...",
+      "hypothesis": "Trial 4: raise HMC coin share to p=0.75 - recover studentT/banana descent losses of T0003 while keeping the orbit branch's typical-set wins and cost advantage",
+      "decision": "archive_only",
+      "soft_min_eff": 0.000222,
+      "ratio_vs_incumbent": 0.8746,
+      "short_horizon_eff": 0.000136,
+      "long_horizon_eff": 0.000362,
+      "real_stan_passed": null,
+      "real_stan_total": null,
+      "real_ess_per_cost": null,
+      "overhead_ratio": 3.268,
+      "b2_max": 0.2934,
+      "dims": [
+        6,
+        20
+      ],
+      "codex_refs": [
+        "pdmp-boomerang-zigzag"
+      ],
+      "code_sha": "589320407a3af16b",
+      "metrics": {
+        "loc": 176,
+        "magic_constants": 52,
+        "wall_s": 82.728,
+        "queue_wait_s": 0.0,
+        "archive_cells": [
+          "mixture_crossable__oh_med"
+        ],
+        "tier0_ok": true,
+        "tier1_ok": true,
+        "incumbent_soft_min": 0.000254,
+        "median_adapt_cost": 2706.0,
+        "judge_digest": "cc72bea8127b19f3",
+        "seed": 20261411,
+        "repeats": 2,
+        "k_steps": 16,
+        "adapt_draws": 100,
+        "horizon_steps": 500,
+        "ast_sha": "6e3c7df9346c2abd"
+      },
+      "metrics_json": "{\"adapt_draws\": 100, \"archive_cells\": [\"mixture_crossable__oh_med\"], \"ast_sha\": \"6e3c7df9346c2abd\", \"horizon_steps\": 500, \"incumbent_soft_min\": 0.000254, \"judge_digest\": \"cc72bea8127b19f3\", \"k_steps\": 16, \"loc\": 176, \"magic_constants\": 52, \"median_adapt_cost\": 2706.0, \"queue_wait_s\": 0.0, \"repeats\": 2, \"seed\": 20261411, \"tier0_ok\": true, \"tier1_ok\": true, \"wall_s\": 82.728}",
+      "verified": 0,
+      "created_at": "2026-11-21T15:27:54.127811+00:00"
     }
   ],
   "edges": [
@@ -4977,6 +5119,18 @@
       "target": "A3:glm53_pdmp_1h:T0002",
       "lane": "A3",
       "decision": "discard_tier1"
+    },
+    {
+      "source": "A3:glm53_pdmp_1h:T0001",
+      "target": "A3:glm53_pdmp_1h:T0003",
+      "lane": "A3",
+      "decision": "archive_only"
+    },
+    {
+      "source": "A3:glm53_pdmp_1h:T0001",
+      "target": "A3:glm53_pdmp_1h:T0004",
+      "lane": "A3",
+      "decision": "archive_only"
     }
   ],
   "frontier": {
@@ -5380,6 +5534,23 @@
       "real_stan_pass_rate": 0.8,
       "real_ess_per_cost": 0.01448241,
       "overhead_ratio": 3.624,
+      "verified": 1
+    },
+    {
+      "id": "A3:glm53_pdmp_1h:T0001",
+      "lane": "A3",
+      "run_id": "glm53_pdmp_1h",
+      "trial_id": "T0001",
+      "agent_model": "GLM-5.3-Flash",
+      "title": "T0001: Trial 1: unmodified Lane A3 diagonal HMC baseline establishes the incumbe...",
+      "decision": "keep_baseline",
+      "soft_min_eff": 0.000295,
+      "ratio_vs_incumbent": 1.0,
+      "real_stan_passed": 4,
+      "real_stan_total": 5,
+      "real_stan_pass_rate": 0.8,
+      "real_ess_per_cost": 0.0240913,
+      "overhead_ratio": 2.859,
       "verified": 1
     }
   ]

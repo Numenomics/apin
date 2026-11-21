@@ -19,3 +19,14 @@
 2. **Honest warmup credit without horizon distortion:** Upgraded Tier 1 to a **dual-horizon geometric mean (`H_short=150` & `H_long=1000`)** with both horizons emitted as secondary `METRIC` monitors, so genuinely fast-warmup methods get real credit without kneecapping them or letting warmup starvation dominate long runs.
 3. **Exact-draw global-balance & provenance gates caught every genuine bug on first try:** Caught `DeepSeek`'s broken $t$-proposal (`rad_sq z=5.65`), `GLM A0`'s malformed leapfrog endpoint (`provenance`), and `GLM A0`'s `N(0,M)` vs `N(0,M⁻¹)` momentum mismatch (`aux_rad_sq z=740`), while passing `Muse A2`'s non-reversible persistent-momentum GHMC on 18/19 trials.
 4. **Two minor harness bugs fixed:** `normalize_aux_spec` now coerces `np.ndarray` fields to JSON-plain lists (preventing `json.dumps` crashes on `adapt_meta.json`), and `_gandy_scott_rank_check` uses a finite-sample calibrated threshold (fixing the `|z|=3.98 > 3.93` `T0001` baseline flake hit by both A2 and A3).
+
+---
+
+## Follow-Up Run on Upgraded Harness (`ca9d5af`): Black-Box PDMP Exploration (`glm53_pdmp_1h`, Lane A3)
+
+Running `GLM-5.3-Flash` (`zai-coding-plan/glm-5.3-flash`) on task `a3-pdmp-blackbox` (`codex/cards/pdmp-boomerang-zigzag.md`, `--dims 6,20 --repeats 2`, dual-horizon `H=150/1000`, calibrated Gandy–Scott ranks):
+- **Zero rank flakes on `T0001`**, `40–85 s/trial`, `aux_spec="normal"` worked cleanly out of the box.
+- **Adjusted elliptical Boomerang orbit** (`z' = z cos t + u sin t`, `u' = z sin t - u cos t`, 1 density eval per mini-step, exact $\pi \otimes \mathcal{N}(0, I)$ global balance, zero thinning-bound risk) beat diagonal HMC **2–8× at the typical set** on funnel/banana/Rosenbrock, but pure Boomerang could not descend radially from overdispersed starts (`T0002` failed mixing at `d=20`).
+- **Exactness counterexample caught by invariance suite:** Position-dependent gating (`if r² > gate: HMC else orbit`) broke MH reverse-proposal pairing (`lp` drift `z = 5.21`). Replacing it with a state-independent coin (`HMC p=0.6 | Boomerang orbit`, `T0003`) passed all exact-draw invariance checks cleanly (`max_z = 1.1–2.8`, Tier-1 long-horizon `4.52e-4` vs. baseline `4.22e-4`, dual-horizon ratio `0.93×`).
+- **Real Stan posteriors (`a3_glm53_pdmp_1h`, T0003 snapshot, 5 models × 3 reps):** Ranked **#1 overall** among all 5-model arms — **4 / 5 passed** (`blr`, `eight_schools_noncentered`, `gp_regr 0.0583/cost` [**1.45× CmdStan**], `garch11 0.0172/cost` [**1.70× CmdStan**]; `eight_schools_centered` `unproven: R-hat 1.270`), achieving **`1.02× [0.75, 1.39]` `ESS/cost`** and **`1.47× [0.97, 2.16]` (`p = 0.035`) `gate_speed`** vs. `a1_diag` (and **~1.08× CmdStan NUTS in `ESS/cost`**), up from `1 / 5` on the earlier `dim=6`-only Lane A3 run.
+
