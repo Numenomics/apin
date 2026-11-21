@@ -27,8 +27,20 @@ def test_autoresearch_a1_narrow_contract_and_novelty_filter(tmp_path):
     )
     assert r1["tier0_ok"] is True and r1["tier1_ok"] is True, r1
     assert r1["decision"] == "keep_baseline"
-    assert (lane_dir / "incumbent.py").is_file()
+    run_dir = lane_dir / "runs" / "test_run"
+    assert (run_dir / "incumbent.py").is_file()
+    assert not (lane_dir / "incumbent.py").exists()  # isolated per run_id
     assert len(r1["archive_cells"]) >= 1
+    assert r1["dim"] == 4 and r1["repeats"] == 1 and r1["horizon_steps"] == 500
+    assert r1["magic_constants"] > 0
+
+    # Dry-run duplicate check does NOT write a ledger row
+    dry = autoresearch.evaluate_lane_trial(
+        "A1", "Dry run duplicate", seed=43, dim=4, n_chains=36, k_steps=10, adapt_draws=60,
+        autoresearch_dir=tmp_path, run_id="test_run", dry_run=True,
+    )
+    assert dry["decision"] == "dry_run_duplicate" and dry["is_duplicate"] is True
+    assert len((run_dir / "ledger.jsonl").read_text().splitlines()) == 1
 
     # Trial 2: exact duplicate rejected immediately
     r2 = autoresearch.evaluate_lane_trial(
@@ -54,11 +66,13 @@ def test_autoresearch_a1_narrow_contract_and_novelty_filter(tmp_path):
     assert r4["tier0_ok"] is False and r4["decision"] == "discard_tier0"
     assert "adapt_metric" in r4["tier0_info"]["error"]
 
-    # Verify ledger.jsonl and auto-generated results.tsv have all 4 rows
-    run_dir = lane_dir / "runs" / "test_run"
+    # Verify ledger.jsonl and auto-generated results.tsv have all 4 rows + config columns
     ledger_lines = [json.loads(l) for l in (run_dir / "ledger.jsonl").read_text().splitlines()]
     tsv_lines = (run_dir / "results.tsv").read_text().splitlines()
     assert len(ledger_lines) == 4 and len(tsv_lines) == 5  # header + 4 rows
+    header = tsv_lines[0].split("\t")
+    for col in ("dim", "seed", "repeats", "k_steps", "adapt_draws", "horizon_steps", "magic_constants"):
+        assert col in header
 
 
 def test_autoresearch_full_kernel_lane_catches_stuck_and_logs_errors(tmp_path, monkeypatch):
@@ -115,3 +129,49 @@ def test_default_seed_schedule_no_overflow_on_banana_and_rosenbrock():
                 tgt, A1_SUB, seed=seed, n_chains=24, k_steps=8, adapt_draws=40, lane="A1", isolated=False,
             )
             assert "OverflowError" not in res.reason
+
+
+def test_horizon_amortization_and_simplicity_and_queue(tmp_path, monkeypatch):
+    """Verify horizon_steps amortization, Rule 2.5 simplicity regularizer, and FIFO queue lock."""
+    import threading
+    import time
+    from harness import queue
+
+    # 1. Horizon amortization keeps adapt_cost proportional to k_steps / horizon_steps
+    tgt = shapes.IllCondGaussian(4, seed=7, rotated=True, kappa=10.0)
+    r_amort = invariance.check_target_invariance(
+        tgt, A1_SUB, seed=7, n_chains=24, k_steps=10, adapt_draws=40,
+        lane="A1", isolated=False, horizon_steps=500,
+    )
+    assert r_amort.horizon_steps == 500
+    assert abs(r_amort.adapt_cost_amortized - r_amort.adapt_cost * (10.0 / 500.0)) < 1e-6
+
+    # 2. Rule 2.5 simplicity regularizer credits fewer magic constants and >=15% lower overhead
+    assert autoresearch._is_simpler(100, 100, 5, 6, 4.0, 4.0) is True
+    assert autoresearch._is_simpler(100, 100, 6, 6, 3.0, 4.0) is True
+    assert autoresearch._is_simpler(100, 100, 6, 6, 3.8, 4.0) is False
+    assert autoresearch._is_simpler(105, 100, 2, 10, 1.0, 4.0) is False  # larger LOC not simpler
+
+    # 3. Queue lock serializes concurrent eval slots cleanly
+    monkeypatch.setenv("APIN_FORCE_QUEUE", "1")
+    lock_file = tmp_path / "q.lock"
+    events: list[tuple[str, float]] = []
+
+    def worker(tag: str, hold: float):
+        with queue.eval_slot(tag, enabled=True, lock_path=lock_file):
+            events.append((f"{tag}:enter", time.perf_counter()))
+            time.sleep(hold)
+            events.append((f"{tag}:exit", time.perf_counter()))
+
+    t1 = threading.Thread(target=worker, args=("a", 0.15))
+    t2 = threading.Thread(target=worker, args=("b", 0.05))
+    t1.start()
+    time.sleep(0.03)
+    t2.start()
+    t1.join()
+    t2.join()
+    assert len(events) == 4
+    # Second worker must enter after first worker exits
+    assert events[1][0].endswith(":exit") and events[2][0].endswith(":enter")
+    assert events[2][1] >= events[1][1] - 1e-4
+

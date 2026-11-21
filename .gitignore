@@ -10,3 +10,5 @@ __pycache__/
 autoresearch/lanes/*/runs/
 autoresearch/lanes/*/archive/
 autoresearch/lanes/*/incumbent.py
+.apin_eval_queue.lock
+.apin_eval_queue.json

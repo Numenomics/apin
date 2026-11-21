@@ -264,7 +264,8 @@ def test_adapt_cost_is_billed_and_step0_nudge_kernel_fails_mixing():
     r_bloat = invariance.check_target_invariance(tgt, (bloated_adapt, rwm_trans), seed=5, n_chains=48, k_steps=14)
     assert r_cheap.passed and r_bloat.passed
     assert r_bloat.adapt_cost > r_cheap.adapt_cost + 3000.0
-    assert r_bloat.empirical_efficiency < 0.1 * r_cheap.empirical_efficiency
+    assert r_bloat.adapt_cost_amortized > r_cheap.adapt_cost_amortized + 80.0
+    assert r_bloat.empirical_efficiency < 0.25 * r_cheap.empirical_efficiency
 
     # Step-0 nudge then freeze: moves slightly only if aux==0, then freezes (aux stays 1) -> fails late-step mixing
     def nudge_adapt(oracle, budget, rng):

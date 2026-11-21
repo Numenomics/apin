@@ -7,7 +7,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import autoresearch, cost, grid, invariance, models, records, reference, sampler, score, shapes
+from . import autoresearch, cost, grid, invariance, models, queue, records, reference, sampler, score, shapes
 from .models import ROOT
 
 
@@ -75,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--draws", type=int, help="draws per chain; default: the model's budget")
     r.add_argument("--base-seed", type=int, default=grid.BASE_SEED,
                    help="rep r uses BASE_SEED + 1000 r; the benchmark's scorer keeps its own secret (BENCH.md)")
+    r.add_argument("--no-queue", action="store_true", help="bypass the host FIFO evaluation lock")
 
     s = sub.add_parser("score", help="score finished runs")
     s.add_argument("--runs", type=Path, default=ROOT / "runs")
@@ -140,7 +141,13 @@ def main(argv: list[str] | None = None) -> int:
     ae.add_argument("--run-id", default="default")
     ae.add_argument("--seed", type=int)
     ae.add_argument("--dim", type=int, default=6)
+    ae.add_argument("--repeats", type=int, default=2, help="paired Tier 1 suites per trial (default: 2)")
+    ae.add_argument("--horizon-steps", type=int, default=500,
+                    help="sampling horizon for amortizing adapt_cost in Tier 1 (default: 500)")
+    ae.add_argument("--submission", type=Path, help="override submission file path")
     ae.add_argument("--allow-duplicate", action="store_true")
+    ae.add_argument("--dry-run", action="store_true", help="lint & check duplicates without writing a ledger row")
+    ae.add_argument("--no-queue", action="store_true", help="bypass the host FIFO evaluation lock")
 
     a = ap.parse_args(argv)
     if a.cmd == "list":
@@ -159,8 +166,9 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "run":
         settings = sampler.Settings(cmdstan=a.cmdstan, build_dir=a.build, options=_opts(a.opt))
         s_obj = sampler.get(a.sampler, settings)
-        done = grid.run_grid(s_obj, models.select(a.models), a.reps, a.runs, a.label, a.chains, a.warmup, a.draws,
-                             base_seed=a.base_seed)
+        with queue.eval_slot(f"run:{a.label or a.sampler}:{a.models}", enabled=not a.no_queue):
+            done = grid.run_grid(s_obj, models.select(a.models), a.reps, a.runs, a.label, a.chains, a.warmup, a.draws,
+                                 base_seed=a.base_seed)
         failed = list(a.runs.glob(f"{a.label or a.sampler}/*/rep*/FAILED"))
         print(f"{len(done)} reps done, {len(failed)} failed")
         return 1 if failed else 0
@@ -213,12 +221,20 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "autoresearch":
         row = autoresearch.evaluate_lane_trial(
             a.lane, a.hypothesis, codex_refs=a.codex_ref, seed=a.seed,
-            dim=a.dim, run_id=a.run_id, allow_duplicate=a.allow_duplicate,
+            dim=a.dim, repeats=a.repeats, horizon_steps=a.horizon_steps,
+            run_id=a.run_id, allow_duplicate=a.allow_duplicate,
+            submission_path=a.submission, dry_run=a.dry_run, use_queue=not a.no_queue,
         )
+        if a.dry_run:
+            print(f"{row['trial_id']} [{row['lane']}] dry_run={row['decision']} "
+                  f"dup={row['is_duplicate']} lint_ok={row['lint_ok']} loc={row['loc']} "
+                  f"consts={row['magic_constants']}")
+            return 0 if row["decision"] == "dry_run_ok" else 2
         print(f"{row['trial_id']} [{row['lane']}] decision={row['decision']} "
               f"tier0={row['tier0_ok']} tier1={row['tier1_ok']} "
               f"soft_min={row.get('soft_min_eff')} ratio={row.get('ratio_vs_incumbent')} "
-              f"wall={row['wall_s']}s")
+              f"dim={row.get('dim')} repeats={row.get('repeats')} "
+              f"qwait={row.get('queue_wait_s')}s wall={row['wall_s']}s")
         return 0 if row["tier0_ok"] else 1
     return 2
 

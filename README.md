@@ -76,10 +76,13 @@ uv run apin costs build --models all                      # measure target-calib
 uv run apin codex validate                                # validate codex/INDEX.yaml schema & card links
 uv run apin invariance --sampler examples/samplers/hmc.py # calibrated exact-draw invariance & dispersed-start mixing
 uv run apin records validate records/<release>/<track>/<slug>
-uv run apin autoresearch eval --lane A1 --hypothesis "..." # Tier 0/1 trial against read-only harness/judge.py
+uv run apin autoresearch eval --lane A1 --run-id my_run --repeats 2 --hypothesis "..."
+uv run apin autoresearch eval --lane A1 --run-id my_run --dry-run --hypothesis "pre-check"
+# Validate a Lane A1 (`adapt_metric`) submission directly on real Stan posteriors:
+uv run apin run logdensity --label a1_cand --opt sampler=autoresearch/lanes/A1/submission.py --opt lane=A1 --models blr,gp_regr --reps 3
 ```
 
-Note: Slices 3–5 (`records`, `invariance`, `autoresearch`) are active scaffolds with out-of-process brokered oracle IPC, calibrated omnibus/rank invariance checks, and the locked Lane A1 `adapt_metric` seam; OS-level container sandboxing and a private sealed holdout remain Slice 6.
+Autoresearch lanes (`A0` ground-up full sampler, `A1` preconditioning/metric, `A2` multiscale/funnel dynamics, `A3` integrators/momentum/trajectories) each isolate `incumbent.py`, `archive/`, `ledger.jsonl`, and `results.tsv` per `--run-id`, snapshot `submission.py` at trial start, amortize Tier 1 `adapt_cost` to a 500-step sampling horizon (`--horizon-steps`), and serialize concurrent host evals through a built-in FIFO lock (`harness/queue.py`, bypass with `--no-queue` or `APIN_NO_QUEUE=1`). Note: OS-level container sandboxing and a private sealed holdout remain Slice 6.
 
 The first logdensity run of each model builds a BridgeStan library, one to two minutes per model.
 

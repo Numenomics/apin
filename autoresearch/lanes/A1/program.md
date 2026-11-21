@@ -29,11 +29,15 @@ Discover an `adapt()` preconditioning and metric-estimation strategy that minimi
    - `codex_refs`: card IDs cited
    - `assumption`: what geometry/regime this improves and why it will not harm funnels or isotropic targets
    - `falsification_test`: which check or model will refute it if wrong
-3. **Edit `submission.py`** and run `apin autoresearch eval --lane A1` (runs pre-eval novelty check → Tier 0 < 30 s → Tier 1 paired candidate-vs-incumbent on identical fresh seeds).
+3. **Edit `submission.py`** and run `apin autoresearch eval --lane A1 --run-id <run_id> --repeats 2 --hypothesis "..."` (use `--dry-run` first to lint/check duplicates without writing a ledger row). The runner snapshots `submission.py` at start, acquires the host FIFO evaluation lock (`harness/queue.py`), isolates `incumbent.py` and `archive/` per `--run-id`, amortizes `adapt_cost` to a 500-step sampling horizon (`--horizon-steps 500`) so warmup starvation cannot game Tier 1, and runs paired multi-seed Tier 1 evaluation.
 4. **Ratchet & Archive decision (enforced by runner):**
-   - **Fail Tier 0 or any Tier 1 accuracy/replay gate:** discard (`git reset --hard`), keep immutable `ledger.jsonl` row. If a general mechanism fails cleanly across $\ge 2$ disciplined variants, append a scoped entry to `NEGATIVE_MEMORY.md`.
-   - **Pass + beats incumbent by $\ge \delta_{\text{noise}}$ (or simpler within $\delta_{\text{noise}}$):** keep commit as new lane incumbent.
-   - **Pass + new best in a MAP-Elites cell** (e.g., best on high-dim rotated Gaussian, or lowest warmup fraction, or best on `eight_schools_centered`): save patch to `archive/<cell>/` before resetting worktree.
+   - **Fail Tier 0 or any Tier 1 accuracy/replay gate:** restore from `autoresearch/lanes/A1/runs/<run_id>/incumbent.py` (or `git checkout -- autoresearch/lanes/A1/submission.py` if working solo on a branch), keeping the immutable `ledger.jsonl` row. If a general mechanism fails cleanly across $\ge 2$ disciplined variants, append a scoped entry to `NEGATIVE_MEMORY.md`.
+   - **Pass + beats incumbent by $\ge \delta_{\text{noise}}$ (or simpler within $\delta_{\text{noise}}$: fewer LOC, fewer magic constants, or $\ge 15\%$ lower overhead):** runner promotes the snapshot to `runs/<run_id>/incumbent.py`.
+   - **Pass + new best in a MAP-Elites cell:** runner saves patch to `runs/<run_id>/archive/<cell>/` automatically.
+5. **Real-posterior verification (recommended before declaring a breakthrough):**
+   ```bash
+   apin run logdensity --label a1_cand --opt sampler=autoresearch/lanes/A1/submission.py --opt lane=A1 --models blr,eight_schools_noncentered,gp_regr,garch11,eight_schools_centered --reps 3
+   ```
 
 ## 4. Priority Starting Hypotheses
 

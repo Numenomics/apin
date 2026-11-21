@@ -236,6 +236,8 @@ class InvarianceResult:
     aux_ok: bool = True
     rank_ok: bool = True
     dispersed_ess_min: float = 0.0
+    adapt_cost_amortized: float = 0.0
+    horizon_steps: int = 500
 
 
 def _omnibus_threshold(n_funcs: int, alpha: float) -> float:
@@ -441,6 +443,7 @@ def check_target_invariance(
     isolated: bool = True,
     n_dispersed: int | None = None,
     check_ranks: bool = True,
+    horizon_steps: int = 500,
 ) -> InvarianceResult:
     """Run adapt() once, freeze tuning, then run:
       1. Exact-draw joint invariance: `n_chains` independent starts drawn from
@@ -680,12 +683,17 @@ def check_target_invariance(
         mse = float(np.mean((chain_means - mu_true) ** 2))
         ess_effs.append((sd_true ** 2) / max(mse, 1e-12))
 
-    # Bill adapt_counter + per-chain transition cost (no free warmup!)
+    # Bill adapt_counter amortized to a realistic sampling horizon (default 500 steps, ~1:5 warmup:sampling
+    # like Stan's 1000:5000) so Tier 1 rewards steady-state transition efficiency instead of starving warmup,
+    # while still capping runaway adapt_cost via max_adapt_cost.
     adapt_cost = _counter_cost(adapt_counter, r_grad)
     inv_trans_cost = _counter_cost(inv_counter, r_grad)
     disp_trans_cost = _counter_cost(disp_counter, r_grad)
     cost_total = adapt_cost + inv_trans_cost + disp_trans_cost
-    cost_per_chain = max(1.0, adapt_cost + (disp_trans_cost / max(1, n_disp)))
+    adapt_amort = adapt_cost * (float(k_steps) / float(horizon_steps)) if horizon_steps > 0 else adapt_cost
+    cost_per_chain = max(1.0, adapt_amort + (disp_trans_cost / max(1, n_disp)))
+    max_adapt_cost = max(200_000.0, float(adapt_draws) * 1024.0 * max(1.0, r_grad))
+    adapt_cap_ok = adapt_cost <= max_adapt_cost
 
     disp_ess_min = float(min(ess_effs)) if ess_effs else 0.0
     emp_eff = disp_ess_min / cost_per_chain
@@ -694,7 +702,7 @@ def check_target_invariance(
     total_eval_s = adapt_counter.eval_s + inv_counter.eval_s + disp_counter.eval_s
     overhead_ratio = max(0.0, total_elapsed - total_eval_s) / total_eval_s if total_eval_s > 0 else 0.0
 
-    passed = invariance_ok and mixing_ok
+    passed = invariance_ok and mixing_ok and adapt_cap_ok
     reason = ""
     if not omnibus_ok:
         reason = f"invariance rejected on {worst_fn}: |z|={max_z:.2f} > {z_thresh:.2f} (b2_max={b2_max:.4g})"
@@ -702,6 +710,8 @@ def check_target_invariance(
         reason = rank_reason
     elif not mixing_ok:
         reason = f"stuck/identity kernel: late mean latent step {mean_move:.3g} < {min_movement_sd:.3g}"
+    elif not adapt_cap_ok:
+        reason = f"adapt cost {adapt_cost:.0f} exceeded cap {max_adapt_cost:.0f}"
 
     return InvarianceResult(
         target=target.family,
@@ -723,6 +733,8 @@ def check_target_invariance(
         aux_ok=aux_ok,
         rank_ok=rank_ok,
         dispersed_ess_min=disp_ess_min,
+        adapt_cost_amortized=adapt_amort,
+        horizon_steps=int(horizon_steps),
     )
 
 
