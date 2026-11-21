@@ -14,3 +14,4 @@ autoresearch/lanes/*/incumbent.py
 .apin_eval_queue.json
 flywheel/.wrangler/
 flywheel/node_modules/
+flywheel/seed.sql
