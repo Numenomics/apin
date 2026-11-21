@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>apin Flywheel — Autoresearch DAG &amp; Alignment</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">◎</div>
+        <div>
+          <h1>apin Flywheel</h1>
+          <p class="subtitle">Multi-lane MCMC Autoresearch DAG, Real-Stan Alignment &amp; Claim Ledger</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span id="data-source-badge" class="badge badge-muted">Loading...</span>
+        <button id="refresh-btn" class="btn" type="button" title="Reload DAG from API">↻ Refresh</button>
+        <button id="theme-toggle" class="btn" type="button" aria-label="Toggle color theme">◐ Theme</button>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="kpi-strip" aria-label="Key metrics">
+        <article class="kpi-card">
+          <span class="kpi-label">Total Trials</span>
+          <strong class="kpi-value" id="kpi-nodes">—</strong>
+          <span class="kpi-sub" id="kpi-runs">— runs</span>
+        </article>
+        <article class="kpi-card">
+          <span class="kpi-label">Active Lanes</span>
+          <strong class="kpi-value" id="kpi-lanes">—</strong>
+          <span class="kpi-sub" id="kpi-lane-list">—</span>
+        </article>
+        <article class="kpi-card">
+          <span class="kpi-label">Kept Breakthroughs</span>
+          <strong class="kpi-value" id="kpi-kept">—</strong>
+          <span class="kpi-sub" id="kpi-keep-rate">— keep rate</span>
+        </article>
+        <article class="kpi-card">
+          <span class="kpi-label">Active Claims</span>
+          <strong class="kpi-value" id="kpi-claims">—</strong>
+          <span class="kpi-sub">Unexpired leases</span>
+        </article>
+        <article class="kpi-card">
+          <span class="kpi-label">Best Real-Stan Pass</span>
+          <strong class="kpi-value" id="kpi-real-stan">—</strong>
+          <span class="kpi-sub" id="kpi-real-stan-sub">Verified models</span>
+        </article>
+      </section>
+
+      <section class="panel dag-panel">
+        <div class="panel-header">
+          <div>
+            <h2>Research DAG</h2>
+            <p class="panel-desc">Parent → child incumbent lineage across lanes. Click any node to inspect hypothesis, codex refs, and metrics.</p>
+          </div>
+          <div class="legend" aria-label="DAG Legend">
+            <span class="legend-item"><i class="dot lane-A0"></i>A0</span>
+            <span class="legend-item"><i class="dot lane-A1"></i>A1</span>
+            <span class="legend-item"><i class="dot lane-A2"></i>A2</span>
+            <span class="legend-item"><i class="dot lane-A3"></i>A3</span>
+            <span class="legend-sep">|</span>
+            <span class="legend-item"><i class="shape shape-keep"></i>keep</span>
+            <span class="legend-item"><i class="shape shape-base"></i>baseline</span>
+            <span class="legend-item"><i class="shape shape-simpler"></i>simpler</span>
+            <span class="legend-item"><i class="shape shape-archive"></i>archive</span>
+            <span class="legend-item"><i class="shape shape-discard"></i>discard</span>
+            <span class="legend-item"><i class="shape shape-verified"></i>real-Stan verified</span>
+          </div>
+        </div>
+        <div id="dag-scroll" class="dag-scroll">
+          <svg id="dag-svg" class="dag-svg" role="img" aria-label="Interactive Research DAG"></svg>
+        </div>
+      </section>
+
+      <section class="charts-grid">
+        <article class="panel chart-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Frontier Progression (Tier-1)</h2>
+              <p class="panel-desc">Cumulative best kept <code>soft_min_eff</code> per lane over trial sequence.</p>
+            </div>
+            <label class="inline-toggle">
+              <input type="checkbox" id="frontier-log-toggle" checked />
+              <span>Log Y</span>
+            </label>
+          </div>
+          <div id="frontier-chart-wrap" class="chart-wrap">
+            <svg id="frontier-svg" class="chart-svg" role="img" aria-label="Frontier progression chart"></svg>
+          </div>
+        </article>
+
+        <article class="panel chart-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Tier-1 vs. Real-Stan Alignment</h2>
+              <p class="panel-desc">Tier-1 <code>ratio_vs_incumbent</code> vs. Real-Stan gate pass rate (click points to inspect).</p>
+            </div>
+          </div>
+          <div id="alignment-chart-wrap" class="chart-wrap">
+            <svg id="alignment-svg" class="chart-svg" role="img" aria-label="Tier-1 vs Real-Stan alignment scatter"></svg>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Active Claims</h2>
+            <p class="panel-desc">Live TTL-leased tasks preventing duplicate agent runs.</p>
+          </div>
+          <span class="badge badge-muted" id="claims-count-badge">0 active</span>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Task ID</th>
+                <th>Lane</th>
+                <th>Agent</th>
+                <th>Summary</th>
+                <th>Expires</th>
+              </tr>
+            </thead>
+            <tbody id="claims-tbody">
+              <tr><td colspan="5" class="empty-cell">No active claims.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header ledger-header">
+          <div>
+            <h2>Trial Ledger</h2>
+            <p class="panel-desc">Filter across lanes, models, decisions, or hypothesis text.</p>
+          </div>
+          <div class="filters">
+            <select id="filter-lane" aria-label="Filter by lane">
+              <option value="">All lanes</option>
+            </select>
+            <select id="filter-model" aria-label="Filter by model">
+              <option value="">All models</option>
+            </select>
+            <select id="filter-decision" aria-label="Filter by decision">
+              <option value="">All decisions</option>
+            </select>
+            <input id="filter-search" type="search" placeholder="Search hypothesis, run, SHA..." aria-label="Search trials" />
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table ledger-table">
+            <thead>
+              <tr>
+                <th>Lane</th>
+                <th>Run / Trial</th>
+                <th>Model</th>
+                <th>Decision</th>
+                <th class="num">soft_min_eff</th>
+                <th class="num">Ratio</th>
+                <th class="num">Real-Stan</th>
+                <th class="num">Overhead</th>
+                <th>Hypothesis</th>
+              </tr>
+            </thead>
+            <tbody id="ledger-tbody">
+              <tr><td colspan="9" class="empty-cell">Loading trials...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <aside id="node-drawer" class="drawer" aria-hidden="true">
+      <div class="drawer-header">
+        <div>
+          <div class="drawer-badges" id="drawer-badges"></div>
+          <h3 id="drawer-title">Node Details</h3>
+          <code id="drawer-id" class="drawer-id"></code>
+        </div>
+        <button id="drawer-close" class="btn btn-icon" type="button" aria-label="Close detail drawer">✕</button>
+      </div>
+      <div class="drawer-body" id="drawer-body"></div>
+    </aside>
+    <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
+
+    <div id="tooltip" class="tooltip" hidden></div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

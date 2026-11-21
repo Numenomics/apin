@@ -1,0 +1,12 @@
+name = "apin-flywheel"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "apin-flywheel"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
