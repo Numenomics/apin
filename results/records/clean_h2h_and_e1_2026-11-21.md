@@ -6,12 +6,13 @@
 
 ---
 
-## 1. Clean-Machine Head-to-Head: CmdStan NUTS vs. `nutpie` vs. `walnutpie` (16 Models × 5 Reps)
+## 1. Clean-Machine Head-to-Head: CmdStan NUTS vs. `nutpie` vs. `walnutpie` vs. Standalone Pathfinder (16 Models × 5 Reps)
 
 Arms compared sequentially on the same 16 scored models (covering all 5 families, including both `bym2_offset_only` and `diamonds`):
 - **`cmdstan`**: CmdStan 2.39.0 NUTS (default settings)
 - **`nutpie_diag`**: `nutpie 0.16.11` (`nuts-rs`, `adaptation=diag`, `save_warmup=True`)
 - **`nutpie_lowrank`**: `nutpie 0.16.11` (`nuts-rs`, `adaptation=low_rank`, `save_warmup=True`)
+- **`pathfinder_only`**: CmdStan 2.39.0 standalone multi-path Pathfinder (`method=pathfinder`, `num_paths=4`, `num_psis_draws=draws`, no MCMC — non-Markov-chain stress test of the bench gate)
 - **`walnutpie_mw50`**: `walnutpie` `stan_cli` (`43b6435`, `--metric-window 50`, no Pathfinder inits, BridgeStan 2.9.0)
 
 ### Aggregate Ranking (Paired Hierarchical Bootstrap vs. `cmdstan`, 2000 reps)
@@ -21,33 +22,41 @@ Arms compared sequentially on the same 16 scored models (covering all 5 families
 | 1 | `cmdstan` | **14 / 16** | `1.00` | `1.00` | `1.00` |
 | 2 | `nutpie_lowrank` | **10 / 16** | **5.51×** `[2.67, 13.63]` (`p=0.000`) | **5.42×** `[2.80, 12.38]` (`p=0.000`) | **3.87×** `[1.64, 10.82]` (`p=0.000`) |
 | 3 | `nutpie_diag` | **10 / 16** | **1.59×** `[1.38, 1.83]` (`p=0.000`) | **1.54×** `[1.18, 1.91]` (`p=0.000`) | **1.42×** `[1.19, 1.70]` (`p=0.000`) |
-| 4 | `walnutpie_mw50` | **5 / 16** | **0.82×** `[0.60, 1.03]` (`p=0.942`) | **1.04×** `[0.70, 1.43]` (`p=0.419`) | **0.97×** `[0.65, 1.43]` (`p=0.554`) |
+| 4 | `pathfinder_only` | **6 / 16** | *uncounted* | *uncounted* | **8.51×** `[4.61, 22.73]` (`p=0.000`) |
+| 5 | `walnutpie_mw50` | **5 / 16** | **0.82×** `[0.60, 1.03]` (`p=0.942`) | **1.04×** `[0.70, 1.43]` (`p=0.419`) | **0.97×** `[0.65, 1.43]` (`p=0.554`) |
 
 ### Per-Model Results (`ESS/cost`, `ESS/s`, `cost_to_gate`, or Gate Verdict)
 
-| Model | `cmdstan` | `nutpie_lowrank` | `nutpie_diag` | `walnutpie_mw50` |
-|---|---|---|---|---|
-| `arma11` | **pass** `0.0224/cost`, `6922/s`, `109k` gate | `unproven`: R-hat 1.525 (`mu`) | `unproven`: R-hat 1.525 (`sigma`) | `wrong`: rep2 `SIGABRT` (-6) |
-| `blr` | **pass** `0.00390/cost`, `5349/s`, `410k` gate | **pass** `0.0334/cost`, `21456/s`, `80k` gate (**8.6×**) | **pass** `0.00842/cost`, `7064/s`, `180k` gate | `unproven`: R-hat 4.141 (`sigma`) |
-| `bym2_offset_only` | **pass** `0.000233/cost`, `2.86/s`, `5.51M` gate | `unproven`: R-hat 1.527 (`theta.936`) | `unproven`: R-hat 1.594 (`theta.231`) | `unproven`: R-hat 3.637 (`phi.1420`) |
-| `diamonds` | **pass** `0.000165/cost`, `4.91/s`, `13.0M` gate | **pass** `0.0237/cost`, `709/s`, `142k` gate (**144×**) | **pass** `0.000176/cost`, `5.04/s`, `8.40M` gate | `unproven`: R-hat 2.553 (`b.2`) |
-| `dogs_hierarchical` | **pass** `0.0231/cost`, `647/s`, `62k` gate | **pass** `0.0531/cost`, `1700/s`, `26k` gate (**2.3×**) | **pass** `0.0523/cost`, `1690/s`, `37k` gate | **pass** `0.0248/cost`, `927/s`, `50k` gate |
-| `eight_schools_centered` | `wrong`: `lp__` mean `e=-0.274` | `wrong`: `lp__` mean `e=-0.298` | `unproven`: ESS 155 (`tau`) | `unproven`: R-hat 1.033 (`lp__`) |
-| `eight_schools_noncentered` | **pass** `0.0177/cost`, `18548/s`, `145k` gate | `unproven`: `tau` sq `e=+0.0985` | **pass** `0.0227/cost`, `16622/s`, `148k` gate | **pass** `0.0189/cost`, `31649/s`, `160k` gate |
-| `garch11` | **pass** `0.0103/cost`, `1100/s`, `172k` gate | **pass** `0.0236/cost`, `2333/s`, `50k` gate (**2.3×**) | **pass** `0.0176/cost`, `1775/s`, `187k` gate | **pass** `0.00469/cost`, `501/s`, `404k` gate |
-| `gp_regr` | **pass** `0.0401/cost`, `11308/s`, `53k` gate | **pass** `0.0633/cost`, `13218/s`, `34k` gate (**1.6×**) | **pass** `0.0612/cost`, `13151/s`, `40k` gate | **pass** `0.0357/cost`, `10596/s`, `53k` gate |
-| `kidscore_momiq` | **pass** `0.00327/cost`, `1268/s`, `569k` gate | **pass** `0.0442/cost`, `12528/s`, `49k` gate (**13.5×**) | `unproven`: `beta.2` mean `e=+0.0953` | `unproven`: `proj.1` sq `e=-0.0603` |
-| `logmesquite_logvash` | **pass** `0.00256/cost`, `1835/s`, `715k` gate | **pass** `0.0331/cost`, `15337/s`, `73k` gate (**12.9×**) | **pass** `0.00309/cost`, `2320/s`, `854k` gate | `unproven`: R-hat 1.013 (`beta.3`) |
-| `lotka_volterra` | **pass** `0.00168/cost`, `66.8/s`, `1.77M` gate | `unproven`: R-hat 1.229 (`theta.3`) | `wrong`: rep2 took `3154 s > 1800 s` | `unproven`: R-hat 1.027 (`theta.1`) |
-| `low_dim_gauss_mix` | **pass** `0.0181/cost`, `262/s`, `130k` gate | **pass** `0.0347/cost`, `448/s`, `50k` gate (**1.9×**) | **pass** `0.0327/cost`, `438/s`, `64k` gate | `unproven`: R-hat 1.016 (`proj.5`) |
-| `pilots` | `unproven`: R-hat 1.092 (`sigma_a`) | `wrong`: `lp__` `q95` `e=+0.204` | `unproven`: R-hat 1.103 (`b.4`) | `unproven`: R-hat 3.079 (`a.4`) |
-| `radon_variable_intercept_slope_noncentered` | **pass** `0.00159/cost`, `109/s`, `1.14M` gate | **pass** `0.00295/cost`, `38.1/s`, `703k` gate (**1.9×** cost, **0.35×** wall) | **pass** `0.00280/cost`, `186/s`, `812k` gate | `unproven`: `proj.2` sq `e=+0.0689` |
-| `wells_dist100_model` | **pass** `0.0281/cost`, `602/s`, `55k` gate | **pass** `0.115/cost`, `2417/s`, `14k` gate (**4.1×**) | **pass** `0.0446/cost`, `968/s`, `36k` gate | **pass** `0.0227/cost`, `499/s`, `48k` gate |
+| Model | `cmdstan` | `nutpie_lowrank` | `nutpie_diag` | `pathfinder_only` | `walnutpie_mw50` |
+|---|---|---|---|---|---|
+| `arma11` | **pass** `0.0224/cost`, `6922/s`, `109k` gate | `unproven`: R-hat 1.525 (`mu`) | `unproven`: R-hat 1.525 (`sigma`) | `unproven`: calibration `1.79×` (`p=0.00071`) | `wrong`: rep2 `SIGABRT` (-6) |
+| `blr` | **pass** `0.00390/cost`, `5349/s`, `410k` gate | **pass** `0.0334/cost`, `21456/s`, `80k` gate (**8.6×**) | **pass** `0.00842/cost`, `7064/s`, `180k` gate | **pass** `39212/s` (**7.3×** wall; cal `1.51×`, `p=0.016`) | `unproven`: R-hat 4.141 (`sigma`) |
+| `bym2_offset_only` | **pass** `0.000233/cost`, `2.86/s`, `5.51M` gate | `unproven`: R-hat 1.527 (`theta.936`) | `unproven`: R-hat 1.594 (`theta.231`) | `wrong`: nonfinite `lp__` | `unproven`: R-hat 3.637 (`phi.1420`) |
+| `diamonds` | **pass** `0.000165/cost`, `4.91/s`, `13.0M` gate | **pass** `0.0237/cost`, `709/s`, `142k` gate (**144×**) | **pass** `0.000176/cost`, `5.04/s`, `8.40M` gate | `unproven`: R-hat 1.893 (`b.3`) | `unproven`: R-hat 2.553 (`b.2`) |
+| `dogs_hierarchical` | **pass** `0.0231/cost`, `647/s`, `62k` gate | **pass** `0.0531/cost`, `1700/s`, `26k` gate (**2.3×**) | **pass** `0.0523/cost`, `1690/s`, `37k` gate | **pass** `2564/s` (**4.0×** wall) | **pass** `0.0248/cost`, `927/s`, `50k` gate |
+| `eight_schools_centered` | `wrong`: `lp__` mean `e=-0.274` | `wrong`: `lp__` mean `e=-0.298` | `unproven`: ESS 155 (`tau`) | `unproven`: R-hat 1.237 (`tau`) | `unproven`: R-hat 1.033 (`lp__`) |
+| `eight_schools_noncentered` | **pass** `0.0177/cost`, `18548/s`, `145k` gate | `unproven`: `tau` sq `e=+0.0985` | **pass** `0.0227/cost`, `16622/s`, `148k` gate | `unproven`: R-hat 1.120 (`mu`) | **pass** `0.0189/cost`, `31649/s`, `160k` gate |
+| `garch11` | **pass** `0.0103/cost`, `1100/s`, `172k` gate | **pass** `0.0236/cost`, `2333/s`, `50k` gate (**2.3×**) | **pass** `0.0176/cost`, `1775/s`, `187k` gate | `wrong`: `lp__` mean `e=+0.159` (`bound=0.101`) | **pass** `0.00469/cost`, `501/s`, `404k` gate |
+| `gp_regr` | **pass** `0.0401/cost`, `11308/s`, `53k` gate | **pass** `0.0633/cost`, `13218/s`, `34k` gate (**1.6×**) | **pass** `0.0612/cost`, `13151/s`, `40k` gate | **pass** `48306/s` (**4.3×** wall; cal `1.52×`, `p=0.040`) | **pass** `0.0357/cost`, `10596/s`, `53k` gate |
+| `kidscore_momiq` | **pass** `0.00327/cost`, `1268/s`, `569k` gate | **pass** `0.0442/cost`, `12528/s`, `49k` gate (**13.5×**) | `unproven`: `beta.2` mean `e=+0.0953` | **pass** `108865/s` (**85.9×** wall) | `unproven`: `proj.1` sq `e=-0.0603` |
+| `logmesquite_logvash` | **pass** `0.00256/cost`, `1835/s`, `715k` gate | **pass** `0.0331/cost`, `15337/s`, `73k` gate (**12.9×**) | **pass** `0.00309/cost`, `2320/s`, `854k` gate | `unproven`: ESS 261 (`proj.3`) | `unproven`: R-hat 1.013 (`beta.3`) |
+| `lotka_volterra` | **pass** `0.00168/cost`, `66.8/s`, `1.77M` gate | `unproven`: R-hat 1.229 (`theta.3`) | `wrong`: rep2 took `3154 s > 1800 s` | `unproven`: R-hat 1.044 (`proj.5`) | `unproven`: R-hat 1.027 (`theta.1`) |
+| `low_dim_gauss_mix` | **pass** `0.0181/cost`, `262/s`, `130k` gate | **pass** `0.0347/cost`, `448/s`, `50k` gate (**1.9×**) | **pass** `0.0327/cost`, `438/s`, `64k` gate | **pass** `1611/s` (**6.2×** wall) | `unproven`: R-hat 1.016 (`proj.5`) |
+| `pilots` | `unproven`: R-hat 1.092 (`sigma_a`) | `wrong`: `lp__` `q95` `e=+0.204` | `unproven`: R-hat 1.103 (`b.4`) | `unproven`: R-hat 1.326 (`proj.1`) | `unproven`: R-hat 3.079 (`a.4`) |
+| `radon_variable_intercept_slope_noncentered` | **pass** `0.00159/cost`, `109/s`, `1.14M` gate | **pass** `0.00295/cost`, `38.1/s`, `703k` gate (**1.9×** cost, **0.35×** wall) | **pass** `0.00280/cost`, `186/s`, `812k` gate | `unproven`: R-hat 2.555 (`alpha_raw.8`) | `unproven`: `proj.2` sq `e=+0.0689` |
+| `wells_dist100_model` | **pass** `0.0281/cost`, `602/s`, `55k` gate | **pass** `0.115/cost`, `2417/s`, `14k` gate (**4.1×**) | **pass** `0.0446/cost`, `968/s`, `36k` gate | **pass** `3488/s` (**5.8×** wall) | **pass** `0.0227/cost`, `499/s`, `48k` gate |
 
 ### Key Conclusions from the Head-to-Head
-1. **Standalone `walnutpie` (`43b6435`, `--metric-window 50`, without Pathfinder inits) does not hold parity with CmdStan NUTS or `nutpie`:** It passed only **5 / 16** models (vs. 14 / 16 CmdStan and 10 / 16 `nutpie`), crashed with `SIGABRT` on `arma11` rep2, failed to mix on `blr`, `diamonds`, and `bym2_offset_only`, and was `0.82× [0.60, 1.03]` in ESS/cost (`0.97× [0.65, 1.43]` ESS/s) on the 5 shared passing models.
+1. **Standalone `walnutpie` (`43b6435`, `--metric-window 50`, without Pathfinder inits) does not hold parity with CmdStan NUTS or `nutpie`:** It passed only **5 / 16** models (vs. 14 / 16 CmdStan, 10 / 16 `nutpie`, and 6 / 16 standalone Pathfinder), crashed with `SIGABRT` on `arma11` rep2, failed to mix on `blr`, `diamonds`, and `bym2_offset_only`, and was `0.82× [0.60, 1.03]` in ESS/cost (`0.97× [0.65, 1.43]` ESS/s) on the 5 shared passing models.
 2. **`nutpie_lowrank` confirms massive correlated-posterior gains—and sharp open failure modes:** On the 10 shared passing models it reached **5.51×** ESS/cost (**144×** on `diamonds`, **13.5×** on `kidscore_momiq`, **12.9×** on `logmesquite_logvash`, **8.6×** on `blr`), but failed to pass `bym2_offset_only`, `arma11`, `lotka_volterra`, `eight_schools_noncentered`, and showed funnel bias (`wrong`) on both `eight_schools_centered` and `pilots`, plus a **2.9× wall-clock slowdown** on high-dim `radon_variable_intercept_slope_noncentered` (`38.1/s` vs. `109/s` CmdStan, `186/s` `nutpie_diag`).
-3. **Quiet-machine `accel_gp` reconciliation (`BENCH.md:271`):** All 5 reps of `cmdstan` on `accel_gp` (`4 × 20 000` draws) completed in **324–385 s** (zero timeouts vs. `2945 s > 1800 s` under load in `BENCH.md`). Its clean-machine verdict is **`unproven: proj.17 square e=+0.0583 bound=0.144`**, confirming the earlier `wrong` verdict was solely load-induced timeout while the underlying rare excursion on `proj.17` remains.
+3. **Standalone Pathfinder (`pathfinder_only`, no MCMC guarantees) is a sharp diagnostic for the bench gate itself:**
+   - **What passed (6 / 16):** Smooth, near-Gaussian unimodal posteriors (`blr`, `dogs_hierarchical`, `gp_regr`, `kidscore_momiq`, `low_dim_gauss_mix` with ordered constraint, `wells_dist100_model`) passed the 0.1-SD gate at **8.51× `[4.61, 22.73]`** wall-clock ESS/s over CmdStan (**85.9×** on `kidscore_momiq`), beating `walnutpie_mw50`'s 5 / 16 pass count.
+   - **How the gate caught the remaining 10 / 16:**
+     - **Rule 2 calibration caught overconfident approximate draws on `arma11`:** Every rep passed individually, yet between-rep error variance was **1.79×** the claimed MCSE (`p = 0.00071`), rejecting the model. Even on the 6 passing models, Pathfinder's calibration ratio leaned overconfident (`1.51×`, `p = 0.016` on `blr`; `1.52×`, `p = 0.040` on `gp_regr`), reflecting PSIS-resampled draws whose nominal within-chain ESS understates between-run variational approximation error.
+     - **Hard bias / support failures (`wrong`, 2 models):** `garch11` (`lp__` mean error `+0.159` vs. bound `0.101`) and `bym2_offset_only` (nonfinite `lp__`).
+     - **Inter-run disagreement / PSIS weight collapse (`unproven`, 7 models):** `diamonds` (R-hat 1.893), `eight_schools_centered` (R-hat 1.237), `eight_schools_noncentered` (R-hat 1.120), `logmesquite_logvash` (ESS 261), `lotka_volterra` (R-hat 1.044), `pilots` (R-hat 1.326), `radon_variable_intercept_slope_noncentered` (R-hat 2.555).
+   - **Design implication:** The real-posterior 0.1-SD gate + calibration test rejects a non-MCMC approximation on 10 / 16 models—including subtle overconfidence on `arma11`—while confirming why the kernel ABI (`adapt`/`transition`) + analytic exact-draw invariance suite (Ruling R-001) remains indispensable: on nearly Gaussian targets, a variational/Laplace approximation can legitimately sit well inside 0.1 reference SDs without leaving the target invariant.
+4. **Quiet-machine `accel_gp` reconciliation (`BENCH.md:271`):** All 5 reps of `cmdstan` on `accel_gp` (`4 × 20 000` draws) completed in **324–385 s** (zero timeouts vs. `2945 s > 1800 s` under load in `BENCH.md`). Its clean-machine verdict is **`unproven: proj.17 square e=+0.0583 bound=0.144`**, confirming the earlier `wrong` verdict was solely load-induced timeout while the underlying rare excursion on `proj.17` remains.
 
 ---
 

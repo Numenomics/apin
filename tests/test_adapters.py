@@ -10,11 +10,22 @@ import pytest
 from harness import cmdstan, models, sampler, score
 from harness.adapters import cmdstan as cmdstan_adapter
 from harness.adapters import nutpie as nutpie_adapter
-from harness.adapters import pathfinder, walnutpie
+from harness.adapters import pathfinder, pathfinder_only, walnutpie
 
 
 def test_registry_lists_every_adapter():
-    assert {"cmdstan", "pathfinder", "nutpie", "walnutpie"} <= set(sampler.registry())
+    assert {"cmdstan", "pathfinder", "pathfinder_only", "nutpie", "walnutpie"} <= set(sampler.registry())
+
+
+def test_parse_pathfinder_only_footer(tmp_path):
+    p = tmp_path / "chain_0.csv"
+    p.write_text(
+        "lp_approx__,lp__,path__,x\n0.0,-1.0,1,0.5\n"
+        "# Elapsed Time: 0.009000 seconds (Pathfinders)\n"
+        "#               0.010000 seconds (PSIS)\n"
+        "#               0.019000 seconds (Total)\n"
+    )
+    assert pathfinder_only.parse_pathfinder_time(p) == (0.009, 0.01, 0.019)
 
 
 def test_manifest_and_shipped_data():
