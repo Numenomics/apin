@@ -11,11 +11,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Set up Python
         run: uv python install 3.12
       - name: Sync dependencies
         run: uv sync --frozen
       - name: Run fast unit tests
         run: uv run pytest -m "not slow"
+      - name: Run Flywheel Worker tests
+        run: node --test flywheel/tests/worker.test.mjs
       - name: Validate Codex index
         run: uv run apin codex validate
+      - name: Validate PR submission records (if any)
+        run: |
+          if [ -d records ]; then
+            find records -mindepth 3 -maxdepth 3 -type d | while read -r rec; do
+              uv run apin records validate "$rec"
+            done
+          fi
+      - name: Check submodule pin reachability
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uv run python scripts/check_submodules.py --check-pins --verify-remote

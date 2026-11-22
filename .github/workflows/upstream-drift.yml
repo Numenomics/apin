@@ -1,0 +1,21 @@
+name: Upstream Drift Report
+
+on:
+  schedule:
+    # Mondays at 08:00 UTC (read-only digest; never modifies branches or pins)
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate read-only upstream drift report
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/check_submodules.py --drift-report | tee -a "$GITHUB_STEP_SUMMARY"
