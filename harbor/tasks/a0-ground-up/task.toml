@@ -1,0 +1,23 @@
+version = "1.0"
+
+[metadata]
+author_name = "Numenomics/apin"
+category = "optimize"
+lane = "A0"
+difficulty = "hard"
+description = "Build an adjusted posterior sampler from a 43-LOC isotropic RWM stub"
+tags = ["mcmc", "optimization", "bayesian", "apin", "A0"]
+
+[agent]
+timeout_sec = 3600.0
+
+[verifier]
+timeout_sec = 600.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 4096
+gpus = 0
+allow_internet = false

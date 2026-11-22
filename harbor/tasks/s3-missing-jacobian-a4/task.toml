@@ -1,0 +1,22 @@
+version = "1.0"
+
+[metadata]
+author_name = "Numenomics/apin"
+category = "rewind"
+difficulty = "easy"
+description = "Fix missing log-det-Jacobian & pullback gradient in Lane A4 sinh-arcsinh transport"
+tags = ["mcmc", "invariance", "bayesian", "apin"]
+
+[agent]
+timeout_sec = 900.0
+
+[verifier]
+timeout_sec = 180.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 4096
+gpus = 0
+allow_internet = false
