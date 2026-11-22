@@ -1,24 +1,24 @@
 # apin
 
-**apin** is a benchmark and autoresearch workbench for MCMC samplers and the libraries under them. It evaluates any sampler — Python kernels or C++/Rust upstreams like CmdStan, nutpie, and walnutpie — over a fixed suite of 20 scored [posteriordb](https://github.com/stan-dev/posteriordb) models plus fresh affine-invariant analytic stress shapes. Every run is checked against a reference posterior under a strict **0.1-SD accuracy gate** and calibrated global-balance invariance checks: fast-and-wrong samplers earn zero credit, and passing samplers are compared by target-calibrated cost units (`ESS/cost` for algorithmic progress) alongside wall-clock speed (`ESS/s` for implementation progress).
+**apin** is a benchmark and autoresearch workbench for **Bayesian posterior approximators** and the libraries under them — covering adjusted MCMC & PDMP samplers, unadjusted/variational approximators (e.g. Pathfinder, VI, Laplace, ULA, normalizing-flow transports), and upstream C++/Rust engines like CmdStan, nutpie, and walnutpie. Every method is evaluated over 20 scored [posteriordb](https://github.com/stan-dev/posteriordb) models plus fresh affine-invariant analytic stress shapes against a strict **0.1-SD accuracy gate** (and global-balance invariance checks on adjusted tracks): fast-and-wrong methods earn zero credit, and passing runs are compared by target-calibrated cost units (`ESS/cost` for algorithmic progress) alongside wall-clock speed (`ESS/s` for implementation progress).
 
-The project separates **verified results in Git** from **live experiment bookkeeping**. Winning submissions, harness code, and lane specs live in this repository (keeping it light), while the live **[apin Flywheel](https://apin-flywheel.m0hawk.workers.dev)** tracks every trial (kept, archived, and discarded), parent→child research lineage, active task leases, and synthetic-vs-real-Stan alignment. Reads on Flywheel are public; contributors use personal revocable tokens to stream trials and open GitHub PRs under `records/` for verified winners.
+The project separates **verified results in Git** from **live experiment bookkeeping**. Winning submissions, harness code, and lane specs live in this repository (keeping it light), while the live **[apin Flywheel](https://apin-flywheel.m0hawk.workers.dev)** tracks every trial (kept, archived, and discarded), parent→child research lineage, active task leases, and synthetic-vs-real-Stan alignment. Reads on Flywheel are public; contributors stream live trials with a personal revocable token and submit verified winners via GitHub PRs under `records/`.
 
-To get started locally, install [uv](https://docs.astral.sh/uv/) and Python 3.12+:
+To run locally, install [uv](https://docs.astral.sh/uv/) and Python 3.12+:
 
 ```bash
 git clone https://github.com/Numenomics/apin.git && cd apin
 uv sync && uv run apin fetch-data && uv run pytest
 ```
 
-Read [BENCH.md](BENCH.md) for the scoring rules and anti-gaming defenses, [PROTOCOL.md](PROTOCOL.md) for the measurement contract, [REPORT.md](REPORT.md) for the 2026 Stan wall-time campaign, [flywheel/README.md](flywheel/README.md) for the live research DAG & contributor keys, and [auto-research.md](auto-research.md) if you are running an autonomous coding agent.
+**Want to join & stream trials to Flywheel?** Browsing the dashboard and running local benchmarks need no token. To get a personal revocable contributor token (`apfw_...`), open a short GitHub issue on [Numenomics/apin](https://github.com/Numenomics/apin/issues) with your handle (or use `POST /api/register` if a community invite code is posted), then set `export APIN_FLYWHEEL_TOKEN=<token>` — `apin autoresearch eval` will stream your trials automatically. See [BENCH.md](BENCH.md) for scoring rules, [PROTOCOL.md](PROTOCOL.md) for the measurement contract, [REPORT.md](REPORT.md) for the 2026 Stan wall-time campaign, [flywheel/README.md](flywheel/README.md) for the Flywheel API/MCP docs, and [auto-research.md](auto-research.md) for autonomous coding agents.
 
 ---
 
 ## Tracks & Lanes
 
 **Benchmark Tracks** (published separately — never pooled across tiers):
-- **Algorithmic:** `L1` (primary: adjusted kernels by calibrated cost units `n_density + r_m * n_gradient`), `L3` (Haar rotation + `1e-2..1e2` scale stress), `L4` (unadjusted kernels — measured bias & cost to `b²_max < 0.01`, segregated from L1), `L5` (density-only `n_gradient == 0`).
+- **Algorithmic:** `L1` (primary: adjusted Markov kernels by calibrated cost units `n_density + r_m * n_gradient`), `L3` (Haar rotation + `1e-2..1e2` scale stress), `L4` (unadjusted & approximate posterior methods — ULA, unadjusted MCLMC, Foster ULD, VI/Pathfinder/Laplace — measured bias & cost to `b²_max < 0.01`, segregated from L1), `L5` (density-only `n_gradient == 0`).
 - **Implementation:** `L2` (wall-clock `ESS/s` + host fingerprint), `S2` (upstream autodiff/compiler patches with byte-identical draw canary).
 
 **Autoresearch Lanes** (isolated search islands):

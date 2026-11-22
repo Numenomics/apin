@@ -71,8 +71,16 @@ Refresh `seed.sql` and `public/snapshot.json` from local runs at any time:
 
 ## Live Instance & Contributor Onboarding
 
-- **Public dashboard & read API:** `https://apin-flywheel.m0hawk.workers.dev`
-- **Auto-streaming trials:** Export `APIN_FLYWHEEL_TOKEN=<your-token>` (URL defaults to `https://apin-flywheel.m0hawk.workers.dev`); every `uv run apin autoresearch eval` automatically posts kept + discarded trials with parent→child lineage.
+- **Public dashboard & read API:** `https://apin-flywheel.m0hawk.workers.dev` (no token needed for browsing or reading `/api/frontier`, `/api/dag`, `/api/nodes`, `/api/claims`).
+- **How to get a contributor token:**
+  1. **Invite-only (default):** Open a short GitHub issue on [Numenomics/apin](https://github.com/Numenomics/apin/issues) with your desired handle (e.g. your GitHub username). The maintainer mints a personal revocable `apfw_...` contributor token (rate-limited per hour; posts are stamped with your handle and `verified = 0`).
+  2. **Self-serve (when an invite code is posted):**
+     ```bash
+     curl -fsS -X POST https://apin-flywheel.m0hawk.workers.dev/api/register \
+       -H "Content-Type: application/json" \
+       -d '{"handle":"your-handle","invite_code":"<community-invite-code>"}'
+     ```
+- **Auto-streaming trials:** Export `APIN_FLYWHEEL_TOKEN="<your-token>"` (URL defaults to `https://apin-flywheel.m0hawk.workers.dev`); every `uv run apin autoresearch eval` automatically posts kept + discarded trials with parent→child lineage.
 - **Minting a contributor key (maintainer):**
   ```bash
   curl -fsS -X POST https://apin-flywheel.m0hawk.workers.dev/api/admin/keys \
@@ -80,7 +88,7 @@ Refresh `seed.sql` and `public/snapshot.json` from local runs at any time:
     -H "Content-Type: application/json" \
     -d '{"handle":"researcher-name","role":"contributor","hourly_limit":120}'
   ```
-- **Optional self-serve registration:** Run `npx wrangler secret put FLYWHEEL_INVITE_CODE` to enable `POST /api/register` with `{ "handle": "...", "invite_code": "..." }` (leave unset to keep registration invite-only via `/api/admin/keys`).
+- **Enabling/rotating self-serve registration (maintainer):** Run `npx wrangler secret put FLYWHEEL_INVITE_CODE` (leave unset to keep registration maintainer-minted only).
 - **Promoting winners into Git:** Only verified/notable submissions go into `Numenomics/apin` via GitHub PR (`records/<release>/<track>/<date>_<slug>/`); once reproduced, mark the Flywheel node verified via `POST /api/admin/nodes/<id>/verify`.
 
 ## MCP Client Config Snippet
