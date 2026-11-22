@@ -99,8 +99,48 @@ def adapt_transport(oracle, budget, rng):
         scale = np.sqrt(inv_m)
 
     transport_tuning = {
-        "eps": float(np.clip(eps, 1e-4, 2.0)),
+        "eps": float(np.clip(eps, 0.04, 0.8)),
         "loc": np.asarray(loc, dtype=np.float64),
         "scale": np.asarray(scale, dtype=np.float64),
     }
+
+    # Calibrate latent-space step size so dispersed latent starts never stall (0% acceptance).
+    def _latent_eval(z_vec):
+        th, ldj = forward(transport_tuning, z_vec)
+        lp_th, g_th = oracle.log_density_gradient(th)
+        if not (math.isfinite(lp_th) and math.isfinite(ldj) and np.all(np.isfinite(g_th))):
+            return -math.inf, np.zeros(d, dtype=np.float64)
+        return float(lp_th) + float(ldj), pullback_grad(transport_tuning, z_vec, g_th)
+
+    eps_lat = float(np.clip(eps, 0.05, 0.7))
+    for probe_sd in (1.0, 2.0):
+        z0 = rng.normal(0.0, probe_sd, size=d)
+        lp0, g0 = _latent_eval(z0)
+        if not math.isfinite(lp0):
+            continue
+        for frac in (1.0, 0.5, 0.25, 0.125, 0.0625):
+            e = max(0.03, eps_lat * frac)
+            n_i = max(2, min(16, int(math.ceil(1.5 / e))))
+            p = rng.standard_normal(d)
+            h0 = lp0 - 0.5 * float(p @ p)
+            z1, lp1, g1, p1 = z0, lp0, g0, p + 0.5 * e * g0
+            ok = True
+            for i in range(n_i):
+                z1 = z1 + e * p1
+                lp1, g1 = _latent_eval(z1)
+                if not (math.isfinite(lp1) and np.all(np.isfinite(g1))):
+                    ok = False
+                    break
+                if i < n_i - 1:
+                    p1 = p1 + e * g1
+            if ok:
+                p1 = p1 + 0.5 * e * g1
+                h1 = lp1 - 0.5 * float(p1 @ p1)
+                if math.isfinite(h1) and math.exp(min(0.0, h1 - h0)) >= 0.4:
+                    eps_lat = min(eps_lat, e)
+                    break
+        else:
+            eps_lat = min(eps_lat, 0.04)
+
+    transport_tuning["eps"] = float(np.clip(eps_lat, 0.03, 0.8))
     return transport_tuning, x
