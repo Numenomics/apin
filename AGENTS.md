@@ -1,6 +1,6 @@
 # Agent Entry Point (`AGENTS.md`)
 
-For open-ended requests ("contribute", "use spare tokens", "run autoresearch", "improve MCMC"), start with [auto-research.md](auto-research.md). Explicit user assignments take precedence over the default task picker.
+For open-ended requests ("set this up", "contribute", "use spare tokens", "run autoresearch", "improve posterior inference"), ensure local setup (`uv sync && uv run apin fetch-data && uv run pytest -q` if `.venv/` is missing) and start with [CONTRIBUTING.md](CONTRIBUTING.md) and [auto-research.md](auto-research.md). Explicit user assignments take precedence over the default task picker.
 
 ## Standing Rules (Non-Negotiable)
 1. **No upstream posts:** Never open issues, comments, PRs, or reviews on `stan-dev`, `flatironinstitute`, `pymc-devs`, or `cmdstanr` (`upstream/STATUS.md`). Write local drafts/records only; the owner submits upstream personally.
