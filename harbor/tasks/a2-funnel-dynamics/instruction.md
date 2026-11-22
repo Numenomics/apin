@@ -2,6 +2,8 @@
 
 Optimize `adapt()` and `transition()` in `/app/autoresearch/lanes/A2/submission.py` to survive multiscale funnels, bananas, hybrid Rosenbrock ridges, and heavy tails across `dims=(6,20)` (e.g., reversible WALNUTS micro-step halving, DRGHMC delayed rejection, GHMC+Barker) while preserving exact-draw global-balance invariance and maximizing dual-horizon `soft_min_eff`.
 
+> **Scoring note:** `soft_min_eff` is a **$p = -4$ power mean** over per-class geometric means, so the **weakest target class dominates**. Check `CLASS_METRIC` after each trial and lift the worst class without regressing it.
+
 ## Rules
 - Read `/app/autoresearch/lanes/A2/program.md`, `/app/autoresearch/RULINGS.md`, and `/app/codex/INDEX.yaml`.
 - Edit **ONLY** `/app/autoresearch/lanes/A2/submission.py`. Never modify `harness/`, `models/`, or `data/`.

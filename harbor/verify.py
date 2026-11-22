@@ -10,14 +10,18 @@ Writes Harbor-standard `/logs/verifier/reward.txt` and `/logs/verifier/reward.js
 from __future__ import annotations
 
 import argparse
+import ast
+import hashlib
 import json
 import math
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+_CAND_ROOT = Path(__file__).resolve().parent.parent
+ROOT = _CAND_ROOT if (_CAND_ROOT / "harness").is_dir() else (Path("/app") if Path("/app/harness").is_dir() else Path.cwd())
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -41,13 +45,80 @@ def _default_out_dir() -> Path:
     return Path.cwd() / "verifier_out"
 
 
-def _write_rewards(out_dir: Path, reward: float, payload: dict) -> None:
+_TRIVIAL_CONSTS = frozenset({-1, 0, 1, 2, -1.0, 0.0, 1.0, 2.0})
+
+
+def _solution_stats(submission: Path) -> dict:
+    """Measure code size and structural complexity of the submitted Python file."""
+    if not submission.is_file():
+        return {}
+    raw = submission.read_bytes()
+    text = raw.decode("utf-8", errors="replace")
+    loc = sum(1 for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#"))
+    magic_constants = 0
+    ast_nodes = 0
+    cyclomatic = 1
+    try:
+        tree = ast.parse(text)
+        for node in ast.walk(tree):
+            ast_nodes += 1
+            if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+                if node.value not in _TRIVIAL_CONSTS:
+                    magic_constants += 1
+            elif isinstance(node, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.ExceptHandler, ast.IfExp)):
+                cyclomatic += 1
+            elif isinstance(node, ast.BoolOp):
+                cyclomatic += max(0, len(node.values) - 1)
+            elif isinstance(node, ast.comprehension):
+                cyclomatic += 1 + len(node.ifs)
+    except SyntaxError:
+        pass
+    return {
+        "loc": loc,
+        "bytes": len(raw),
+        "magic_constants": magic_constants,
+        "ast_nodes": ast_nodes,
+        "cyclomatic_complexity": cyclomatic,
+        "sha256": hashlib.sha256(raw).hexdigest()[:16],
+    }
+
+
+def _archive_submission(submission: Path, out_dir: Path) -> None:
+    if submission.is_file():
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dest = out_dir / "submission.py"
+        if submission.resolve() != dest.resolve():
+            shutil.copy2(submission, dest)
+
+
+def _write_rewards(out_dir: Path, reward: float, payload: dict, *, submission: Path | None = None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     clean_reward = float(reward) if (math.isfinite(reward) and reward > 0.0) else 0.0
-    out = {"reward": round(clean_reward, 6), **payload}
+    extra = dict(payload)
+    if submission is not None and submission.is_file():
+        extra.setdefault("solution", _solution_stats(submission))
+        _archive_submission(submission, out_dir)
+    details = {"reward": round(clean_reward, 6), **extra}
+    # Harbor's verifier requires reward.json to contain strictly numeric values (int/float).
+    numeric_rewards: dict[str, float | int] = {"reward": round(clean_reward, 6)}
+    if "passed" in extra:
+        numeric_rewards["passed"] = 1 if extra["passed"] else 0
+    for k in ("speedup", "soft_min_eff", "baseline_soft_min", "short_horizon_soft_min",
+              "long_horizon_soft_min", "b2_max", "overhead_ratio", "emp_eff", "max_z"):
+        v = extra.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+            numeric_rewards[k] = round(float(v), 6)
+    sol = extra.get("solution") if isinstance(extra.get("solution"), dict) else {}
+    for sk, nk in (("loc", "solution_loc"), ("cyclomatic_complexity", "solution_cyclomatic"),
+                   ("magic_constants", "solution_magic_constants"), ("ast_nodes", "solution_ast_nodes")):
+        sv = sol.get(sk)
+        if isinstance(sv, (int, float)) and not isinstance(sv, bool) and math.isfinite(sv):
+            numeric_rewards[nk] = int(sv)
+
     (out_dir / "reward.txt").write_text(f"{clean_reward:.6f}\n", encoding="utf-8")
-    (out_dir / "reward.json").write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(out, indent=2))
+    (out_dir / "reward.json").write_text(json.dumps(numeric_rewards, indent=2) + "\n", encoding="utf-8")
+    (out_dir / "details.json").write_text(json.dumps(details, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(details, indent=2))
 
 
 def verify_rewind(task_id: str, submission: Path, out_dir: Path, tasks_path: Path) -> int:
@@ -59,7 +130,7 @@ def verify_rewind(task_id: str, submission: Path, out_dir: Path, tasks_path: Pat
         return 1
     res = rewind.evaluate_rewind_task(tasks[resolved_id], submission)
     passed = 1 if res["passed"] else 0
-    _write_rewards(out_dir, float(passed), {"passed": passed, **res})
+    _write_rewards(out_dir, float(passed), {"passed": passed, **res}, submission=submission)
     return 0 if passed else 1
 
 
@@ -92,6 +163,7 @@ def verify_optimize(
             _write_rewards(
                 out_dir, 0.0,
                 {"passed": 0, "tier0_ok": False, "tier0_info": t0_info, "lane": lane},
+                submission=sub,
             )
             return 1
 
@@ -121,6 +193,7 @@ def verify_optimize(
                     "failed_targets": failed[:8],
                     "by_class": cand["by_class"],
                 },
+                submission=sub,
             )
             return 1
 
@@ -150,6 +223,7 @@ def verify_optimize(
                 "overhead_ratio": round(float(cand["overhead_ratio"]), 3),
                 "by_class": {k: round(float(v), 6) for k, v in cand["by_class"].items()},
             },
+            submission=sub,
         )
         return 0
 

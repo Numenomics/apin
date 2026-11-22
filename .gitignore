@@ -15,3 +15,5 @@ autoresearch/lanes/*/incumbent.py
 flywheel/.wrangler/
 flywheel/node_modules/
 flywheel/seed.sql
+verifier_out/
+jobs/

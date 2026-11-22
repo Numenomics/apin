@@ -96,3 +96,71 @@ def test_harbor_verify_rewind_writes_rewards(tmp_path):
     )
     assert r_def.returncode == 0, r_def.stdout + r_def.stderr
     assert float((tmp_path / "verifier_out" / "reward.txt").read_text().strip()) == 1.0
+
+
+def test_harbor_verify_records_solution_complexity_and_collector_builds_page(tmp_path):
+    """harbor/verify.py records LOC/cyclomatic/AST stats & archives submission.py; collector renders HTML."""
+    import importlib.util
+
+    verify_py = ROOT / "harbor" / "verify.py"
+    out_dir = tmp_path / "job1" / "trial_a" / "verifier"
+    r = subprocess.run(
+        [
+            sys.executable, str(verify_py), "rewind",
+            "--task-id", "s3-position-gated-mh",
+            "--submission", str(ROOT / "autoresearch" / "lanes" / "S3" / "fixtures" / "position_gated_ref.py"),
+            "--out-dir", str(out_dir),
+        ],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    # reward.json must contain strictly numeric values for Harbor's verifier parser
+    reward_num = json.loads((out_dir / "reward.json").read_text())
+    assert all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in reward_num.values()), reward_num
+    assert reward_num["reward"] == 1.0 and reward_num["passed"] == 1 and reward_num["solution_loc"] > 10
+    details = json.loads((out_dir / "details.json").read_text())
+    sol = details["solution"]
+    assert sol["loc"] > 10 and sol["cyclomatic_complexity"] >= 1 and sol["ast_nodes"] > 20
+    assert (out_dir / "submission.py").is_file()
+
+    # Create synthetic Harbor result.json + opencode-v2.txt next to verifier/ and test collector
+    trial_dir = tmp_path / "job1" / "trial_a"
+    agent_dir = trial_dir / "agent"
+    agent_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(json.dumps({
+        "trial_name": "s3-position-gated-mh__abc",
+        "task_name": "s3-position-gated-mh",
+        "config": {
+            "agent": {
+                "name": "opencode-v2",
+                "model_name": "zai-coding-plan/glm-5.3-flash",
+                "kwargs": {"reasoning_effort": "high"},
+            },
+            "task": {"path": "harbor/tasks/s3-position-gated-mh"},
+        },
+        "started_at": "2026-11-22T04:00:00Z",
+        "finished_at": "2026-11-22T04:01:30Z",
+        "agent_execution": {"started_at": "2026-11-22T04:00:05Z", "finished_at": "2026-11-22T04:01:20Z"},
+        "verifier_result": {"rewards": {"reward": 1.0}},
+    }))
+    (agent_dir / "opencode-v2.txt").write_text("\n".join([
+        json.dumps({"type": "tool_use", "part": {"state": {"input": {"command": "uv run apin invariance --sampler /app/submission.py --dim 4"}}}}),
+        json.dumps({"type": "text", "part": {"text": "Replaced radial gate with state-independent 50/50 coin mixture."}}),
+        json.dumps({"type": "step_finish", "part": {"tokens": {"input": 10000, "output": 500, "reasoning": 1200, "cache": {"read": 40000, "write": 2000}}, "cost": 0.0}}),
+    ]) + "\n")
+
+    spec = importlib.util.spec_from_file_location("collect_harbor_results", ROOT / "scripts" / "collect_harbor_results.py")
+    mod = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(mod)
+
+    pricing = json.loads((ROOT / "benchmarks" / "pricing.json").read_text())
+    data = mod.collect_jobs([tmp_path / "job1"], pricing, release_tag="bench-v0.1.0")
+    assert len(data["trials"]) == 1 and len(data["leaderboard"]) == 1
+    tr = data["trials"][0]
+    assert tr["input_tokens"] == 10000 and tr["cached_tokens"] == 40000 and tr["reasoning_tokens"] == 1200
+    assert tr["cache_hit_rate"] == 0.8 and tr["test_runs"] == 1 and tr["tool_calls"] == 1 and tr["turns"] == 1
+    assert tr["cost_usd"] > 0 and tr["agent_wall_s"] == 75.0
+    assert "coin mixture" in tr["approach_summary"]
+    html = mod.render_html(data)
+    assert "Price Pareto Frontier" in html and "GLM-5.3-Flash" in html

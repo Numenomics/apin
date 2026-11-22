@@ -27,7 +27,7 @@ KernelBench-style optimization tasks. Agent starts from a frozen baseline and ma
 | Task | Lane | Frozen Baseline | Reward |
 |---|---|---|---|
 | `a0-ground-up` | `A0` | 43-LOC isotropic RWM stub | `soft_min_cand / soft_min_base` (0 if invariance fails) |
-| `a1-preconditioning` | `A1` | Diagonal dual-averaging HMC (`adapt_metric`) | `soft_min_cand / soft_min_base` (0 if invariance fails) |
+| `a1-preconditioning` | `A1` | Low-rank Fisher geometric-mean metric (`adapt_metric`, 211 LOC) | `soft_min_cand / soft_min_base` (0 if invariance fails) |
 | `a2-funnel-dynamics` | `A2` | Diagonal HMC starter | `soft_min_cand / soft_min_base` (0 if invariance fails) |
 | `a3-integrator-trajectory` | `A3` | Diagonal HMC starter | `soft_min_cand / soft_min_base` (0 if invariance fails) |
 | `a4-nonlinear-transport` | `A4` | Diagonal affine transport starter | `soft_min_cand / soft_min_base` (0 if invariance/FD fails) |
@@ -45,14 +45,14 @@ uv tool install harbor
 # 2. Build shared base image
 docker build -f harbor/base.Dockerfile -t apin-harbor-base:latest .
 
-# 3. Run one task or the full suite via Harbor CLI
-harbor run -p harbor/tasks/a1-preconditioning -a claude-code -m anthropic/claude-sonnet-4-5
-harbor run -p harbor/tasks -a codex -m openai/gpt-5
+# 3. Run one task or the full suite via Harbor CLI (e.g. OpenCode V2 with effort variant)
+harbor run -p harbor/tasks/a1-preconditioning -a opencode-v2 -m zai-coding-plan/glm-5.3-flash --ak reasoning_effort=high
+harbor run -p harbor/tasks -a claude-code -m anthropic/claude-sonnet-4-5
 ```
 
 ## Running the Verifier Locally (No Docker or Harbor CLI Required)
 
-Every `tests/test.sh` delegates to [harbor/verify.py](verify.py), which you can invoke directly on your host machine. Both hyphenated task slugs (e.g. `s3-position-gated-mh`) and internal IDs (`s3_position_gated_mh_bias`) are accepted, and `--out-dir` defaults to `./verifier_out` outside Docker:
+Every `tests/test.sh` delegates to [harbor/verify.py](verify.py), which you can invoke directly on your host machine. Both hyphenated task slugs (e.g. `s3-position-gated-mh`) and internal IDs (`s3_position_gated_mh_bias`) are accepted, and `--out-dir` defaults to `./verifier_out` outside Docker (gitignored). Note that a single `verify.py optimize` run grades both your candidate and the frozen baseline across `dims=6,20 × repeats=2` (~3–6 min solo).
 
 ```bash
 # Rewind task verification (reference fix -> reward 1.0)
@@ -70,4 +70,12 @@ uv run python harbor/verify.py optimize \
   --out-dir /tmp/harbor-opt-check
 ```
 
-Outputs Harbor-standard `reward.txt` (scalar float reward) and `reward.json` (structured breakdown: `reward`, `passed`, `speedup`, `soft_min_eff`, `baseline_soft_min`, `b2_max`, `overhead_ratio`, `by_class`, and `failed_targets` on failure).
+Outputs Harbor-standard `reward.txt` (scalar float reward), `reward.json` (strictly numeric Harbor rewards dict), `details.json` (structured breakdown: `reward`, `passed`, `speedup`, `soft_min_eff`, `baseline_soft_min`, `b2_max`, `overhead_ratio`, `by_class`, `failed_targets`, and `solution` LOC/AST/cyclomatic complexity stats), and archives `submission.py`.
+
+## Building the Benchmark Page & Pareto Curves
+
+Collect Harbor job directories into `benchmarks/results.json` and regenerate the standalone interactive leaderboard + Price/Token Pareto page ([benchmarks/index.html](../benchmarks/index.html)):
+
+```bash
+uv run python scripts/collect_harbor_results.py --release bench-v0.1.0 --jobs jobs/
+```

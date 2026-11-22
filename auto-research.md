@@ -33,9 +33,13 @@ Every trial is judged by the read-only harness (`harness/judge.py`, `harness/inv
 - **Dual-horizon + two-dimension Tier 1 (`--dims 6,20`, `--repeats 2`):** Headline `soft_min_eff` combines short-horizon (`H=150`, genuinely rewarding fast warmup) and long-horizon (`H=1000`, rewarding steady-state sampling) across `d=6` and `d=20` so neither warmup starvation nor low-dim RWM shortcuts can game Tier 1.
 - **Single-command trial + `pi-autoresearch` `METRIC` output:**
   ```bash
+  # Step 0: run the unmodified submission.py once as T0001 of your --run-id to establish your paired local incumbent
+  uv run apin autoresearch eval --lane <LANE> --run-id <RUN_ID> --repeats 2 --hypothesis "baseline: unmodified local incumbent"
+  # Then before each edit:
   uv run apin autoresearch eval --lane <LANE> --run-id <RUN_ID> --dry-run --hypothesis "pre-check"
   uv run apin autoresearch eval --lane <LANE> --run-id <RUN_ID> --repeats 2 --hypothesis "<one falsifiable sentence>"
   ```
+  *(If multiple agents share one checkout on the same lane, edit a run-local copy and pass `--submission autoresearch/lanes/<LANE>/runs/<RUN_ID>/candidate.py` so concurrent edits never collide.)*
   The runner snapshots `submission.py` at start, queues through `harness/queue.py` (never pass `--no-queue` on shared hosts), isolates `incumbent.py` and `archive/` per `--run-id`, and emits `METRIC soft_min_eff=...`, `METRIC short_horizon_soft_min=...`, `METRIC long_horizon_soft_min=...`, `METRIC median_adapt_cost=...`, `METRIC overhead_ratio=...`, and `METRIC b2_max=...`. Pass `--json` to emit a single `{"valid", "score", "metrics", "evidence"}` JSON line for plug-and-play use as an immutable evaluator in `Auto-research-agent` (`RSI-top` / `Fork-and-Flush`).
 - **Real-posterior generalization check (required before claiming a frontier win):**
   ```bash

@@ -1,0 +1,24 @@
+{
+  "_comment": "Reference API list prices in USD per 1M tokens for Price Pareto curves (updated 2026-11). Free-tier models include optional list-price equivalent in notes while defaulting cost_usd to 0.0 unless overridden.",
+  "models": {
+    "zai-coding-plan/glm-5.3": {
+      "label": "GLM-5.3",
+      "input_per_1m": 0.60,
+      "cached_input_per_1m": 0.11,
+      "output_per_1m": 2.20
+    },
+    "zai-coding-plan/glm-5.3-flash": {
+      "label": "GLM-5.3-Flash",
+      "input_per_1m": 0.10,
+      "cached_input_per_1m": 0.02,
+      "output_per_1m": 0.40
+    },
+    "opencode/tidepool-alpha-free": {
+      "label": "Tidepool Alpha Free",
+      "input_per_1m": 0.0,
+      "cached_input_per_1m": 0.0,
+      "output_per_1m": 0.0,
+      "free_tier": true
+    }
+  }
+}

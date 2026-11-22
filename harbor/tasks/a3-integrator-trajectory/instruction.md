@@ -2,6 +2,8 @@
 
 Optimize `adapt()` and `transition()` in `/app/autoresearch/lanes/A3/submission.py` using higher-order symplectic splitting, persistent-momentum GHMC, MAMS (`unit_sphere` aux_spec), dynamic trajectories, or thinning-free PDMP mixtures (Boomerang/Zig-Zag/BPS) to maximize dual-horizon `soft_min_eff` across `dims=(6,20)` while passing exact-draw invariance.
 
+> **Scoring note:** `soft_min_eff` is a **$p = -4$ power mean** over per-class geometric means, so the **weakest target class dominates**. Check `CLASS_METRIC` after each trial and lift the worst class without regressing it.
+
 ## Rules
 - Read `/app/autoresearch/lanes/A3/program.md`, `/app/autoresearch/RULINGS.md`, and `/app/codex/INDEX.yaml`.
 - Edit **ONLY** `/app/autoresearch/lanes/A3/submission.py`. Never modify `harness/`, `models/`, or `data/`.

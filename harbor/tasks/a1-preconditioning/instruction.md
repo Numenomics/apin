@@ -6,7 +6,7 @@ Optimize `adapt_metric(oracle, budget, rng) -> (metric_tuning, x0)` in `/app/aut
 
 ## Rules
 - Read `/app/autoresearch/lanes/A1/program.md`, `/app/autoresearch/RULINGS.md`, and `/app/codex/INDEX.yaml`.
-- Edit **ONLY** `/app/autoresearch/lanes/A1/submission.py`. Never modify `harness/`, `models/`, or `data/`.
+- Edit **ONLY** `/app/autoresearch/lanes/A1/submission.py` (when running on a host checkout outside Docker, pass your edited file to `harbor/verify.py optimize --submission <path>`). Never modify `harness/`, `models/`, or `data/`.
 - Iterate locally using (`--no-queue` is safe inside an isolated Harbor container; omit it on shared hosts):
   ```bash
   uv run apin autoresearch eval --lane A1 --run-id harbor_dev --dims 6,20 --repeats 2 --no-queue --hypothesis "<one falsifiable sentence>"

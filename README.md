@@ -9,7 +9,7 @@ The same verification harness powers **two distinct modes**:
 
 **Start here:**
 - **Contribute (human or coding agent):** [CONTRIBUTING.md](CONTRIBUTING.md) (includes a 1-click copyable agent setup prompt and how to get a Flywheel token).
-- **Run the LLM/Agent Benchmark:** [harbor/README.md](harbor/README.md).
+- **Run the LLM/Agent Benchmark:** [harbor/README.md](harbor/README.md) · Interactive leaderboard & Pareto curves: [benchmarks/index.html](benchmarks/index.html).
 - **Artifact scoring rules & past results:** [BENCH.md](BENCH.md), [PROTOCOL.md](PROTOCOL.md), [REPORT.md](REPORT.md).
 - **Autonomous agent loop spec:** [AGENTS.md](AGENTS.md) & [auto-research.md](auto-research.md).
 - **Maintainer / Flywheel ops:** [MAINTAINING.md](MAINTAINING.md) & [flywheel/README.md](flywheel/README.md).

@@ -676,7 +676,7 @@ def _extract_list(resp: object, *keys: str) -> list[dict]:
 
 
 def build_research_brief(
-    lane: str,
+    lane: str = "all",
     *,
     run_id: str | None = None,
     autoresearch_dir: Path = ROOT / "autoresearch",
@@ -689,16 +689,17 @@ def build_research_brief(
 
     Combines live public Flywheel frontier/claims/dead-ends (read-only, no token needed)
     with local lane `NEGATIVE_MEMORY.md`, run `RESEARCH_HANDOFF.md`, and stall/bottleneck
-    diagnostics from `ledger.jsonl`.
+    diagnostics from `ledger.jsonl`. Pass `lane='all'` for a cross-lane overview.
     """
-    lines: list[str] = [f"# Autoresearch Brief — Lane {lane}", ""]
-    lane_dir = autoresearch_dir / "lanes" / lane
+    all_lanes = lane.strip().lower() == "all"
+    lines: list[str] = [f"# Autoresearch Brief — {'All Lanes' if all_lanes else f'Lane {lane}'}", ""]
+    lane_dir = (autoresearch_dir / "lanes" / lane) if not all_lanes else None
 
     # 1. Live Flywheel snapshot (public read-only; clean offline fallback)
     if not offline and flywheel_url:
         try:
             fr_raw = flywheel.get_frontier(url=flywheel_url, token="", timeout=5.0)
-            nodes_raw = flywheel.get_nodes(lane=lane, limit=40, url=flywheel_url, token="", timeout=5.0)
+            nodes_raw = flywheel.get_nodes(lane=None if all_lanes else lane, limit=40, url=flywheel_url, token="", timeout=5.0)
             claims_raw = flywheel.get_claims(url=flywheel_url, token="", timeout=5.0)
             frontier = _extract_list(fr_raw, "frontier", "lanes", "items")
             nodes = _extract_list(nodes_raw, "nodes", "items")
@@ -758,18 +759,19 @@ def build_research_brief(
             lines += [f"## Live Flywheel Snapshot", f"- (unreachable: {exc})", ""]
 
     # 2. Local NEGATIVE_MEMORY.md
-    neg_path = lane_dir / "NEGATIVE_MEMORY.md"
-    if neg_path.is_file():
-        neg_lines = [ln for ln in neg_path.read_text().splitlines() if ln.strip()]
-        if neg_lines:
-            lines.append(f"## Local Negative Memory (`{neg_path.name}`)")
-            lines.extend(neg_lines[:20])
-            if len(neg_lines) > 20:
-                lines.append(f"... ({len(neg_lines) - 20} more lines in `{neg_path}`)")
-            lines.append("")
+    if lane_dir is not None:
+        neg_path = lane_dir / "NEGATIVE_MEMORY.md"
+        if neg_path.is_file():
+            neg_lines = [ln for ln in neg_path.read_text().splitlines() if ln.strip()]
+            if neg_lines:
+                lines.append(f"## Local Negative Memory (`{neg_path.name}`)")
+                lines.extend(neg_lines[:20])
+                if len(neg_lines) > 20:
+                    lines.append(f"... ({len(neg_lines) - 20} more lines in `{neg_path}`)")
+                lines.append("")
 
     # 3. Local run ledger + stall / bottleneck diagnostics + RESEARCH_HANDOFF.md
-    run_dir = (lane_dir / "runs" / run_id) if run_id else None
+    run_dir = (lane_dir / "runs" / run_id) if (lane_dir is not None and run_id) else None
     if run_dir is not None and run_dir.is_dir():
         ledger = _load_ledger(run_dir / "ledger.jsonl")
         lines.append(f"## Local Run `{run_id}` ({len(ledger)} trials)")

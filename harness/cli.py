@@ -166,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="emit a single Auto-research-agent compatible JSON object on stdout")
 
     ab = ar_sub.add_parser("brief", help="print a zero-synthesis verbatim brief (Flywheel frontier, claims, dead ends, stall check)")
-    ab.add_argument("--lane", default="A1")
+    ab.add_argument("--lane", default="all", help="lane name (A0..A4) or 'all' for a cross-lane overview (default: all)")
     ab.add_argument("--run-id", help="optional local run_id to include stall & weakest-class diagnostics")
     ab.add_argument("--offline", action="store_true", help="skip live Flywheel fetch (local files only)")
     ab.add_argument("--max-failures", type=int, default=8)
@@ -357,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
         inc_note = " [WARNING: paired incumbent failed Tier 1 on fresh seeds — UNPAIRED keep; re-verify]" if row.get("incumbent_ok") is False else ""
         print(f"{row['trial_id']} [{row['lane']}] decision={row['decision']} "
               f"tier0={row['tier0_ok']} tier1={row['tier1_ok']} "
-              f"soft_min={row.get('soft_min_eff')} ratio={row.get('ratio_vs_incumbent')} "
+              f"soft_min={row.get('soft_min_eff')} inc={row.get('incumbent_soft_min')} ratio={row.get('ratio_vs_incumbent')} "
               f"dims={','.join(str(x) for x in (row.get('dims') or []))} repeats={row.get('repeats')} "
               f"qwait={row.get('queue_wait_s')}s wall={row['wall_s']}s{inc_note}")
         # pi-autoresearch / external-harness compatible METRIC lines
