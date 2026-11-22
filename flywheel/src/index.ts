@@ -19,11 +19,21 @@ export interface AssetsBindingLike {
   fetch(request: Request): Promise<Response>;
 }
 
+export interface ExecutionContextLike {
+  waitUntil(promise: Promise<unknown>): void;
+}
+
+export interface CacheLike {
+  match(request: Request | string): Promise<Response | undefined>;
+  put(request: Request | string, response: Response): Promise<void>;
+}
+
 export interface Env {
   DB: D1DatabaseLike;
   ASSETS?: AssetsBindingLike;
   FLYWHEEL_API_KEY?: string;
   FLYWHEEL_INVITE_CODE?: string;
+  CACHE?: CacheLike;
 }
 
 export interface ApiKeyRow {
@@ -124,14 +134,53 @@ const KEPT_DECISIONS = new Set(["keep", "keep_baseline", "keep_simpler"]);
 const VALID_CLAIM_PATCH_STATUSES = new Set(["done", "abandoned"]);
 const VALID_ROLES = new Set(["contributor", "admin"]);
 
-function jsonResponse(body: unknown, status = 200): Response {
+const PUBLIC_READ_CACHE_SECONDS = 30;
+
+function jsonResponse(
+  body: unknown,
+  status = 200,
+  extraHeaders: Record<string, string> = {}
+): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       ...CORS_HEADERS,
+      ...extraHeaders,
     },
   });
+}
+
+function getEdgeCache(env: Env): CacheLike | null {
+  if (env.CACHE) return env.CACHE;
+  const globalCaches = (globalThis as unknown as { caches?: { default?: CacheLike } }).caches;
+  return globalCaches?.default ?? null;
+}
+
+function canonicalPublicCacheKey(url: URL): Request | null {
+  const { origin, pathname, searchParams } = url;
+  if (pathname === "/api/health" || pathname === "/api/dag" || pathname === "/api/frontier") {
+    return new Request(`${origin}${pathname}`, { method: "GET" });
+  }
+  if (pathname === "/api/claims") {
+    const lane = searchParams.get("lane");
+    const qs = lane ? `?lane=${encodeURIComponent(lane)}` : "";
+    return new Request(`${origin}${pathname}${qs}`, { method: "GET" });
+  }
+  if (pathname === "/api/nodes") {
+    const allowed = ["lane", "run_id", "decision", "verified", "limit"] as const;
+    const params = new URLSearchParams();
+    for (const key of allowed) {
+      const val = searchParams.get(key);
+      if (val !== null && val !== "") params.set(key, val);
+    }
+    const qs = params.toString();
+    return new Request(`${origin}${pathname}${qs ? `?${qs}` : ""}`, { method: "GET" });
+  }
+  if (pathname.startsWith("/api/nodes/") && pathname.length > "/api/nodes/".length) {
+    return new Request(`${origin}${pathname}`, { method: "GET" });
+  }
+  return null;
 }
 
 function timingSafeEqual(a: string, b: string): boolean {
@@ -924,7 +973,11 @@ async function parseJsonBody(request: Request): Promise<Record<string, unknown> 
   }
 }
 
-export async function handleRequest(request: Request, env: Env): Promise<Response> {
+export async function handleRequest(
+  request: Request,
+  env: Env,
+  ctx?: ExecutionContextLike
+): Promise<Response> {
   const url = new URL(request.url);
   const { pathname, searchParams } = url;
   const method = request.method.toUpperCase();
@@ -933,6 +986,34 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     if (method === "OPTIONS") {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
+
+    const cacheKey = method === "GET" ? canonicalPublicCacheKey(url) : null;
+    const edgeCache = cacheKey ? getEdgeCache(env) : null;
+    if (cacheKey && edgeCache) {
+      const cached = await edgeCache.match(cacheKey);
+      if (cached) {
+        return cached;
+      }
+    }
+
+    const finalizePublicRead = (resp: Response): Response => {
+      if (!cacheKey || resp.status !== 200) return resp;
+      const headers = new Headers(resp.headers);
+      headers.set(
+        "Cache-Control",
+        `public, max-age=${PUBLIC_READ_CACHE_SECONDS}, s-maxage=${PUBLIC_READ_CACHE_SECONDS}`
+      );
+      const cachedResp = new Response(resp.body, { status: resp.status, headers });
+      if (edgeCache) {
+        const putPromise = edgeCache.put(cacheKey, cachedResp.clone());
+        if (ctx) {
+          ctx.waitUntil(putPromise);
+        } else {
+          putPromise.catch(() => {});
+        }
+      }
+      return cachedResp;
+    };
 
     try {
       if (pathname === "/api/health" && method === "GET") {
@@ -949,12 +1030,14 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
           "SELECT DISTINCT lane FROM nodes ORDER BY lane ASC"
         ).all<{ lane: string }>();
 
-        return jsonResponse({
-          ok: true,
-          nodes: Number(nodeCountRow?.count ?? 0),
-          active_claims: Number(claimCountRow?.count ?? 0),
-          lanes: (lanesRes.results ?? []).map((r) => r.lane),
-        });
+        return finalizePublicRead(
+          jsonResponse({
+            ok: true,
+            nodes: Number(nodeCountRow?.count ?? 0),
+            active_claims: Number(claimCountRow?.count ?? 0),
+            lanes: (lanesRes.results ?? []).map((r) => r.lane),
+          })
+        );
       }
 
       if (pathname === "/api/dag" && method === "GET") {
@@ -972,22 +1055,26 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
         const claims = await queryActiveClaims(env.DB);
         const alignment = computeAlignment(nodes);
 
-        return jsonResponse({
-          nodes,
-          edges,
-          frontier,
-          claims,
-          alignment,
-        });
+        return finalizePublicRead(
+          jsonResponse({
+            nodes,
+            edges,
+            frontier,
+            claims,
+            alignment,
+          })
+        );
       }
 
       if (pathname === "/api/frontier" && method === "GET") {
         const nodes = await queryAllNodes(env.DB);
         const frontier = computeFrontier(nodes);
-        return jsonResponse({
-          frontier,
-          count: Object.keys(frontier).length,
-        });
+        return finalizePublicRead(
+          jsonResponse({
+            frontier,
+            count: Object.keys(frontier).length,
+          })
+        );
       }
 
       if (pathname === "/api/nodes" && method === "GET") {
@@ -999,7 +1086,7 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
           verified: searchParams.get("verified"),
           limit: limitParam !== null ? Number(limitParam) : null,
         });
-        return jsonResponse({ nodes, count: nodes.length });
+        return finalizePublicRead(jsonResponse({ nodes, count: nodes.length }));
       }
 
       if (pathname.startsWith("/api/nodes/") && method === "GET") {
@@ -1023,11 +1110,13 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
               .first<NodeRow>()
           : null;
 
-        return jsonResponse({
-          node,
-          parent: parentRow ? deserializeNode(parentRow) : null,
-          children: (childrenRes.results ?? []).map(deserializeNode),
-        });
+        return finalizePublicRead(
+          jsonResponse({
+            node,
+            parent: parentRow ? deserializeNode(parentRow) : null,
+            children: (childrenRes.results ?? []).map(deserializeNode),
+          })
+        );
       }
 
       if (pathname === "/api/register" && method === "POST") {
@@ -1212,7 +1301,7 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
 
       if (pathname === "/api/claims" && method === "GET") {
         const claims = await queryActiveClaims(env.DB, searchParams.get("lane"));
-        return jsonResponse({ claims, count: claims.length });
+        return finalizePublicRead(jsonResponse({ claims, count: claims.length }));
       }
 
       if (pathname === "/api/claims" && method === "POST") {
@@ -1268,7 +1357,7 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
 }
 
 export default {
-  fetch(request: Request, env: Env): Promise<Response> {
-    return handleRequest(request, env);
+  fetch(request: Request, env: Env, ctx?: ExecutionContextLike): Promise<Response> {
+    return handleRequest(request, env, ctx);
   },
 };

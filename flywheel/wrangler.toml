@@ -2,6 +2,11 @@ name = "apin-flywheel"
 main = "src/index.ts"
 compatibility_date = "2025-04-01"
 
+# Workers Free already hard-caps CPU at 10ms/request and fails closed ($0 overage).
+# Uncomment only if you ever move to Workers Paid:
+# [limits]
+# cpu_ms = 10
+
 [assets]
 directory = "./public"
 binding = "ASSETS"

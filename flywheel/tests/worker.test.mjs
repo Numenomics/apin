@@ -667,4 +667,37 @@ describe("apin Flywheel Worker", () => {
     );
     assert.equal(bobAfterRevoke.status, 401);
   });
+
+  it("caches public GET reads with canonical anti-cache-bust keys and 30s Cache-Control", async () => {
+    const { env } = makeEnv();
+    const store = new Map();
+    let dbPrepares = 0;
+    const origPrepare = env.DB.prepare.bind(env.DB);
+    env.DB.prepare = (q) => {
+      dbPrepares += 1;
+      return origPrepare(q);
+    };
+    env.CACHE = {
+      async match(req) {
+        const key = typeof req === "string" ? req : req.url;
+        const hit = store.get(key);
+        return hit ? hit.clone() : undefined;
+      },
+      async put(req, resp) {
+        const key = typeof req === "string" ? req : req.url;
+        store.set(key, resp.clone());
+      },
+    };
+
+    const r1 = await reqJson(env, "GET", "/api/dag?random_bust=1");
+    assert.equal(r1.status, 200);
+    assert.equal(r1.headers.get("Cache-Control"), "public, max-age=30, s-maxage=30");
+    const preparesAfterFirst = dbPrepares;
+    assert.ok(preparesAfterFirst > 0);
+
+    // Different unknown query param must still hit the exact same canonical cache entry (0 extra D1 queries!)
+    const r2 = await reqJson(env, "GET", "/api/dag?random_bust=99999&foo=bar");
+    assert.equal(r2.status, 200);
+    assert.equal(dbPrepares, preparesAfterFirst);
+  });
 });
