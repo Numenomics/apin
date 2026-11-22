@@ -5,8 +5,11 @@ Start here if you were launched by an autonomous harness (e.g. `rohanarun/Auto-r
 Run continuously until token/compute exhaustion (or until stopped by the user). **A clean negative result, counterexample, invariance audit, or handoff note is a first-class outcome** — beating the frontier is not mandatory.
 
 ## 1. Quick Orientation
-1. Check the live Flywheel frontier, active task claims, and past discarded hypotheses (public read-only, no key required):
-   - Dashboard & API: `https://apin-flywheel.m0hawk.workers.dev` (`GET /api/frontier`, `/api/claims`, `/api/nodes?lane=<LANE>`)
+1. Pull a zero-synthesis verbatim brief of the live Flywheel frontier, active claims, recent dead ends, and local stall diagnostics (no token required):
+   ```bash
+   uv run apin autoresearch brief --lane <LANE>
+   ```
+   - Live Dashboard & API: `https://apin-flywheel.m0hawk.workers.dev` (`GET /api/frontier`, `/api/claims`, `/api/nodes?lane=<LANE>`)
    - Pick an assigned task if given one; otherwise draw an open priority card:
      ```bash
      uv run python scripts/choose_research_task.py
@@ -15,6 +18,11 @@ Run continuously until token/compute exhaustion (or until stopped by the user). 
    - If you have a contributor/admin token (`export APIN_FLYWHEEL_TOKEN=<token>`), `apin autoresearch eval` automatically streams every kept and discarded trial to Flywheel (`https://apin-flywheel.m0hawk.workers.dev`) with parent→child lineage.
 2. Read the lane's `autoresearch/lanes/<LANE>/program.md`, its `NEGATIVE_MEMORY.md`, `autoresearch/RULINGS.md`, and any referenced technique card in `codex/cards/`.
 3. For continuous / overnight sessions, refresh `git fetch origin` every ~10 trials or before major pivots, and keep `RESEARCH_HANDOFF.md` current with the pinned commit.
+
+## 1.5 Research Strategy (Avoid Tunnel Vision)
+- **Composition before invention:** Check the Flywheel frontier across lanes first — combining two already-verified mechanisms (e.g., an A1 warmup/metric estimator + an A0/A2/A3 kernel improvement) frequently outperforms isolated micro-tweaks.
+- **Fork-and-Flush on stall:** If $\ge 5$ consecutive trials fail to beat the incumbent, do not keep tweaking hyperparameters in the same basin. Save a compact factual `RESEARCH_HANDOFF.md`, start a fresh context from `incumbent.py` + `apin autoresearch brief --lane <LANE>`, and attack a **different bottleneck** surfaced by the diagnostics (e.g. `short_horizon_soft_min`, `median_adapt_cost`, `overhead_ratio`, or the weakest `CLASS_METRIC` such as `Funnel` or `StiffAR`).
+- **Final-source invariant:** Freeze `submission.py` before running full real-Stan verification (`apin run logdensity` + `apin score --submission`). Any edit after the last diagnostic invalidates prior verification until re-run.
 
 ## 2. Evaluation & Validation Bar
 Every trial is judged by the read-only harness (`harness/judge.py`, `harness/invariance.py`, `harness/ipc.py`, `harness/autoresearch.py`):
@@ -26,7 +34,7 @@ Every trial is judged by the read-only harness (`harness/judge.py`, `harness/inv
   uv run apin autoresearch eval --lane <LANE> --run-id <RUN_ID> --dry-run --hypothesis "pre-check"
   uv run apin autoresearch eval --lane <LANE> --run-id <RUN_ID> --repeats 2 --hypothesis "<one falsifiable sentence>"
   ```
-  The runner snapshots `submission.py` at start, queues through `harness/queue.py` (never pass `--no-queue` on shared hosts), isolates `incumbent.py` and `archive/` per `--run-id`, and emits `METRIC soft_min_eff=...`, `METRIC short_horizon_soft_min=...`, `METRIC long_horizon_soft_min=...`, `METRIC median_adapt_cost=...`, `METRIC overhead_ratio=...`, and `METRIC b2_max=...`.
+  The runner snapshots `submission.py` at start, queues through `harness/queue.py` (never pass `--no-queue` on shared hosts), isolates `incumbent.py` and `archive/` per `--run-id`, and emits `METRIC soft_min_eff=...`, `METRIC short_horizon_soft_min=...`, `METRIC long_horizon_soft_min=...`, `METRIC median_adapt_cost=...`, `METRIC overhead_ratio=...`, and `METRIC b2_max=...`. Pass `--json` to emit a single `{"valid", "score", "metrics", "evidence"}` JSON line for plug-and-play use as an immutable evaluator in `Auto-research-agent` (`RSI-top` / `Fork-and-Flush`).
 - **Real-posterior generalization check (required before claiming a frontier win):**
   ```bash
   # Lane A1 (`adapt_metric` seam):

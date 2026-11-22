@@ -25,7 +25,7 @@ from typing import Any
 
 import numpy as np
 
-from . import judge, logdensity
+from . import judge, logdensity, sandbox
 from .logdensity import (
     Budget,
     BudgetExceeded,
@@ -688,6 +688,7 @@ def _worker_main(argv: list[str]) -> int:
                 b = req["budget"]
                 budget = Budget(int(b[0]), int(b[1]), int(b[2]), float(b[3]))
                 rng = np.random.default_rng(np.random.SeedSequence(req["seed_seq"]))
+                sandbox.confine_worker(sub_path)
                 if lane == "A1":
                     raw = judge.run_a1_adapt(sub_path, oracle, budget, rng)
                 elif lane == "A4":
@@ -735,9 +736,13 @@ def _worker_main(argv: list[str]) -> int:
                             # Never even import submission.py inside the A1 transition worker!
                             transition_fn = judge.a1_transition
                         elif lane == "A4":
-                            transition_fn = judge.make_a4_transition(Path(req["submission"]))
+                            sub_path = Path(req["submission"])
+                            sandbox.confine_worker(sub_path)
+                            transition_fn = judge.make_a4_transition(sub_path)
                         else:
-                            _, transition_fn = logdensity.load_submission(Path(req["submission"]))
+                            sub_path = Path(req["submission"])
+                            sandbox.confine_worker(sub_path)
+                            _, transition_fn = logdensity.load_submission(sub_path)
                         _send_msg(sock, TAG_RESP_OK, encode_canonical(True))
                     except Exception as e:
                         _send_msg(sock, TAG_RESP_ERR, encode_canonical((type(e).__name__, str(e))))

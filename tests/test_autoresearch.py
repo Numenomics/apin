@@ -198,3 +198,48 @@ def test_aux_spec_ndarray_json_and_dual_horizon_and_dim_ladder():
     assert abs(r.dual_horizon_eff - (r.short_horizon_eff * r.long_horizon_eff) ** 0.5) < 1e-12
 
 
+
+
+def test_evaluator_json_contract_and_research_brief_stall_detection(tmp_path):
+    """format_evaluator_json emits finite Auto-research-agent schema; build_research_brief flags stalls."""
+    lane_dir = tmp_path / "lanes" / "A1"
+    run_dir = lane_dir / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    (lane_dir / "NEGATIVE_MEMORY.md").write_text("- Do not shrink step size below 1e-4\n")
+    (run_dir / "RESEARCH_HANDOFF.md").write_text("Pinned commit abc123; funnel still bottleneck.\n")
+
+    rows = [
+        {
+            "trial_id": "T0001", "lane": "A1", "tier0_ok": True, "tier1_ok": True,
+            "decision": "keep_baseline", "soft_min_eff": 0.42, "short_horizon_soft_min": 0.30,
+            "long_horizon_soft_min": 0.55, "median_adapt_cost": 1200.0, "overhead_ratio": 1.5,
+            "b2_max": 0.002, "loc": 80, "magic_constants": 5, "wall_s": 12.3,
+            "by_class": {"Funnel": 0.11, "Gaussian": 0.90},
+        },
+        *[
+            {"trial_id": f"T{i:04d}", "lane": "A1", "tier0_ok": True, "tier1_ok": True,
+             "decision": "discard_no_gain", "soft_min_eff": 0.40, "hypothesis": f"tweak {i}"}
+            for i in range(2, 7)
+        ],
+    ]
+    (run_dir / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    (run_dir / "results.tsv").write_text("trial_id\nT0001\n")
+
+    ev = autoresearch.format_evaluator_json(rows[0], run_id="r1", autoresearch_dir=tmp_path)
+    assert ev["valid"] is True and ev["score"] == 0.42
+    assert ev["metrics"]["class_Funnel"] == 0.11 and ev["metrics"]["soft_min_eff"] == 0.42
+    assert len(ev["evidence"]) >= 2
+
+    ev_fail = autoresearch.format_evaluator_json(
+        {"trial_id": "T0009", "lane": "A1", "tier0_ok": False, "tier1_ok": False,
+         "decision": "discard_tier0", "soft_min_eff": float("nan")},
+        run_id="r1", autoresearch_dir=tmp_path,
+    )
+    assert ev_fail["valid"] is False and ev_fail["score"] == 0.0
+    assert "soft_min_eff" not in ev_fail["metrics"]
+
+    brief = autoresearch.build_research_brief("A1", run_id="r1", autoresearch_dir=tmp_path, offline=True)
+    assert "STALL DETECTED (5 consecutive non-kept trials)" in brief
+    assert "Funnel=0.11" in brief
+    assert "Do not shrink step size below 1e-4" in brief
+    assert "Pinned commit abc123" in brief

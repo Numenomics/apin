@@ -591,3 +591,207 @@ def evaluate_lane_trial(
         "wall_s": round(time.perf_counter() - t0, 3),
     }
     return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id)
+
+
+def format_evaluator_json(
+    row: dict,
+    *,
+    run_id: str = "default",
+    autoresearch_dir: Path = ROOT / "autoresearch",
+) -> dict:
+    """Format an autoresearch trial row as an immutable evaluator JSON object.
+
+    Follows the `{valid, score, metrics, evidence}` contract used by
+    `Auto-research-agent` (`RSI-top` / `Fork-and-Flush`) so `apin autoresearch eval --json`
+    works directly as a drop-in evaluator. Missing or non-finite observations are omitted
+    from `metrics` rather than replaced with sentinels.
+    """
+    is_dry = bool(row.get("dry_run"))
+    valid = (row.get("decision") == "dry_run_ok") if is_dry else bool(row.get("tier0_ok") and row.get("tier1_ok"))
+    raw_score = row.get("soft_min_eff")
+    score_val = float(raw_score) if (valid and isinstance(raw_score, (int, float)) and math.isfinite(raw_score)) else 0.0
+
+    metrics: dict[str, float | int] = {}
+    for key in (
+        "soft_min_eff",
+        "ratio_vs_incumbent",
+        "short_horizon_soft_min",
+        "long_horizon_soft_min",
+        "median_adapt_cost",
+        "overhead_ratio",
+        "b2_max",
+        "loc",
+        "magic_constants",
+        "wall_s",
+    ):
+        val = row.get(key)
+        if isinstance(val, (int, float)) and not isinstance(val, bool) and math.isfinite(val):
+            metrics[key] = val
+    for cls_name, cls_val in sorted((row.get("by_class") or {}).items()):
+        if isinstance(cls_val, (int, float)) and not isinstance(cls_val, bool) and math.isfinite(cls_val):
+            metrics[f"class_{cls_name}"] = float(cls_val)
+
+    lane = str(row.get("lane") or "A1")
+    trial_id = str(row.get("trial_id") or "")
+    evidence: list[str] = []
+    run_dir = autoresearch_dir / "lanes" / lane / "runs" / run_id
+    for cand in (
+        run_dir / "ledger.jsonl",
+        run_dir / "results.tsv",
+        run_dir / "trials" / trial_id / "metrics.json" if trial_id else None,
+    ):
+        if cand is not None and cand.is_file():
+            try:
+                evidence.append(str(cand.relative_to(ROOT)))
+            except ValueError:
+                evidence.append(str(cand))
+
+    return {
+        "valid": valid,
+        "score": score_val,
+        "metrics": metrics,
+        "evidence": evidence,
+        "decision": row.get("decision"),
+        "trial_id": trial_id,
+        "lane": lane,
+    }
+
+
+def _extract_list(resp: object, *keys: str) -> list[dict]:
+    if isinstance(resp, list):
+        return [x for x in resp if isinstance(x, dict)]
+    if isinstance(resp, dict):
+        for k in keys:
+            v = resp.get(k)
+            if isinstance(v, list):
+                return [x for x in v if isinstance(x, dict)]
+            if isinstance(v, dict):
+                return [val for _, val in sorted(v.items()) if isinstance(val, dict)]
+    return []
+
+
+def build_research_brief(
+    lane: str,
+    *,
+    run_id: str | None = None,
+    autoresearch_dir: Path = ROOT / "autoresearch",
+    flywheel_url: str | None = flywheel.DEFAULT_PUBLIC_URL,
+    offline: bool = False,
+    max_failures: int = 8,
+    stall_window: int = 5,
+) -> str:
+    """Assemble a compact, zero-synthesis verbatim brief for starting or flushing a research session.
+
+    Combines live public Flywheel frontier/claims/dead-ends (read-only, no token needed)
+    with local lane `NEGATIVE_MEMORY.md`, run `RESEARCH_HANDOFF.md`, and stall/bottleneck
+    diagnostics from `ledger.jsonl`.
+    """
+    lines: list[str] = [f"# Autoresearch Brief — Lane {lane}", ""]
+    lane_dir = autoresearch_dir / "lanes" / lane
+
+    # 1. Live Flywheel snapshot (public read-only; clean offline fallback)
+    if not offline and flywheel_url:
+        try:
+            fr_raw = flywheel.get_frontier(url=flywheel_url, token="", timeout=5.0)
+            nodes_raw = flywheel.get_nodes(lane=lane, limit=40, url=flywheel_url, token="", timeout=5.0)
+            claims_raw = flywheel.get_claims(url=flywheel_url, token="", timeout=5.0)
+            frontier = _extract_list(fr_raw, "frontier", "lanes", "items")
+            nodes = _extract_list(nodes_raw, "nodes", "items")
+            claims = _extract_list(claims_raw, "claims", "items")
+
+            lines.append(f"## Live Flywheel Frontier (`{flywheel_url}`)")
+            if frontier:
+                for row in frontier:
+                    rlane = row.get("lane") or "?"
+                    sm = row.get("soft_min_eff")
+                    sm_s = f"{float(sm):.4g}" if isinstance(sm, (int, float)) else "n/a"
+                    ver = "verified" if row.get("verified") else "unverified"
+                    title = str(row.get("title") or row.get("hypothesis") or row.get("id") or "")[:90]
+                    tag = " <-- THIS LANE" if rlane == lane else ""
+                    lines.append(f"- **{rlane}** ({ver}, soft_min={sm_s}): `{row.get('id', '?')}` — {title}{tag}")
+            else:
+                lines.append("- (no frontier nodes yet)")
+            lines.append("")
+
+            active_claims = [c for c in claims if (c.get("status") or "active") == "active"]
+            lines.append("## Active Claims (avoid overlap)")
+            if active_claims:
+                for c in active_claims[:10]:
+                    lines.append(f"- [{c.get('lane', '?')}] `{c.get('task_id', '?')}` by `{c.get('agent', '?')}` — {c.get('summary', '')}")
+            else:
+                lines.append("- (none)")
+            lines.append("")
+
+            discards = [n for n in nodes if str(n.get("decision") or "").startswith("discard")]
+            lines.append(f"## Recent Discarded Trials on {lane} (do not repeat)")
+            if discards:
+                for n in discards[:max_failures]:
+                    hyp = str(n.get("hypothesis") or n.get("title") or "")[:100]
+                    lines.append(f"- `{n.get('id', '?')}` [{n.get('decision')}]: {hyp}")
+            else:
+                lines.append("- (none recorded on Flywheel)")
+            lines.append("")
+        except flywheel.FlywheelError as exc:
+            lines += [f"## Live Flywheel Snapshot", f"- (unreachable: {exc})", ""]
+
+    # 2. Local NEGATIVE_MEMORY.md
+    neg_path = lane_dir / "NEGATIVE_MEMORY.md"
+    if neg_path.is_file():
+        neg_lines = [ln for ln in neg_path.read_text().splitlines() if ln.strip()]
+        if neg_lines:
+            lines.append(f"## Local Negative Memory (`{neg_path.name}`)")
+            lines.extend(neg_lines[:20])
+            if len(neg_lines) > 20:
+                lines.append(f"... ({len(neg_lines) - 20} more lines in `{neg_path}`)")
+            lines.append("")
+
+    # 3. Local run ledger + stall / bottleneck diagnostics + RESEARCH_HANDOFF.md
+    run_dir = (lane_dir / "runs" / run_id) if run_id else None
+    if run_dir is not None and run_dir.is_dir():
+        ledger = _load_ledger(run_dir / "ledger.jsonl")
+        lines.append(f"## Local Run `{run_id}` ({len(ledger)} trials)")
+        if ledger:
+            kept = [r for r in ledger if r.get("decision") in flywheel.KEPT_DECISIONS]
+            tail_non_kept = 0
+            for r in reversed(ledger):
+                if r.get("decision") in flywheel.KEPT_DECISIONS:
+                    break
+                tail_non_kept += 1
+            best = kept[-1] if kept else ledger[-1]
+            lines.append(
+                f"- Incumbent: `{best.get('trial_id')}` decision={best.get('decision')} "
+                f"soft_min={best.get('soft_min_eff')} short={best.get('short_horizon_soft_min')} "
+                f"long={best.get('long_horizon_soft_min')} adapt_cost={best.get('median_adapt_cost')} "
+                f"overhead={best.get('overhead_ratio')}x"
+            )
+            by_cls = best.get("by_class") or {}
+            if by_cls:
+                ranked_cls = sorted(
+                    ((k, float(v)) for k, v in by_cls.items() if isinstance(v, (int, float)) and math.isfinite(v)),
+                    key=lambda kv: kv[1],
+                )
+                if ranked_cls:
+                    weakest = ", ".join(f"{k}={v:.4g}" for k, v in ranked_cls[:3])
+                    lines.append(f"- Weakest target classes (attack these first): {weakest}")
+            if tail_non_kept >= stall_window:
+                lines.append(
+                    f"- **STALL DETECTED ({tail_non_kept} consecutive non-kept trials):** "
+                    f"Consider a Fork-and-Flush reset — start a fresh context from `incumbent.py` "
+                    f"and target a distinct mechanism or cross-lane composition instead of micro-tweaks."
+                )
+        handoff = run_dir / "RESEARCH_HANDOFF.md"
+        if handoff.is_file():
+            h_lines = handoff.read_text().splitlines()
+            lines.append(f"### Local Handoff (`{handoff.name}`)")
+            lines.extend(h_lines[:25])
+            if len(h_lines) > 25:
+                lines.append(f"... ({len(h_lines) - 25} more lines in `{handoff}`)")
+        lines.append("")
+
+    lines += [
+        "## Action Checklist",
+        "- Prefer **composing** compatible verified ideas across lanes before inventing complex heuristics.",
+        "- Verify edits with `uv run apin autoresearch eval --lane " + lane + " --run-id <RUN_ID> --repeats 2 --hypothesis \"...\"`.",
+        "- Freeze `submission.py` before running full real-Stan verification (`apin run logdensity` + `apin score --submission`).",
+    ]
+    return "\n".join(lines) + "\n"

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -161,6 +162,14 @@ def main(argv: list[str] | None = None) -> int:
     ae.add_argument("--allow-duplicate", action="store_true")
     ae.add_argument("--dry-run", action="store_true", help="lint & check duplicates without writing a ledger row")
     ae.add_argument("--no-queue", action="store_true", help="bypass the host FIFO evaluation lock")
+    ae.add_argument("--json", action="store_true", dest="json_output",
+                    help="emit a single Auto-research-agent compatible JSON object on stdout")
+
+    ab = ar_sub.add_parser("brief", help="print a zero-synthesis verbatim brief (Flywheel frontier, claims, dead ends, stall check)")
+    ab.add_argument("--lane", default="A1")
+    ab.add_argument("--run-id", help="optional local run_id to include stall & weakest-class diagnostics")
+    ab.add_argument("--offline", action="store_true", help="skip live Flywheel fetch (local files only)")
+    ab.add_argument("--max-failures", type=int, default=8)
 
     as1 = ar_sub.add_parser("eval-s1", help="evaluate Lane S1 upstream sampler patch")
     as1.add_argument("--upstream", required=True, help="upstream submodule name (e.g. walnutpie, stan, nuts-rs)")
@@ -297,6 +306,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if (rep.get("passed_density_only") and rep.get("passed_all_invariance")) else 1
         return 2
     if a.cmd == "autoresearch":
+        if a.ar_cmd == "brief":
+            print(autoresearch.build_research_brief(
+                a.lane, run_id=a.run_id, offline=a.offline, max_failures=a.max_failures,
+            ), end="")
+            return 0
         if a.ar_cmd == "eval-s1":
             row = systems_lanes.evaluate_s1_trial(
                 a.upstream, a.hypothesis, allowed_paths=a.allowed_paths,
@@ -330,6 +344,11 @@ def main(argv: list[str] | None = None) -> int:
             run_id=a.run_id, allow_duplicate=a.allow_duplicate,
             submission_path=a.submission, dry_run=a.dry_run, use_queue=not a.no_queue,
         )
+        if a.json_output:
+            print(json.dumps(autoresearch.format_evaluator_json(row, run_id=a.run_id)))
+            if a.dry_run:
+                return 0 if row["decision"] == "dry_run_ok" else 2
+            return 0 if row["tier0_ok"] else 1
         if a.dry_run:
             print(f"{row['trial_id']} [{row['lane']}] dry_run={row['decision']} "
                   f"dup={row['is_duplicate']} lint_ok={row['lint_ok']} loc={row['loc']} "

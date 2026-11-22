@@ -68,7 +68,10 @@ def _request_json(
         return None
 
     full_url = f"{base_url}{path}"
-    headers: dict[str, str] = {"Accept": "application/json"}
+    headers: dict[str, str] = {
+        "Accept": "application/json",
+        "User-Agent": "apin-flywheel-client/0.1 (+https://github.com/Numenomics/apin)",
+    }
     data: bytes | None = None
 
     if payload is not None:
@@ -107,6 +110,31 @@ def get_frontier(
 ) -> dict[str, Any] | None:
     """Fetch the current frontier per lane. Returns None if Flywheel is unconfigured."""
     return _request_json("GET", "/api/frontier", url=url, token=token, timeout=timeout)
+
+
+def get_nodes(
+    *,
+    lane: str | None = None,
+    limit: int = 30,
+    url: str | None = None,
+    token: str | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any] | None:
+    """Fetch recent trial nodes (optionally filtered by lane). Returns None if unconfigured."""
+    qs: dict[str, str] = {"limit": str(int(limit))}
+    if lane:
+        qs["lane"] = lane
+    return _request_json("GET", f"/api/nodes?{urllib.parse.urlencode(qs)}", url=url, token=token, timeout=timeout)
+
+
+def get_claims(
+    *,
+    url: str | None = None,
+    token: str | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any] | None:
+    """Fetch active task claims. Returns None if Flywheel is unconfigured."""
+    return _request_json("GET", "/api/claims", url=url, token=token, timeout=timeout)
 
 
 def claim_task(
