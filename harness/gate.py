@@ -53,13 +53,32 @@ from .reference import FUNCTIONS, LP, Reference
 
 STATUSES = ("right", "wrong", "unproven")
 TOLERANCE = 0.1  # reference SDs of the function
+# Default (dev/standard) significance levels
 ALPHA_WRONG = 0.01  # false-wrong rate per model for a correct sampler whose chains have mixed
-ALPHA_RIGHT = 0.05  # false-right rate per rep for a sampler whose error is at the tolerance
-ALPHA_CALIBRATION = 0.001  # rate at which a correct, mixed model is refused for miscalibration
+ALPHA_RIGHT = 0.005  # false-right rate per rep for a sampler whose error is at the tolerance (z = 2.576)
+ALPHA_CALIBRATION = 0.005  # rate at which a correct, mixed model is refused for miscalibration
+# Strict (verification) significance levels (`apin score --strict`)
+STRICT_ALPHA_WRONG = 0.001
+STRICT_ALPHA_RIGHT = 0.001  # z = 3.090 per rep
+STRICT_ALPHA_CALIBRATION = 0.01
 RHAT_MAX = 1.01
 MIN_ESS = 400
 EXACT = 1e-6  # agreement asked of a quantity whose reference value is exact
 SPLIT_Z = 5.0  # in MCSEs of the more confident half: the reference's halves disagree beyond this
+
+
+def resolve_alphas(
+    *,
+    strict: bool = False,
+    alpha_right: float | None = None,
+    alpha_wrong: float | None = None,
+    alpha_calibration: float | None = None,
+) -> tuple[float, float, float]:
+    """Return `(alpha_right, alpha_wrong, alpha_calibration)` for default or `--strict` tier."""
+    ar = (STRICT_ALPHA_RIGHT if strict else ALPHA_RIGHT) if alpha_right is None else float(alpha_right)
+    aw = (STRICT_ALPHA_WRONG if strict else ALPHA_WRONG) if alpha_wrong is None else float(alpha_wrong)
+    ac = (STRICT_ALPHA_CALIBRATION if strict else ALPHA_CALIBRATION) if alpha_calibration is None else float(alpha_calibration)
+    return ar, aw, ac
 
 
 @dataclass
@@ -107,12 +126,12 @@ class ModelVerdict:
     calibration_p: float = math.nan
 
 
-def _z_right() -> float:
-    return float(ndtri(1 - ALPHA_RIGHT))
+def _z_right(alpha_right: float = ALPHA_RIGHT) -> float:
+    return float(ndtri(1 - alpha_right))
 
 
-def z_wrong(quantities: int, reps: int) -> float:
-    return float(-ndtri(ALPHA_WRONG / (2 * max(quantities, 1) * max(reps, 1))))
+def z_wrong(quantities: int, reps: int, alpha_wrong: float = ALPHA_WRONG) -> float:
+    return float(-ndtri(alpha_wrong / (2 * max(quantities, 1) * max(reps, 1))))
 
 
 def disputed(ref: Reference) -> np.ndarray:
@@ -137,8 +156,18 @@ def disputed(ref: Reference) -> np.ndarray:
     return np.abs(m[0] - m[1]) > slack
 
 
-def check(draws: dict[str, np.ndarray], ref: Reference, reps: int = 1, tolerance: float = TOLERANCE) -> Verdict:
+def check(
+    draws: dict[str, np.ndarray],
+    ref: Reference,
+    reps: int = 1,
+    tolerance: float = TOLERANCE,
+    *,
+    strict: bool = False,
+    alpha_right: float | None = None,
+    alpha_wrong: float | None = None,
+) -> Verdict:
     """draws maps a name to a (draws, chains) array of the run; lp__ is needed when ref has it."""
+    ar, aw, _ = resolve_alphas(strict=strict, alpha_right=alpha_right, alpha_wrong=alpha_wrong)
     need = list(ref.names) + list(ref.constants) + ([LP] if ref.has_lp else [])
     for n in need:
         if n not in draws:
@@ -196,11 +225,11 @@ def check(draws: dict[str, np.ndarray], ref: Reference, reps: int = 1, tolerance
 
     absval = np.abs(np.where(checked, err, 0.0))
     # a quantity the reference's halves disagree on can keep the run from right, not make it wrong
-    lower = np.where(checked & ~split, absval - z_wrong(q, reps) * se, -math.inf)
+    lower = np.where(checked & ~split, absval - z_wrong(q, reps, alpha_wrong=aw) * se, -math.inf)
     i, j = np.unravel_index(int(np.argmax(lower)), lower.shape)
     if lower[i, j] > tolerance:
         return Verdict("wrong", "error", ref.series[i], FUNCTIONS[j], float(err[i, j]), float(lower[i, j]), **base)
-    upper = np.where(checked, absval + _z_right() * se, -math.inf)
+    upper = np.where(checked, absval + _z_right(alpha_right=ar) * se, -math.inf)
     i, j = np.unravel_index(int(np.argmax(upper)), upper.shape)
     status = "right" if upper[i, j] < tolerance else "unproven"
     if status == "right" and exact_disputed:
@@ -211,11 +240,19 @@ def check(draws: dict[str, np.ndarray], ref: Reference, reps: int = 1, tolerance
                    float(err[i, j]), float(upper[i, j]), **base)
 
 
-def judge(verdicts: list[Verdict | None], ref: Reference, reps: int) -> ModelVerdict:
+def judge(
+    verdicts: list[Verdict | None],
+    ref: Reference,
+    reps: int,
+    *,
+    strict: bool = False,
+    alpha_calibration: float | None = None,
+) -> ModelVerdict:
     """The model's verdict from its reps; None stands for a rep that is missing or failed (wrong).
 
     A model is right only when every rep is right and it passes the calibration test (rule 2).
     """
+    _, _, ac = resolve_alphas(strict=strict, alpha_calibration=alpha_calibration)
     if len(verdicts) < reps or any(v is None for v in verdicts):
         return ModelVerdict("wrong", "a rep is missing or failed")
     if any(v.status == "wrong" for v in verdicts):
@@ -223,7 +260,7 @@ def judge(verdicts: list[Verdict | None], ref: Reference, reps: int) -> ModelVer
     if any(v.status == "unproven" for v in verdicts):
         return ModelVerdict("unproven", next(v.label() for v in verdicts if v.status == "unproven"))
     ratio, p = calibration(verdicts, ref)
-    if not p >= ALPHA_CALIBRATION:
+    if not p >= ac:
         return ModelVerdict("unproven", f"calibration: realized error variance {ratio:.2f}x the claimed "
                             f"(p={p:.2g})", ratio, p)
     return ModelVerdict("right", "", ratio, p)

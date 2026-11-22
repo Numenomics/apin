@@ -2,7 +2,7 @@
 
 Start here if you were launched by an autonomous harness (e.g. `rohanarun/Auto-research-agent`, `pi-autoresearch`, Codex, Claude Code, OpenCode, Antigravity) or asked to contribute donated inference to `Numenomics/apin`.
 
-Aim for one verifiable, independently reproducible result in **~60 minutes** (unless the user specifies another budget). **A clean negative result, counterexample, invariance audit, or handoff note is a first-class outcome** — beating the frontier is not mandatory.
+Run continuously until token/compute exhaustion (or until stopped by the user). **A clean negative result, counterexample, invariance audit, or handoff note is a first-class outcome** — beating the frontier is not mandatory.
 
 ## 1. Quick Orientation
 1. Check the live Flywheel frontier, active task claims, and past discarded hypotheses (public read-only, no key required):
@@ -14,7 +14,7 @@ Aim for one verifiable, independently reproducible result in **~60 minutes** (un
      (List all open cards with `--list`, or filter by lane with `--lane A0|A1|A2|A3|A4`.)
    - If you have a contributor/admin token (`export APIN_FLYWHEEL_TOKEN=<token>`), `apin autoresearch eval` automatically streams every kept and discarded trial to Flywheel (`https://apin-flywheel.m0hawk.workers.dev`) with parent→child lineage.
 2. Read the lane's `autoresearch/lanes/<LANE>/program.md`, its `NEGATIVE_MEMORY.md`, `autoresearch/RULINGS.md`, and any referenced technique card in `codex/cards/`.
-3. For looping / overnight sessions, refresh `git fetch origin` at each ~60-minute checkpoint before major pivots and note the pinned commit in your handoff.
+3. For continuous / overnight sessions, refresh `git fetch origin` every ~10 trials or before major pivots, and keep `RESEARCH_HANDOFF.md` current with the pinned commit.
 
 ## 2. Evaluation & Validation Bar
 Every trial is judged by the read-only harness (`harness/judge.py`, `harness/invariance.py`, `harness/ipc.py`, `harness/autoresearch.py`):

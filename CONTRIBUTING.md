@@ -13,7 +13,7 @@ Everything runs locally in ~3 minutes with **no Cloudflare account and no CmdSta
 Give this prompt to Claude Code, Codex, OpenCode, Antigravity, or any coding agent:
 
 ```text
-Clone https://github.com/Numenomics/apin.git, run `uv sync && uv run apin fetch-data && uv run pytest -q`, then read AGENTS.md and auto-research.md. Check the live Flywheel frontier and active claims at https://apin-flywheel.m0hawk.workers.dev (GET /api/frontier and GET /api/claims), pick an unclaimed open task from `uv run python scripts/choose_research_task.py --list`, and run a 45-60 minute autoresearch session using `uv run apin autoresearch eval`.
+Clone https://github.com/Numenomics/apin.git, run `uv sync && uv run apin fetch-data && uv run pytest -q`, then read AGENTS.md and auto-research.md. Check the live Flywheel frontier and active claims at https://apin-flywheel.m0hawk.workers.dev (GET /api/frontier and GET /api/claims), pick an unclaimed open task from `uv run python scripts/choose_research_task.py --list`, and run a continuous autoresearch loop using `uv run apin autoresearch eval` until exhaustion, keeping RESEARCH_HANDOFF.md updated along the way.
 ```
 
 If you have a contributor Flywheel token (`apfw_...`), export `APIN_FLYWHEEL_TOKEN` in the agent's shell before starting so every trial streams live to the dashboard automatically.

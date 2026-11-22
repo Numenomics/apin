@@ -22,10 +22,10 @@ def lp(draws: dict) -> np.ndarray:
 @pytest.fixture(scope="module")
 def grid():
     rng = np.random.default_rng(5)
-    x = MU + SIGMA * rng.standard_normal((1000, 10, 3))
+    x = MU + SIGMA * rng.standard_normal((2000, 10, 3))
     d = {n: x[..., i] for i, n in enumerate(NAMES)}
     ref = reference.summarise(d, lp=lp(d), model="sim")
-    entries = {m: score.Entry(m, ref, chains=4, warmup=10, draws=4000, lp=lp, cost_weights={"r_grad": 2.0}) for m in ("m1", "m2")}
+    entries = {m: score.Entry(m, ref, chains=4, warmup=10, draws=5000, lp=lp, cost_weights={"r_grad": 2.0}) for m in ("m1", "m2")}
     return score.Grid(entries, reps=2, base_seed=100)
 
 
@@ -536,4 +536,48 @@ def test_declared_budget_override():
     g_custom = score.declared("blr", reps=1, warmup=2000, draws=50000)
     assert g_custom.entries["blr"].warmup == 2000
     assert g_custom.entries["blr"].draws == 50000
+
+
+def test_strict_gate_cache_key_and_time_to_ess_metrics(tmp_path, grid):
+    """strict=True isolates gate.json cache keys; s_to_ess / cost_to_ess bill warmup + scaled sampling."""
+    for r in range(2):
+        for m in ("m1", "m2"):
+            d_base = write_rep(tmp_path, "base", m, r, grid, evaluations=100_000, seconds=4.0, seed_rng=200 + r)
+            # base: 1.0s warmup + 3.0s sampling across 4 chains; 20k adapt + 80k transition evals
+            _rewrite(d_base, lambda t: (
+                t.update(warmup_s=[0.25] * 4, sampling_s=[0.75] * 4),
+                t["extra"].update(
+                    adapt_density_evals=5_000, adapt_gradient_evals=15_000,
+                    transition_density_evals=20_000, transition_gradient_evals=60_000,
+                ),
+            ))
+            d_fast = write_rep(tmp_path, "fast", m, r, grid, evaluations=50_000, seconds=2.0, seed_rng=200 + r)
+            _rewrite(d_fast, lambda t: (
+                t.update(warmup_s=[0.1] * 4, sampling_s=[0.4] * 4),
+                t["extra"].update(
+                    adapt_density_evals=2_500, adapt_gradient_evals=7_500,
+                    transition_density_evals=10_000, transition_gradient_evals=30_000,
+                ),
+            ))
+
+    out_1k = score.score(tmp_path, tmp_path / "s1", grid, baseline="base", target_ess=1000.0, log=lambda *_: None)
+    base_row = next(r for r in out_1k["per_run"] if r["label"] == "base" and r["model"] == "m1" and r["rep"] == 0)
+    # s_to_ess = warmup_s (1.0) + (1000 / ess) * sampling_s (3.0)
+    assert base_row["s_to_ess"] == pytest.approx(1.0 + (1000.0 / base_row["ess"]) * 3.0)
+    # adapt_c = 5000 + 2*15000 = 35000; trans_c = 20000 + 2*60000 = 140000
+    assert base_row["cost_to_ess"] == pytest.approx(35_000.0 + (1000.0 / base_row["ess"]) * 140_000.0)
+    rank_fast = next(r for r in out_1k["ranking"] if r["label"] == "fast")
+    rank_base = next(r for r in out_1k["ranking"] if r["label"] == "base")
+    assert rank_fast["geo_s_to_ess"] < rank_base["geo_s_to_ess"]
+    assert rank_fast["speed_to_ess_s"] > 1.8
+    assert "s to 1k ESS" in out_1k["table"]
+
+    # Strict run must miss default cache and emit STRICT banner
+    d0 = tmp_path / "base" / "m1" / "rep0"
+    assert json.loads((d0 / "gate.json").read_text())["key"]["strict"] is False
+    out_strict = score.score(tmp_path, tmp_path / "s2", grid, baseline="base", strict=True,
+                             target_ess=2000.0, log=lambda *_: None)
+    assert json.loads((d0 / "gate.json").read_text())["key"]["strict"] is True
+    assert "Gate tier: STRICT" in out_strict["table"]
+    assert "s to 2k ESS" in out_strict["table"]
 

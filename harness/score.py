@@ -35,6 +35,7 @@ from .reference import LP, Reference
 
 BOOTSTRAP = 2000
 CHECKPOINT_DRAWS = (500, 1000, 2000, 5000, 10000, 20000)
+DEFAULT_TARGET_ESS = 1000.0
 
 
 @dataclass(frozen=True)
@@ -121,11 +122,12 @@ GATE_SOURCE = hashlib.sha256(b"".join(Path(m.__file__).read_bytes()
                              + Path(__file__).read_bytes()).hexdigest()
 
 
-def _key(entry: Entry, reps: int, bridgestan_key: str = "") -> dict:
-    """Expanded cache key: hashes Stan model, data, reference+halves, BridgeStan build, and gate code."""
+def _key(entry: Entry, reps: int, bridgestan_key: str = "", *, strict: bool = False) -> dict:
+    """Expanded cache key: hashes Stan model, data, reference+halves, BridgeStan build, gate code, and tier."""
     halves = entry.ref.halves_json() if entry.ref.halves else ""
     return {
         "reps": reps,
+        "strict": bool(strict),
         "reference": hashlib.sha256((entry.ref.to_json() + halves).encode()).hexdigest(),
         "stan_sha256": entry.stan_sha256,
         "data_sha256": entry.data_sha256,
@@ -151,25 +153,39 @@ def read_rep(rep_dir: Path, chains: int, draws: int, names: list[str] | None = N
     return csvs, hashes
 
 
-def _first_passing_checkpoint(draws: dict[str, np.ndarray], ref: Reference, total_draws: int, reps: int) -> int:
+def _first_passing_checkpoint(
+    draws: dict[str, np.ndarray],
+    ref: Reference,
+    total_draws: int,
+    reps: int,
+    *,
+    strict: bool = False,
+) -> int:
     """Earliest prefix checkpoint in CHECKPOINT_DRAWS that passes the 0.1-SD gate (right)."""
     for k in CHECKPOINT_DRAWS:
         if k >= total_draws:
             break
         sub = {name: arr[:k] for name, arr in draws.items()}
-        if gate.check(sub, ref, reps=reps).status == "right":
+        if gate.check(sub, ref, reps=reps, strict=strict).status == "right":
             return k
     return total_draws
 
 
-def verdict_with_checkpoint(rep_dir: Path, entry: Entry, reps: int, bridgestan_key: str = "") -> tuple[gate.Verdict, int | None]:
+def verdict_with_checkpoint(
+    rep_dir: Path,
+    entry: Entry,
+    reps: int,
+    bridgestan_key: str = "",
+    *,
+    strict: bool = False,
+) -> tuple[gate.Verdict, int | None]:
     ref = entry.ref
     names = list(ref.names) + list(ref.constants)
     try:
         csvs, hashes = read_rep(rep_dir, entry.chains, entry.draws, names)
     except ValueError as e:
         return gate.Verdict("wrong", str(e)), None
-    key = {**_key(entry, reps, bridgestan_key=bridgestan_key), "chains": hashes}
+    key = {**_key(entry, reps, bridgestan_key=bridgestan_key, strict=strict), "chains": hashes}
     cache = rep_dir / "gate.json"
     try:
         c = json.loads(cache.read_text())
@@ -184,14 +200,14 @@ def verdict_with_checkpoint(rep_dir: Path, entry: Entry, reps: int, bridgestan_k
     draws = chain_draws(rep_dir, names, csvs)
     if ref.has_lp and all(n in draws for n in ref.names):
         draws[LP] = entry.lp(draws)
-    v = gate.check(draws, ref, reps=reps)
-    fp = _first_passing_checkpoint(draws, ref, entry.draws, reps) if v.status == "right" else None
+    v = gate.check(draws, ref, reps=reps, strict=strict)
+    fp = _first_passing_checkpoint(draws, ref, entry.draws, reps, strict=strict) if v.status == "right" else None
     cache.write_text(json.dumps({"key": key, "verdict": v.to_dict(), "first_pass_draws": fp}))
     return v, fp
 
 
-def verdict(rep_dir: Path, entry: Entry, reps: int, bridgestan_key: str = "") -> gate.Verdict:
-    v, _ = verdict_with_checkpoint(rep_dir, entry, reps, bridgestan_key=bridgestan_key)
+def verdict(rep_dir: Path, entry: Entry, reps: int, bridgestan_key: str = "", *, strict: bool = False) -> gate.Verdict:
+    v, _ = verdict_with_checkpoint(rep_dir, entry, reps, bridgestan_key=bridgestan_key, strict=strict)
     return v
 
 
@@ -268,14 +284,23 @@ def count_problem(rec: dict, entry: Entry) -> str | None:
     return None
 
 
+def _finite_list_sum(vals) -> float | None:
+    if not isinstance(vals, (list, tuple)) or not vals:
+        return None
+    if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x >= 0 for x in vals):
+        return None
+    return float(sum(vals))
+
+
 def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid, digest: str | None = None,
-              track: str = "L1") -> dict:
+              track: str = "L1", *, strict: bool = False, target_ess: float = DEFAULT_TARGET_ESS) -> dict:
     d = label_dir / entry.model / f"rep{rep}"
     row = {
         "label": label_dir.name, "model": entry.model, "rep": rep, "status": "wrong", "reason": "",
         "identity": "", "ess": math.nan, "evaluations": None, "density_evals": None, "gradient_evals": None,
         "hvp_evals": 0, "hess_evals": 0, "cost": math.nan, "seconds": math.nan,
         "first_pass_draws": None, "cost_to_gate": math.nan,
+        "s_to_ess": math.nan, "cost_to_ess": math.nan,
         "ess_per_cost": math.nan, "ess_per_eval": math.nan, "ess_per_s": math.nan,
         "overhead_ratio": math.nan, "verdict": None,
     }
@@ -329,28 +354,50 @@ def score_rep(label_dir: Path, entry: Entry, rep: int, g: Grid, digest: str | No
         rep_cost = cost_mod.compute_cost(dens, grad, entry.cost_weights, hvp=hvp, hess=hess)
 
     bs_key = str(extra.get("bridgestan_key") or "")
-    v, first_pass = verdict_with_checkpoint(d, entry, g.reps, bridgestan_key=bs_key)
+    v, first_pass = verdict_with_checkpoint(d, entry, g.reps, bridgestan_key=bs_key, strict=strict)
     secs = float(sum(t["chain_s"]))
     overhead = extra.get("overhead_ratio")
     cost_to_gate = math.nan
+    s_to_ess = math.nan
+    cost_to_ess = math.nan
+    has_split_cost = (
+        extra.get("adapt_density_evals") is not None
+        and extra.get("transition_density_evals") is not None
+    )
+    adapt_c = math.nan
+    if has_split_cost and math.isfinite(rep_cost):
+        adapt_c = cost_mod.compute_cost(
+            int(extra.get("adapt_density_evals") or 0),
+            int(extra.get("adapt_gradient_evals") or 0),
+            entry.cost_weights,
+            hvp=int(extra.get("adapt_hvp_evals") or 0),
+            hess=int(extra.get("adapt_hess_evals") or 0),
+        )
     if v.status == "right" and first_pass is not None and math.isfinite(rep_cost) and entry.draws > 0:
         frac = min(1.0, float(first_pass) / float(entry.draws))
-        if extra.get("adapt_density_evals") is not None and extra.get("transition_density_evals") is not None:
-            adapt_c = cost_mod.compute_cost(
-                int(extra.get("adapt_density_evals") or 0),
-                int(extra.get("adapt_gradient_evals") or 0),
-                entry.cost_weights,
-                hvp=int(extra.get("adapt_hvp_evals") or 0),
-                hess=int(extra.get("adapt_hess_evals") or 0),
-            )
+        if math.isfinite(adapt_c):
             trans_c = max(0.0, rep_cost - adapt_c)
             cost_to_gate = adapt_c + frac * trans_c
         else:
             cost_to_gate = frac * rep_cost
+    if v.status == "right" and math.isfinite(v.ess) and v.ess > 0:
+        scale = float(target_ess) / v.ess
+        warmup_sum = _finite_list_sum(t.get("warmup_s"))
+        sampling_sum = _finite_list_sum(t.get("sampling_s"))
+        if warmup_sum is not None and sampling_sum is not None and sampling_sum > 0:
+            s_to_ess = warmup_sum + scale * sampling_sum
+        elif secs > 0:
+            s_to_ess = scale * secs
+        if math.isfinite(rep_cost) and rep_cost > 0:
+            if math.isfinite(adapt_c) and rep_cost > adapt_c:
+                cost_to_ess = adapt_c + scale * (rep_cost - adapt_c)
+            else:
+                cost_to_ess = scale * rep_cost
     row.update(
         status=v.status, reason=v.label(), ess=v.ess, evaluations=total, density_evals=dens,
         gradient_evals=grad, hvp_evals=hvp, hess_evals=hess, cost=rep_cost, seconds=secs,
         first_pass_draws=first_pass, cost_to_gate=cost_to_gate,
+        s_to_ess=s_to_ess, cost_to_ess=cost_to_ess,
         overhead_ratio=float(overhead) if overhead is not None and math.isfinite(overhead) else math.nan,
         verdict=v,
     )
@@ -365,11 +412,11 @@ def identity_digest(identity: dict) -> str:
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def per_model(rows: list[dict], g: Grid) -> list[dict]:
+def per_model(rows: list[dict], g: Grid, *, strict: bool = False) -> list[dict]:
     out = []
     for (label, model) in dict.fromkeys((r["label"], r["model"]) for r in rows):
         reps = sorted((r for r in rows if r["label"] == label and r["model"] == model), key=lambda r: r["rep"])
-        m = gate.judge([r["verdict"] for r in reps], g.entries[model].ref, g.reps)
+        m = gate.judge([r["verdict"] for r in reps], g.entries[model].ref, g.reps, strict=strict)
         right = m.status == "right"
         oh = [r["overhead_ratio"] for r in reps if isinstance(r.get("overhead_ratio"), (int, float))
               and math.isfinite(r["overhead_ratio"])]
@@ -382,10 +429,18 @@ def per_model(rows: list[dict], g: Grid) -> list[dict]:
             "gate_eff": [1.0 / r["cost_to_gate"] if isinstance(r.get("cost_to_gate"), (int, float))
                          and math.isfinite(r["cost_to_gate"]) and r["cost_to_gate"] > 0 else math.nan
                          for r in reps] if right else [],
+            "ess_time_rate": [1.0 / r["s_to_ess"] if isinstance(r.get("s_to_ess"), (int, float))
+                              and math.isfinite(r["s_to_ess"]) and r["s_to_ess"] > 0 else math.nan
+                              for r in reps] if right else [],
+            "ess_cost_rate": [1.0 / r["cost_to_ess"] if isinstance(r.get("cost_to_ess"), (int, float))
+                              and math.isfinite(r["cost_to_ess"]) and r["cost_to_ess"] > 0 else math.nan
+                              for r in reps] if right else [],
             "ess_per_cost": _mean([r["ess_per_cost"] for r in reps]) if right else math.nan,
             "ess_per_eval": _mean([r["ess_per_eval"] for r in reps]) if right else math.nan,
             "ess_per_s": _mean([r["ess_per_s"] for r in reps]) if right else math.nan,
             "cost_to_gate": _mean([r["cost_to_gate"] for r in reps]) if right else math.nan,
+            "s_to_ess": _mean([r["s_to_ess"] for r in reps]) if right else math.nan,
+            "cost_to_ess": _mean([r["cost_to_ess"] for r in reps]) if right else math.nan,
             "overhead_ratio": float(np.mean(oh)) if oh else math.nan,
         })
     return out
@@ -405,11 +460,24 @@ def rank(models: list[dict], baseline: str | None, names: list[str], seed: int =
         right = [n for n in names if by.get((lab, n), {}).get("status") == "right"]
         oh_vals = [by[(lab, n)]["overhead_ratio"] for n in names
                    if (lab, n) in by and math.isfinite(by[(lab, n)].get("overhead_ratio", math.nan))]
+        s_ess_vals = [by[(lab, n)]["s_to_ess"] for n in right
+                      if math.isfinite(by[(lab, n)].get("s_to_ess", math.nan)) and by[(lab, n)]["s_to_ess"] > 0]
+        c_ess_vals = [by[(lab, n)]["cost_to_ess"] for n in right
+                      if math.isfinite(by[(lab, n)].get("cost_to_ess", math.nan)) and by[(lab, n)]["cost_to_ess"] > 0]
         row = {
             "label": lab, "right": len(right), "of": len(names),
+            "geo_s_to_ess": _geo(s_ess_vals) if s_ess_vals and len(s_ess_vals) == len(right) else math.nan,
+            "geo_cost_to_ess": _geo(c_ess_vals) if c_ess_vals and len(c_ess_vals) == len(right) else math.nan,
             "overhead_ratio": float(np.median(oh_vals)) if oh_vals else math.nan, "note": "",
         }
-        for unit, key in (("cost_u", "speed_cost"), ("eval", "speed_eval"), ("sec", "speed_s"), ("gate_eff", "gate_speed")):
+        for unit, key in (
+            ("cost_u", "speed_cost"),
+            ("eval", "speed_eval"),
+            ("sec", "speed_s"),
+            ("gate_eff", "gate_speed"),
+            ("ess_time_rate", "speed_to_ess_s"),
+            ("ess_cost_rate", "speed_to_ess_cost"),
+        ):
             row.update({key: math.nan, f"{key}_lo": math.nan, f"{key}_hi": math.nan, f"{key}_p": math.nan})
             if baseline is None:
                 continue
@@ -455,10 +523,24 @@ def _bootstrap(pairs, seed: int) -> tuple[float, float]:
     return boot["ci_lo"], boot["ci_hi"]
 
 
+def _ess_label(target_ess: float) -> str:
+    if target_ess >= 1000 and target_ess % 1000 == 0:
+        return f"{int(target_ess // 1000)}k"
+    return f"{target_ess:g}"
+
+
 def table(ranking: list[dict], models: list[dict], baseline: str | None, names: list[str],
-          track: str = "L1", machine: dict | None = None) -> str:
+          track: str = "L1", machine: dict | None = None, *, strict: bool = False,
+          target_ess: float = DEFAULT_TARGET_ESS) -> str:
     labels = [r["label"] for r in ranking]
+    ess_tag = _ess_label(target_ess)
     lines: list[str] = []
+    if strict:
+        ar, aw, ac = gate.resolve_alphas(strict=True)
+        lines += [
+            f"Gate tier: STRICT (alpha_right={ar:g}, alpha_wrong={aw:g}, alpha_calibration={ac:g})",
+            "",
+        ]
     if track == "L2" and machine:
         lines += [
             f"Track L2 (wall-clock ESS/s) — host: {machine.get('cpu_model', 'unknown')} "
@@ -470,14 +552,18 @@ def table(ranking: list[dict], models: list[dict], baseline: str | None, names: 
     elif track == "L5":
         lines += ["Track L5 (density-only view of L1; `n_gradient == 0` strictly enforced)", ""]
     lines += [
-        "| rank | label | passed 0.1-SD gate | ESS/cost vs baseline [95 %] | ESS/eval (1:1) [95 %] | ESS/s [95 %] | overhead/eval | note |",
-        "|---|---|---|---|---|---|---|---|",
+        f"| rank | label | passed 0.1-SD gate | ESS/cost vs baseline [95 %] | ESS/eval (1:1) [95 %] | ESS/s [95 %] | s to {ess_tag} ESS | overhead/eval | note |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for r in ranking:
         oh = f"{r['overhead_ratio']:.2g}x" if math.isfinite(r.get("overhead_ratio", math.nan)) else ""
+        t_ess = r.get("geo_s_to_ess", math.nan)
+        t_ess_str = f"{t_ess:.3g}s" if math.isfinite(t_ess) else ""
+        if t_ess_str and baseline and r["label"] != baseline and math.isfinite(r.get("speed_to_ess_s", math.nan)):
+            t_ess_str += f" ({r['speed_to_ess_s']:.3g}x)"
         lines.append(
             f"| {r['rank']} | {r['label']} | {r['right']} of {r['of']} | {_speed(r, 'speed_cost')} | "
-            f"{_speed(r, 'speed_eval')} | {_speed(r, 'speed_s')} | {oh} | {r['note']} |"
+            f"{_speed(r, 'speed_eval')} | {_speed(r, 'speed_s')} | {t_ess_str} | {oh} | {r['note']} |"
         )
     tie_desc = (
         "relative wall-clock ESS per second" if track == "L2"
@@ -486,8 +572,10 @@ def table(ranking: list[dict], models: list[dict], baseline: str | None, names: 
     lines += [
         "",
         f"Ranked by models passing the 0.1-SD bench gate, then by {tie_desc} against "
-        f"{baseline or 'the baseline'} on models where both passed the gate. Passing the gate means "
-        f"no checked functional exceeded 0.1 reference SDs at this budget; it is not a proof of exactness.",
+        f"{baseline or 'the baseline'} on models where both passed the gate. "
+        f"`s to {ess_tag} ESS` is the geometric mean over passed models of warmup/adapt + scaled sampling seconds "
+        f"to reach {target_ess:g} worst-series ESS (lower is faster; parenthetical speedup vs baseline when available). "
+        f"Passing the gate means no checked functional exceeded 0.1 reference SDs at this budget; it is not a proof of exactness.",
         "",
     ]
     by = {(m["label"], m["model"]): m for m in models}
@@ -520,7 +608,8 @@ def _speed(r, key) -> str:
     return f"{r[key]:.3g} [{r[key + '_lo']:.3g}, {r[key + '_hi']:.3g}]"
 
 
-def _write(path: Path, rows: list[dict], drop=("verdict", "cost_u", "eval", "sec", "gate_eff")) -> None:
+def _write(path: Path, rows: list[dict],
+           drop=("verdict", "cost_u", "eval", "sec", "gate_eff", "ess_time_rate", "ess_cost_rate")) -> None:
     if not rows:
         return
     fields = list(dict.fromkeys(k for r in rows for k in r if k not in drop))
@@ -531,9 +620,12 @@ def _write(path: Path, rows: list[dict], drop=("verdict", "cost_u", "eval", "sec
 
 
 def score(runs_dir: Path, out_dir: Path, g: Grid, baseline: str | None = None, labels: list[str] | None = None,
-          log=print, submissions: dict[str, Path] | None = None, track: str = "L1") -> dict:
+          log=print, submissions: dict[str, Path] | None = None, track: str = "L1", *,
+          strict: bool = False, target_ess: float = DEFAULT_TARGET_ESS) -> dict:
     if track not in ("L1", "L2", "L5"):
         raise ValueError(f"apin score supports tracks L1, L2, L5 (got {track!r}; use `apin track run` for L3/L4)")
+    if not (isinstance(target_ess, (int, float)) and math.isfinite(target_ess) and target_ess > 0):
+        raise ValueError(f"target_ess must be a positive finite number, got {target_ess!r}")
     digests = {k: hashlib.sha256(Path(p).read_bytes()).hexdigest() for k, p in (submissions or {}).items()}
     label_dirs = sorted(p for p in Path(runs_dir).iterdir() if p.is_dir() and (not labels or p.name in labels))
     unknown = sorted(set(digests) - {ld.name for ld in label_dirs})
@@ -545,16 +637,19 @@ def score(runs_dir: Path, out_dir: Path, g: Grid, baseline: str | None = None, l
     names = list(g.entries)
     rows = []
     for ld in label_dirs:
-        lab = [score_rep(ld, g.entries[n], r, g, digests.get(ld.name), track=track) for n in names for r in range(g.reps)]
+        lab = [score_rep(ld, g.entries[n], r, g, digests.get(ld.name), track=track,
+                         strict=strict, target_ess=target_ess)
+               for n in names for r in range(g.reps)]
         ids = {r["identity"] for r in lab if r["identity"]}
         if len(ids) > 1:
             raise ValueError(f"label {ld.name!r} mixes {len(ids)} sampler identities (submission or options); "
                              "give each its own label")
         rows += lab
     machine = tracks.machine_fingerprint() if track == "L2" else None
-    models = per_model(rows, g)
+    models = per_model(rows, g, strict=strict)
     ranking = rank(models, baseline, names, track=track)
-    tab = table(ranking, models, baseline, names, track=track, machine=machine)
+    tab = table(ranking, models, baseline, names, track=track, machine=machine,
+                strict=strict, target_ess=target_ess)
     out_dir.mkdir(parents=True, exist_ok=True)
     _write(out_dir / "per_run.csv", rows)
     _write(out_dir / "per_model.csv", models)
@@ -563,4 +658,7 @@ def score(runs_dir: Path, out_dir: Path, g: Grid, baseline: str | None = None, l
     if machine is not None:
         (out_dir / "machine_fingerprint.json").write_text(json.dumps(machine, indent=2))
     log(tab)
-    return {"per_run": rows, "per_model": models, "ranking": ranking, "table": tab, "track": track, "machine": machine}
+    return {
+        "per_run": rows, "per_model": models, "ranking": ranking, "table": tab,
+        "track": track, "strict": strict, "target_ess": target_ess, "machine": machine,
+    }

@@ -94,6 +94,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--costs", type=Path, default=cost.COSTS_PATH, help="path to frozen models/costs.json")
     s.add_argument("--track", choices=("L1", "L2", "L5"), default="L1",
                    help="leaderboard track: L1 (cost units), L2 (wall-clock ESS/s + host fingerprint), L5 (density-only)")
+    s.add_argument("--strict", action="store_true",
+                   help="strict verification gate (alpha_right=0.001, alpha_wrong=0.001, alpha_calibration=0.01)")
+    s.add_argument("--target-ess", type=float, default=score.DEFAULT_TARGET_ESS,
+                   help="target worst-series ESS for time-to-ESS / cost-to-ESS speedrun metrics (default: 1000)")
     s.add_argument("--submission", action="append", default=[], metavar="LABEL=PATH",
                    help="the submission file of a label; every rep of it must record its sha256 (repeatable)")
 
@@ -128,8 +132,11 @@ def main(argv: list[str] | None = None) -> int:
     inv = sub.add_parser("invariance", help="run Slice 4 analytic exact-draw invariance & empirical efficiency check")
     inv.add_argument("--sampler", type=Path, required=True)
     inv.add_argument("--dim", type=int, default=6)
-    inv.add_argument("--chains", type=int, default=64)
-    inv.add_argument("--steps", type=int, default=20)
+    inv.add_argument("--chains", type=int, help="number of parallel exact-start chains (default: 64, or 256 with --strict)")
+    inv.add_argument("--steps", type=int, help="steps per chain (default: 20, or 40 with --strict)")
+    inv.add_argument("--alpha", type=float, help="calibrated omnibus alpha (default: 0.001, or 1e-4 with --strict)")
+    inv.add_argument("--strict", action="store_true",
+                     help="strict verification mode: longer chains + more chains + tighter alpha (256 chains x 40 steps, alpha=1e-4)")
     inv.add_argument("--seed", type=int, default=1)
 
     rec = sub.add_parser("records", help="validate PR submission records")
@@ -222,7 +229,8 @@ def main(argv: list[str] | None = None) -> int:
         subs = dict(x.split("=", 1) for x in a.submission)
         try:
             score.score(a.runs, a.out, g, a.baseline, a.labels.split(",") if a.labels else None,
-                        submissions={k: Path(v) for k, v in subs.items()}, track=a.track)
+                        submissions={k: Path(v) for k, v in subs.items()}, track=a.track,
+                        strict=a.strict, target_ess=a.target_ess)
         except ValueError as e:
             raise SystemExit(f"apin score: {e}") from None
         return 0
@@ -248,11 +256,16 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "codex":
         return _validate_codex(a.index)
     if a.cmd == "invariance":
+        n_chains = a.chains if a.chains is not None else (256 if a.strict else 64)
+        k_steps = a.steps if a.steps is not None else (40 if a.strict else 20)
+        alpha = a.alpha if a.alpha is not None else (1e-4 if a.strict else 0.001)
+        if a.strict:
+            print(f"[invariance: STRICT] dim={a.dim} chains={n_chains} steps={k_steps} alpha={alpha:g}")
         suite = shapes.make_suite(a.seed, dim=a.dim)
         failed = 0
         for i, tgt in enumerate(suite):
             r = invariance.check_target_invariance(tgt, a.sampler, seed=a.seed + 100 * i,
-                                                   n_chains=a.chains, k_steps=a.steps)
+                                                   n_chains=n_chains, k_steps=k_steps, alpha=alpha)
             status = "PASS" if r.passed else "FAIL"
             print(f"{status:4s} {tgt.family:20s} rot={str(tgt.rotated):5s} max_z={r.max_z:5.2f}/{r.z_threshold:4.2f} "
                   f"b2={r.b2_max:.4g} eff={r.empirical_efficiency:.3g} {r.reason}")

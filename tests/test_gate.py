@@ -252,3 +252,24 @@ def test_halves_with_tiny_positive_mcses_are_judged_by_their_mcses_alone():
     m[1, 0, 0], m[1, 0, 1] = 5e-7, 4e-8
     d = gate.disputed(dataclasses.replace(ref, halves={"mean": m, "mcse": s}))
     assert d[0, 0] and not d[0, 1] and not d[0, 2]
+
+
+def test_two_tier_significance_default_and_strict(ref):
+    """Default tier uses ALPHA_RIGHT=0.005 (z=2.576); strict tier tightens to 0.001 (z=3.090) and cal=0.01."""
+    ar_def, aw_def, ac_def = gate.resolve_alphas(strict=False)
+    ar_str, aw_str, ac_str = gate.resolve_alphas(strict=True)
+    assert (ar_def, aw_def, ac_def) == (0.005, 0.01, 0.005)
+    assert (ar_str, aw_str, ac_str) == (0.001, 0.001, 0.01)
+    assert gate._z_right(ar_str) > gate._z_right(ar_def) > 2.5
+
+    # Run with exact independent draws gets strictly larger upper bound under strict=True
+    draws = with_lp(ar1(np.random.default_rng(12), 5000, 4, 0.0))
+    v_def = gate.check(draws, ref, reps=3, strict=False)
+    v_str = gate.check(draws, ref, reps=3, strict=True)
+    assert v_def.status == "right" and v_str.status == "right"
+    assert v_str.bound > v_def.bound
+
+    # Borderline tolerance: passes default, unproven under strict
+    mid_tol = 0.5 * (v_def.bound + v_str.bound)
+    assert gate.check(draws, ref, reps=3, tolerance=mid_tol, strict=False).status == "right"
+    assert gate.check(draws, ref, reps=3, tolerance=mid_tol, strict=True).status == "unproven"
