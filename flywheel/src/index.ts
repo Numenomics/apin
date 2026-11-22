@@ -23,6 +23,24 @@ export interface Env {
   DB: D1DatabaseLike;
   ASSETS?: AssetsBindingLike;
   FLYWHEEL_API_KEY?: string;
+  FLYWHEEL_INVITE_CODE?: string;
+}
+
+export interface ApiKeyRow {
+  id: string;
+  key_hash: string;
+  handle: string;
+  role: string;
+  hourly_limit: number;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+export interface AuthPrincipal {
+  role: "admin" | "contributor";
+  keyId: string;
+  handle: string;
+  hourlyLimit: number;
 }
 
 export interface NodeRow {
@@ -98,12 +116,13 @@ export interface AlignmentPoint {
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PATCH, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
 const KEPT_DECISIONS = new Set(["keep", "keep_baseline", "keep_simpler"]);
 const VALID_CLAIM_PATCH_STATUSES = new Set(["done", "abandoned"]);
+const VALID_ROLES = new Set(["contributor", "admin"]);
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -124,13 +143,89 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-function isAuthorized(request: Request, env: Env): boolean {
+function bytesToHex(bytes: Uint8Array): string {
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    out += bytes[i].toString(16).padStart(2, "0");
+  }
+  return out;
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const data = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return bytesToHex(new Uint8Array(digest));
+}
+
+function generateApiToken(): string {
+  const bytes = new Uint8Array(30);
+  crypto.getRandomValues(bytes);
+  return `apfw_${bytesToHex(bytes)}`;
+}
+
+function sanitizeHandle(raw: unknown): string | null {
+  const s = toNullableString(raw);
+  if (!s) return null;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,39}$/.test(s)) return null;
+  return s;
+}
+
+async function authenticate(request: Request, env: Env): Promise<AuthPrincipal | null> {
   const configuredKey = env.FLYWHEEL_API_KEY?.trim();
-  if (!configuredKey) return true;
   const authHeader = request.headers.get("Authorization") ?? "";
-  if (!authHeader.startsWith("Bearer ")) return false;
-  const token = authHeader.slice(7).trim();
-  return token.length > 0 && timingSafeEqual(token, configuredKey);
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+
+  if (configuredKey && token.length > 0 && timingSafeEqual(token, configuredKey)) {
+    return { role: "admin", keyId: "root-admin", handle: "admin", hourlyLimit: Number.POSITIVE_INFINITY };
+  }
+
+  if (token.length > 0) {
+    const keyHash = await sha256Hex(token);
+    const row = await env.DB.prepare(
+      "SELECT id, key_hash, handle, role, hourly_limit, revoked_at, created_at FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL LIMIT 1"
+    )
+      .bind(keyHash)
+      .first<ApiKeyRow>();
+    if (row) {
+      const role = row.role === "admin" ? "admin" : "contributor";
+      const limit = Number.isFinite(Number(row.hourly_limit)) && Number(row.hourly_limit) > 0
+        ? Math.trunc(Number(row.hourly_limit))
+        : 120;
+      return {
+        role,
+        keyId: row.id,
+        handle: row.handle,
+        hourlyLimit: role === "admin" ? Number.POSITIVE_INFINITY : limit,
+      };
+    }
+  }
+
+  if (!configuredKey) {
+    return { role: "admin", keyId: "local-dev", handle: "admin", hourlyLimit: Number.POSITIVE_INFINITY };
+  }
+  return null;
+}
+
+async function checkAndConsumeRateLimit(
+  db: D1DatabaseLike,
+  principal: AuthPrincipal
+): Promise<{ allowed: boolean; count: number; limit: number }> {
+  if (principal.role === "admin" || !Number.isFinite(principal.hourlyLimit)) {
+    return { allowed: true, count: 0, limit: Number.POSITIVE_INFINITY };
+  }
+  const bucket = new Date().toISOString().slice(0, 13); // UTC hour YYYY-MM-DDTHH
+  await db
+    .prepare(
+      "INSERT INTO rate_limits (key_id, bucket, count) VALUES (?, ?, 1) ON CONFLICT(key_id, bucket) DO UPDATE SET count = count + 1"
+    )
+    .bind(principal.keyId, bucket)
+    .run();
+  const row = await db
+    .prepare("SELECT count FROM rate_limits WHERE key_id = ? AND bucket = ?")
+    .bind(principal.keyId, bucket)
+    .first<{ count: number }>();
+  const count = Number(row?.count ?? 1);
+  return { allowed: count <= principal.hourlyLimit, count, limit: principal.hourlyLimit };
 }
 
 function parseJsonSafe<T>(raw: string | null | undefined, fallback: T): T {
@@ -359,7 +454,8 @@ async function queryFilteredNodes(
 
 async function insertNode(
   db: D1DatabaseLike,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  principal: AuthPrincipal
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const lane = toNullableString(payload.lane);
   const run_id = toNullableString(payload.run_id);
@@ -373,12 +469,30 @@ async function insertNode(
   }
 
   const id = toNullableString(payload.id) ?? crypto.randomUUID();
+
+  // Contributors cannot overwrite existing nodes owned by another author.
+  if (principal.role !== "admin") {
+    const existing = await db
+      .prepare("SELECT id, author FROM nodes WHERE id = ?")
+      .bind(id)
+      .first<{ id: string; author: string | null }>();
+    if (existing && existing.author !== principal.handle) {
+      return {
+        status: 403,
+        body: { error: "forbidden_node_owner", id, owner: existing.author },
+      };
+    }
+  }
+
   const created_at = toNullableString(payload.created_at) ?? new Date().toISOString();
   const verifiedRaw = payload.verified;
-  const verified =
+  const requestedVerified =
     verifiedRaw === true || verifiedRaw === 1 || verifiedRaw === "1" || verifiedRaw === "true"
       ? 1
       : 0;
+  // Contributors are always forced to verified = 0 and stamped with their key handle.
+  const verified = principal.role === "admin" ? requestedVerified : 0;
+  const author = principal.role === "admin" ? toNullableString(payload.author) : principal.handle;
 
   const metricsJson =
     payload.metrics_json !== undefined
@@ -403,7 +517,7 @@ async function insertNode(
       run_id,
       toNullableString(payload.trial_id),
       toNullableString(payload.agent_model),
-      toNullableString(payload.author),
+      author,
       toNullableString(payload.title),
       toNullableString(payload.hypothesis),
       decision,
@@ -411,9 +525,9 @@ async function insertNode(
       toFiniteNumber(payload.ratio_vs_incumbent),
       toFiniteNumber(payload.short_horizon_eff),
       toFiniteNumber(payload.long_horizon_eff),
-      toFiniteInt(payload.real_stan_passed),
-      toFiniteInt(payload.real_stan_total),
-      toFiniteNumber(payload.real_ess_per_cost),
+      principal.role === "admin" ? toFiniteInt(payload.real_stan_passed) : null,
+      principal.role === "admin" ? toFiniteInt(payload.real_stan_total) : null,
+      principal.role === "admin" ? toFiniteNumber(payload.real_ess_per_cost) : null,
       toFiniteNumber(payload.overhead_ratio),
       toFiniteNumber(payload.b2_max),
       serializeJsonField(payload.dims),
@@ -432,20 +546,32 @@ async function insertNode(
   };
 }
 
+function claimOwnedBy(agentField: string, handle: string): boolean {
+  return agentField === handle || agentField.startsWith(`${handle}:`);
+}
+
 async function createClaim(
   db: D1DatabaseLike,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  principal: AuthPrincipal
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const task_id = toNullableString(payload.task_id);
   const lane = toNullableString(payload.lane);
-  const agent = toNullableString(payload.agent);
+  const rawAgent = toNullableString(payload.agent);
 
-  if (!task_id || !lane || !agent) {
+  if (!task_id || !lane || !rawAgent) {
     return {
       status: 400,
       body: { error: "missing_required_fields", required: ["task_id", "lane", "agent"] },
     };
   }
+
+  const agent =
+    principal.role === "admin"
+      ? rawAgent
+      : claimOwnedBy(rawAgent, principal.handle)
+        ? rawAgent
+        : `${principal.handle}:${rawAgent}`;
 
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
@@ -453,7 +579,7 @@ async function createClaim(
   if (!Number.isFinite(ttlRaw) || ttlRaw <= 0) {
     return { status: 400, body: { error: "invalid_ttl_minutes" } };
   }
-  const ttlMinutes = Math.min(ttlRaw, 1440);
+  const ttlMinutes = Math.min(ttlRaw, principal.role === "admin" ? 1440 : 240);
   const force = payload.force === true;
 
   const existing = await db
@@ -471,6 +597,12 @@ async function createClaim(
   }
 
   if (existing && force) {
+    if (principal.role !== "admin" && !claimOwnedBy(existing.agent, principal.handle)) {
+      return {
+        status: 403,
+        body: { error: "forbidden_force_claim", existing_claim: existing },
+      };
+    }
     await db
       .prepare(
         "UPDATE claims SET status = 'abandoned' WHERE task_id = ? AND status = 'active' AND expires_at > ?"
@@ -498,7 +630,8 @@ async function createClaim(
 async function patchClaim(
   db: D1DatabaseLike,
   claimId: string,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  principal: AuthPrincipal
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const statusVal = toNullableString(payload.status);
   if (!statusVal || !VALID_CLAIM_PATCH_STATUSES.has(statusVal)) {
@@ -511,6 +644,10 @@ async function patchClaim(
   const existing = await db.prepare("SELECT * FROM claims WHERE id = ?").bind(claimId).first<ClaimRow>();
   if (!existing) {
     return { status: 404, body: { error: "not_found" } };
+  }
+
+  if (principal.role !== "admin" && !claimOwnedBy(existing.agent, principal.handle)) {
+    return { status: 403, body: { error: "forbidden_claim_owner", owner: existing.agent } };
   }
 
   const summary =
@@ -673,15 +810,30 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
       );
     }
 
-    if (MCP_WRITE_TOOLS.has(toolName) && !isAuthorized(request, env)) {
-      return jsonResponse(
-        {
-          jsonrpc: "2.0",
-          id: rpcId,
-          error: { code: -32001, message: "Unauthorized: valid Bearer token required" },
-        },
-        401
-      );
+    let principal: AuthPrincipal | null = null;
+    if (MCP_WRITE_TOOLS.has(toolName)) {
+      principal = await authenticate(request, env);
+      if (!principal) {
+        return jsonResponse(
+          {
+            jsonrpc: "2.0",
+            id: rpcId,
+            error: { code: -32001, message: "Unauthorized: valid Bearer token required" },
+          },
+          401
+        );
+      }
+      const rl = await checkAndConsumeRateLimit(env.DB, principal);
+      if (!rl.allowed) {
+        return jsonResponse(
+          {
+            jsonrpc: "2.0",
+            id: rpcId,
+            error: { code: -32029, message: `Rate limit exceeded (${rl.limit}/hour)` },
+          },
+          429
+        );
+      }
     }
 
     if (toolName === "flywheel_frontier") {
@@ -723,7 +875,7 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
     }
 
     if (toolName === "flywheel_claim_task") {
-      const outcome = await createClaim(env.DB, args);
+      const outcome = await createClaim(env.DB, args, principal as AuthPrincipal);
       const isError = outcome.status >= 400;
       return jsonResponse({
         jsonrpc: "2.0",
@@ -737,7 +889,7 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
     }
 
     if (toolName === "flywheel_post_node") {
-      const outcome = await insertNode(env.DB, args);
+      const outcome = await insertNode(env.DB, args, principal as AuthPrincipal);
       const isError = outcome.status >= 400;
       return jsonResponse({
         jsonrpc: "2.0",
@@ -878,15 +1030,183 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
         });
       }
 
-      if (pathname === "/api/nodes" && method === "POST") {
-        if (!isAuthorized(request, env)) {
-          return jsonResponse({ error: "unauthorized" }, 401);
+      if (pathname === "/api/register" && method === "POST") {
+        const expectedInvite = env.FLYWHEEL_INVITE_CODE?.trim();
+        if (!expectedInvite) {
+          return jsonResponse({ error: "registration_closed" }, 403);
         }
         const payload = await parseJsonBody(request);
         if (!payload) {
           return jsonResponse({ error: "invalid_json" }, 400);
         }
-        const outcome = await insertNode(env.DB, payload);
+        const invite = toNullableString(payload.invite_code);
+        if (!invite || !timingSafeEqual(invite, expectedInvite)) {
+          return jsonResponse({ error: "invalid_invite_code" }, 403);
+        }
+        const handle = sanitizeHandle(payload.handle);
+        if (!handle) {
+          return jsonResponse(
+            { error: "invalid_handle", detail: "2-40 chars matching ^[a-zA-Z0-9][a-zA-Z0-9_.-]+$" },
+            400
+          );
+        }
+        const dup = await env.DB.prepare(
+          "SELECT id FROM api_keys WHERE lower(handle) = lower(?) AND revoked_at IS NULL LIMIT 1"
+        )
+          .bind(handle)
+          .first<{ id: string }>();
+        if (dup) {
+          return jsonResponse({ error: "handle_already_registered", handle }, 409);
+        }
+        const id = crypto.randomUUID();
+        const token = generateApiToken();
+        const keyHash = await sha256Hex(token);
+        const nowIso = new Date().toISOString();
+        const hourlyLimit = 60;
+        await env.DB.prepare(
+          "INSERT INTO api_keys (id, key_hash, handle, role, hourly_limit, revoked_at, created_at) VALUES (?, ?, ?, 'contributor', ?, NULL, ?)"
+        )
+          .bind(id, keyHash, handle, hourlyLimit, nowIso)
+          .run();
+        return jsonResponse(
+          {
+            ok: true,
+            key_id: id,
+            handle,
+            role: "contributor",
+            hourly_limit: hourlyLimit,
+            token,
+            note: "Save this token now; it is stored hashed and cannot be shown again.",
+          },
+          201
+        );
+      }
+
+      if (pathname === "/api/admin/keys" && method === "GET") {
+        const principal = await authenticate(request, env);
+        if (!principal) return jsonResponse({ error: "unauthorized" }, 401);
+        if (principal.role !== "admin") return jsonResponse({ error: "forbidden_admin_only" }, 403);
+        const res = await env.DB.prepare(
+          "SELECT id, handle, role, hourly_limit, revoked_at, created_at FROM api_keys ORDER BY created_at DESC"
+        ).all<Omit<ApiKeyRow, "key_hash">>();
+        return jsonResponse({ keys: res.results ?? [], count: (res.results ?? []).length });
+      }
+
+      if (pathname === "/api/admin/keys" && method === "POST") {
+        const principal = await authenticate(request, env);
+        if (!principal) return jsonResponse({ error: "unauthorized" }, 401);
+        if (principal.role !== "admin") return jsonResponse({ error: "forbidden_admin_only" }, 403);
+        const payload = await parseJsonBody(request);
+        if (!payload) return jsonResponse({ error: "invalid_json" }, 400);
+        const handle = sanitizeHandle(payload.handle);
+        if (!handle) {
+          return jsonResponse(
+            { error: "invalid_handle", detail: "2-40 chars matching ^[a-zA-Z0-9][a-zA-Z0-9_.-]+$" },
+            400
+          );
+        }
+        const role = toNullableString(payload.role) ?? "contributor";
+        if (!VALID_ROLES.has(role)) {
+          return jsonResponse({ error: "invalid_role", allowed: ["contributor", "admin"] }, 400);
+        }
+        const limitRaw = payload.hourly_limit === undefined ? 120 : Number(payload.hourly_limit);
+        if (!Number.isFinite(limitRaw) || limitRaw < 1 || limitRaw > 10000) {
+          return jsonResponse({ error: "invalid_hourly_limit" }, 400);
+        }
+        const hourlyLimit = Math.trunc(limitRaw);
+        const id = crypto.randomUUID();
+        const token = generateApiToken();
+        const keyHash = await sha256Hex(token);
+        const nowIso = new Date().toISOString();
+        await env.DB.prepare(
+          "INSERT INTO api_keys (id, key_hash, handle, role, hourly_limit, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?)"
+        )
+          .bind(id, keyHash, handle, role, hourlyLimit, nowIso)
+          .run();
+        return jsonResponse(
+          { ok: true, key_id: id, handle, role, hourly_limit: hourlyLimit, token, created_at: nowIso },
+          201
+        );
+      }
+
+      if (pathname.startsWith("/api/admin/keys/") && method === "DELETE") {
+        const principal = await authenticate(request, env);
+        if (!principal) return jsonResponse({ error: "unauthorized" }, 401);
+        if (principal.role !== "admin") return jsonResponse({ error: "forbidden_admin_only" }, 403);
+        const keyId = decodeURIComponent(pathname.slice("/api/admin/keys/".length));
+        const existing = await env.DB.prepare("SELECT id FROM api_keys WHERE id = ?")
+          .bind(keyId)
+          .first<{ id: string }>();
+        if (!existing) return jsonResponse({ error: "not_found" }, 404);
+        const nowIso = new Date().toISOString();
+        await env.DB.prepare("UPDATE api_keys SET revoked_at = ? WHERE id = ?")
+          .bind(nowIso, keyId)
+          .run();
+        return jsonResponse({ ok: true, key_id: keyId, revoked_at: nowIso });
+      }
+
+      if (pathname.startsWith("/api/admin/nodes/") && pathname.endsWith("/verify") && method === "POST") {
+        const principal = await authenticate(request, env);
+        if (!principal) return jsonResponse({ error: "unauthorized" }, 401);
+        if (principal.role !== "admin") return jsonResponse({ error: "forbidden_admin_only" }, 403);
+        const rawId = pathname.slice("/api/admin/nodes/".length, -"/verify".length);
+        const nodeId = decodeURIComponent(rawId);
+        const existing = await env.DB.prepare("SELECT * FROM nodes WHERE id = ?")
+          .bind(nodeId)
+          .first<NodeRow>();
+        if (!existing) return jsonResponse({ error: "not_found" }, 404);
+        const payload = (await parseJsonBody(request)) ?? {};
+        const verified = payload.verified === false || payload.verified === 0 ? 0 : 1;
+        const stanPassed =
+          payload.real_stan_passed !== undefined
+            ? toFiniteInt(payload.real_stan_passed)
+            : existing.real_stan_passed;
+        const stanTotal =
+          payload.real_stan_total !== undefined
+            ? toFiniteInt(payload.real_stan_total)
+            : existing.real_stan_total;
+        const stanEss =
+          payload.real_ess_per_cost !== undefined
+            ? toFiniteNumber(payload.real_ess_per_cost)
+            : existing.real_ess_per_cost;
+        await env.DB.prepare(
+          "UPDATE nodes SET verified = ?, real_stan_passed = ?, real_stan_total = ?, real_ess_per_cost = ? WHERE id = ?"
+        )
+          .bind(verified, stanPassed, stanTotal, stanEss, nodeId)
+          .run();
+        const updated = await env.DB.prepare("SELECT * FROM nodes WHERE id = ?")
+          .bind(nodeId)
+          .first<NodeRow>();
+        return jsonResponse({ ok: true, node: updated ? deserializeNode(updated) : null });
+      }
+
+      if (pathname.startsWith("/api/admin/nodes/") && method === "DELETE") {
+        const principal = await authenticate(request, env);
+        if (!principal) return jsonResponse({ error: "unauthorized" }, 401);
+        if (principal.role !== "admin") return jsonResponse({ error: "forbidden_admin_only" }, 403);
+        const nodeId = decodeURIComponent(pathname.slice("/api/admin/nodes/".length));
+        const existing = await env.DB.prepare("SELECT id FROM nodes WHERE id = ?")
+          .bind(nodeId)
+          .first<{ id: string }>();
+        if (!existing) return jsonResponse({ error: "not_found" }, 404);
+        await env.DB.prepare("DELETE FROM nodes WHERE id = ?").bind(nodeId).run();
+        return jsonResponse({ ok: true, deleted: nodeId });
+      }
+
+      if (pathname === "/api/nodes" && method === "POST") {
+        const principal = await authenticate(request, env);
+        if (!principal) {
+          return jsonResponse({ error: "unauthorized" }, 401);
+        }
+        const rl = await checkAndConsumeRateLimit(env.DB, principal);
+        if (!rl.allowed) {
+          return jsonResponse({ error: "rate_limit_exceeded", limit: rl.limit, count: rl.count }, 429);
+        }
+        const payload = await parseJsonBody(request);
+        if (!payload) {
+          return jsonResponse({ error: "invalid_json" }, 400);
+        }
+        const outcome = await insertNode(env.DB, payload, principal);
         return jsonResponse(outcome.body, outcome.status);
       }
 
@@ -896,27 +1216,37 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       }
 
       if (pathname === "/api/claims" && method === "POST") {
-        if (!isAuthorized(request, env)) {
+        const principal = await authenticate(request, env);
+        if (!principal) {
           return jsonResponse({ error: "unauthorized" }, 401);
+        }
+        const rl = await checkAndConsumeRateLimit(env.DB, principal);
+        if (!rl.allowed) {
+          return jsonResponse({ error: "rate_limit_exceeded", limit: rl.limit, count: rl.count }, 429);
         }
         const payload = await parseJsonBody(request);
         if (!payload) {
           return jsonResponse({ error: "invalid_json" }, 400);
         }
-        const outcome = await createClaim(env.DB, payload);
+        const outcome = await createClaim(env.DB, payload, principal);
         return jsonResponse(outcome.body, outcome.status);
       }
 
       if (pathname.startsWith("/api/claims/") && method === "PATCH") {
-        if (!isAuthorized(request, env)) {
+        const principal = await authenticate(request, env);
+        if (!principal) {
           return jsonResponse({ error: "unauthorized" }, 401);
+        }
+        const rl = await checkAndConsumeRateLimit(env.DB, principal);
+        if (!rl.allowed) {
+          return jsonResponse({ error: "rate_limit_exceeded", limit: rl.limit, count: rl.count }, 429);
         }
         const claimId = decodeURIComponent(pathname.slice("/api/claims/".length));
         const payload = await parseJsonBody(request);
         if (!payload) {
           return jsonResponse({ error: "invalid_json" }, 400);
         }
-        const outcome = await patchClaim(env.DB, claimId, payload);
+        const outcome = await patchClaim(env.DB, claimId, payload, principal);
         return jsonResponse(outcome.body, outcome.status);
       }
 

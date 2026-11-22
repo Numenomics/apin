@@ -296,3 +296,41 @@ def test_seed_from_apin_generates_valid_snapshot_and_sql(tmp_path: Path) -> None
     ).fetchone()
     assert verified_row == ("A1:glm53_a1_1h:T0002", 2, 3, 1)
     conn.close()
+
+
+def test_token_only_defaults_to_public_url_and_post_trial_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("APIN_FLYWHEEL_URL", raising=False)
+    monkeypatch.setenv("APIN_FLYWHEEL_TOKEN", "apfw_contributor_tok")
+
+    assert flywheel.configured() is True
+    calls: list[dict[str, Any]] = []
+
+    def fake_urlopen(req, timeout=10.0):
+        calls.append({
+            "url": req.full_url,
+            "auth": req.get_header("Authorization"),
+            "body": json.loads(req.data.decode("utf-8")) if req.data else None,
+        })
+        return _FakeResponse({"ok": True, "node": {"id": "A4:r1:T0002"}})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    resp = flywheel.post_trial_row(
+        {
+            "trial_id": "T0002",
+            "lane": "A4",
+            "hypothesis": "Try sinh warp",
+            "decision": "keep",
+            "soft_min_eff": 0.0008,
+            "dims": [6, 20],
+            "candidate_sha": "abc123",
+            "timestamp": "2026-11-22T00:00:00+00:00",
+        },
+        run_id="r1",
+        parent_id="A4:r1:T0001",
+    )
+    assert resp is not None
+    assert calls[0]["url"] == f"{flywheel.DEFAULT_PUBLIC_URL}/api/nodes"
+    assert calls[0]["auth"] == "Bearer apfw_contributor_tok"
+    assert calls[0]["body"]["id"] == "A4:r1:T0002"
+    assert calls[0]["body"]["parent_id"] == "A4:r1:T0001"
+    assert calls[0]["body"]["verified"] == 0

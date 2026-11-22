@@ -503,4 +503,168 @@ describe("apin Flywheel Worker", () => {
     assert.equal(mcpList.status, 200);
     assert.equal(mcpList.json.result.structuredContent.count, 1);
   });
+
+  it("enforces multi-contributor api_keys, ownership isolation, verified=0, rate limits, admin verify/revoke, and invite registration", async () => {
+    const { env } = makeEnv({ apiKey: "root-admin-secret" });
+    env.FLYWHEEL_INVITE_CODE = "apin-community-2026";
+    const adminHdr = { Authorization: "Bearer root-admin-secret" };
+
+    // 1. Admin mints a contributor key for alice with tight rate limit = 3/hour
+    const mintAlice = await reqJson(
+      env,
+      "POST",
+      "/api/admin/keys",
+      { handle: "alice", role: "contributor", hourly_limit: 3 },
+      adminHdr
+    );
+    assert.equal(mintAlice.status, 201);
+    assert.ok(mintAlice.json.token.startsWith("apfw_"));
+    const aliceHdr = { Authorization: `Bearer ${mintAlice.json.token}` };
+
+    // 2. Self-serve registration via invite code for bob
+    const badInvite = await reqJson(env, "POST", "/api/register", {
+      handle: "bob",
+      invite_code: "wrong",
+    });
+    assert.equal(badInvite.status, 403);
+
+    const regBob = await reqJson(env, "POST", "/api/register", {
+      handle: "bob",
+      invite_code: "apin-community-2026",
+    });
+    assert.equal(regBob.status, 201);
+    assert.equal(regBob.json.role, "contributor");
+    const bobHdr = { Authorization: `Bearer ${regBob.json.token}` };
+
+    // Duplicate handle rejected with 409
+    const dupBob = await reqJson(env, "POST", "/api/register", {
+      handle: "Bob",
+      invite_code: "apin-community-2026",
+    });
+    assert.equal(dupBob.status, 409);
+
+    // 3. Contributor cannot access admin endpoints
+    const aliceKeys = await reqJson(env, "GET", "/api/admin/keys", undefined, aliceHdr);
+    assert.equal(aliceKeys.status, 403);
+
+    // 4. Contributor posts node trying to spoof verified=true and author="admin" -> forced verified=0 & author="alice"
+    const nAlice = await reqJson(
+      env,
+      "POST",
+      "/api/nodes",
+      {
+        id: "A1:alice_run:T0001",
+        lane: "A1",
+        run_id: "alice_run",
+        trial_id: "T0001",
+        author: "admin",
+        decision: "keep",
+        soft_min_eff: 0.002,
+        verified: true,
+        real_stan_passed: 5,
+        real_stan_total: 5,
+      },
+      aliceHdr
+    );
+    assert.equal(nAlice.status, 201);
+    assert.equal(nAlice.json.node.verified, 0);
+    assert.equal(nAlice.json.node.author, "alice");
+    assert.equal(nAlice.json.node.real_stan_passed, null);
+
+    // 5. Bob cannot overwrite Alice's node -> 403
+    const bobOverwrite = await reqJson(
+      env,
+      "POST",
+      "/api/nodes",
+      {
+        id: "A1:alice_run:T0001",
+        lane: "A1",
+        run_id: "alice_run",
+        decision: "discard_tier0",
+      },
+      bobHdr
+    );
+    assert.equal(bobOverwrite.status, 403);
+    assert.equal(bobOverwrite.json.error, "forbidden_node_owner");
+
+    // 6. Alice claims a task -> agent stamped with "alice:..."; Bob cannot force or PATCH Alice's claim
+    const cAlice = await reqJson(
+      env,
+      "POST",
+      "/api/claims",
+      { task_id: "A4:warp", lane: "A4", agent: "glm53" },
+      aliceHdr
+    );
+    assert.equal(cAlice.status, 201);
+    assert.equal(cAlice.json.claim.agent, "alice:glm53");
+
+    const bobForce = await reqJson(
+      env,
+      "POST",
+      "/api/claims",
+      { task_id: "A4:warp", lane: "A4", agent: "deepseek", force: true },
+      bobHdr
+    );
+    assert.equal(bobForce.status, 403);
+
+    const bobPatch = await reqJson(
+      env,
+      "PATCH",
+      `/api/claims/${cAlice.json.claim.id}`,
+      { status: "abandoned" },
+      bobHdr
+    );
+    assert.equal(bobPatch.status, 403);
+
+    // 7. Alice closes her own claim (3rd write -> hits hourly_limit=3), 4th write -> 429!
+    const alicePatch = await reqJson(
+      env,
+      "PATCH",
+      `/api/claims/${cAlice.json.claim.id}`,
+      { status: "done" },
+      aliceHdr
+    );
+    assert.equal(alicePatch.status, 200);
+
+    const aliceRateLimited = await reqJson(
+      env,
+      "POST",
+      "/api/nodes",
+      { lane: "A1", run_id: "alice_run", decision: "keep" },
+      aliceHdr
+    );
+    assert.equal(aliceRateLimited.status, 429);
+    assert.equal(aliceRateLimited.json.error, "rate_limit_exceeded");
+
+    // 8. Admin verifies Alice's node with reproduced real-Stan score, and revokes Bob's key
+    const verifiedRes = await reqJson(
+      env,
+      "POST",
+      `/api/admin/nodes/${encodeURIComponent("A1:alice_run:T0001")}/verify`,
+      { verified: true, real_stan_passed: 4, real_stan_total: 5, real_ess_per_cost: 0.025 },
+      adminHdr
+    );
+    assert.equal(verifiedRes.status, 200);
+    assert.equal(verifiedRes.json.node.verified, 1);
+    assert.equal(verifiedRes.json.node.real_stan_passed, 4);
+
+    const revokeBob = await reqJson(
+      env,
+      "DELETE",
+      `/api/admin/keys/${regBob.json.key_id}`,
+      undefined,
+      adminHdr
+    );
+    assert.equal(revokeBob.status, 200);
+
+    // Revoked key is rejected immediately with 401
+    const bobAfterRevoke = await reqJson(
+      env,
+      "POST",
+      "/api/nodes",
+      { lane: "A1", run_id: "bob_run", decision: "keep" },
+      bobHdr
+    );
+    assert.equal(bobAfterRevoke.status, 401);
+  });
 });

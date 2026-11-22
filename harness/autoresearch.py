@@ -32,7 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import invariance, ipc, judge, logdensity, queue, shapes
+from . import flywheel, invariance, ipc, judge, logdensity, queue, shapes
 from .models import ROOT
 
 NOISE_MARGIN = 0.02  # +/- 2% tie band where simplicity regularizer breaks ties
@@ -91,10 +91,13 @@ def _write_results_tsv(ledger_path: Path, tsv_path: Path) -> None:
             w.writerow(flat)
 
 
-def _append_row(ledger_path: Path, tsv_path: Path, row: dict) -> dict:
+def _append_row(ledger_path: Path, tsv_path: Path, row: dict, *, run_id: str | None = None,
+                parent_id: str | None = None) -> dict:
     with open(ledger_path, "a") as fh:
         fh.write(json.dumps(row) + "\n")
     _write_results_tsv(ledger_path, tsv_path)
+    if run_id is not None:
+        flywheel.post_trial_row(row, run_id=run_id, parent_id=parent_id)
     return row
 
 
@@ -388,6 +391,10 @@ def evaluate_lane_trial(
     archive_dir.mkdir(parents=True, exist_ok=True)
 
     prior = _load_ledger(ledger_path)
+    last_kept = next((r for r in reversed(prior) if r.get("decision") in flywheel.KEPT_DECISIONS), None)
+    parent_node_id = (
+        f"{lane}:{run_id}:{last_kept['trial_id']}" if last_kept and last_kept.get("trial_id") else None
+    )
     trial_id = f"T{len(prior) + 1:04d}"
     seed = int(seed if seed is not None else (20261120 + len(prior) * 97))
     repeats = max(1, int(repeats))
@@ -461,7 +468,7 @@ def evaluate_lane_trial(
             "decision": "discard_duplicate",
             "wall_s": round(time.perf_counter() - t0, 3),
         }
-        return _append_row(ledger_path, tsv_path, row)
+        return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id)
 
     with queue.eval_slot(f"autoresearch:{lane}/{run_id}/{trial_id}", enabled=use_queue) as queue_wait_s:
         t0_ok, t0_info = _eval_tier0(
@@ -475,7 +482,7 @@ def evaluate_lane_trial(
                 "decision": "discard_tier0",
                 "wall_s": round(time.perf_counter() - t0, 3),
             }
-            return _append_row(ledger_path, tsv_path, row)
+            return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id)
 
         # Tier 1: paired fresh suites for candidate AND incumbent on identical fresh seeds
         suites = [(seed + r * 7919, _build_tier1_suite(dim_ladder[0], seed + r * 7919, dims=dim_ladder)) for r in range(repeats)]
@@ -492,7 +499,7 @@ def evaluate_lane_trial(
                 "error": f"{type(e).__name__}: {e}",
                 "wall_s": round(time.perf_counter() - t0, 3),
             }
-            return _append_row(ledger_path, tsv_path, row)
+            return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id)
 
         inc_sha = None
         if not incumbent_path.is_file():
@@ -583,4 +590,4 @@ def evaluate_lane_trial(
         "decision": decision,
         "wall_s": round(time.perf_counter() - t0, 3),
     }
-    return _append_row(ledger_path, tsv_path, row)
+    return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id)

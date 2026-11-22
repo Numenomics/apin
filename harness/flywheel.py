@@ -16,6 +16,7 @@ from typing import Any
 
 ENV_URL = "APIN_FLYWHEEL_URL"
 ENV_TOKEN = "APIN_FLYWHEEL_TOKEN"
+DEFAULT_PUBLIC_URL = "https://apin-flywheel.m0hawk.workers.dev"
 KEPT_DECISIONS = {"keep", "keep_baseline", "keep_simpler"}
 
 
@@ -28,12 +29,16 @@ class FlywheelError(RuntimeError):
         self.body = body
 
 
-def _resolve_url(url: str | None = None) -> str | None:
+def _resolve_url(url: str | None = None, token: str | None = None) -> str | None:
     raw = url if url is not None else os.environ.get(ENV_URL)
-    if not raw:
-        return None
-    cleaned = raw.strip().rstrip("/")
-    return cleaned or None
+    if raw:
+        cleaned = raw.strip().rstrip("/")
+        if cleaned:
+            return cleaned
+    # When a user sets APIN_FLYWHEEL_TOKEN without APIN_FLYWHEEL_URL, default to the public Flywheel.
+    if _resolve_token(token) is not None:
+        return DEFAULT_PUBLIC_URL
+    return None
 
 
 def _resolve_token(token: str | None = None) -> str | None:
@@ -44,9 +49,9 @@ def _resolve_token(token: str | None = None) -> str | None:
     return cleaned or None
 
 
-def configured(url: str | None = None) -> bool:
-    """Return True when a Flywheel base URL is configured."""
-    return _resolve_url(url) is not None
+def configured(url: str | None = None, token: str | None = None) -> bool:
+    """Return True when a Flywheel base URL (or token targeting the default public URL) is configured."""
+    return _resolve_url(url, token) is not None
 
 
 def _request_json(
@@ -58,7 +63,7 @@ def _request_json(
     token: str | None = None,
     timeout: float = 10.0,
 ) -> dict[str, Any] | None:
-    base_url = _resolve_url(url)
+    base_url = _resolve_url(url, token)
     if not base_url:
         return None
 
@@ -256,3 +261,141 @@ def sync_ledger(
                 incumbent_id = node_id
 
     return results
+
+
+def post_trial_row(
+    row: dict[str, Any],
+    *,
+    run_id: str,
+    parent_id: str | None = None,
+    agent_model: str | None = None,
+    author: str | None = None,
+    url: str | None = None,
+    token: str | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any] | None:
+    """Best-effort publish of one autoresearch trial row to Flywheel.
+
+    No-ops when neither APIN_FLYWHEEL_TOKEN nor explicit token is configured so offline
+    or read-only runs never fail or stall.
+    """
+    resolved_token = _resolve_token(token)
+    if resolved_token is None and url is None:
+        return None
+    if not configured(url, resolved_token):
+        return None
+
+    lane = str(row.get("lane") or "A1")
+    trial_id = str(row.get("trial_id") or "T0001")
+    node_id = f"{lane}:{run_id}:{trial_id}"
+    hypothesis = str(row.get("hypothesis") or "").strip() or None
+    dims = row.get("dims")
+    if dims is None and row.get("dim") is not None:
+        dims = [int(row["dim"])]
+
+    extra_metrics = {
+        k: row[k]
+        for k in (
+            "loc", "magic_constants", "wall_s", "queue_wait_s", "archive_cells",
+            "tier0_ok", "tier1_ok", "tier0_info", "incumbent_soft_min",
+            "median_adapt_cost", "judge_digest", "seed", "repeats", "by_class",
+        )
+        if k in row
+    }
+    title = (
+        f"{trial_id}: {hypothesis[:73]}..." if hypothesis and len(hypothesis) > 76
+        else (f"{trial_id}: {hypothesis}" if hypothesis else f"{trial_id}: {run_id}")
+    )
+    node_payload: dict[str, Any] = {
+        "id": node_id,
+        "parent_id": parent_id,
+        "lane": lane,
+        "run_id": run_id,
+        "trial_id": trial_id,
+        "agent_model": agent_model or os.environ.get("APIN_AGENT_MODEL") or row.get("agent_model"),
+        "author": author or os.environ.get("APIN_AUTHOR") or row.get("author"),
+        "title": title,
+        "hypothesis": hypothesis,
+        "decision": str(row.get("decision") or "unknown"),
+        "soft_min_eff": row.get("soft_min_eff"),
+        "ratio_vs_incumbent": row.get("ratio_vs_incumbent"),
+        "short_horizon_eff": row.get("short_horizon_soft_min"),
+        "long_horizon_eff": row.get("long_horizon_soft_min"),
+        "overhead_ratio": row.get("overhead_ratio"),
+        "b2_max": row.get("b2_max"),
+        "dims": dims,
+        "codex_refs": row.get("codex_refs") or [],
+        "code_sha": row.get("candidate_sha") or row.get("code_sha"),
+        "metrics_json": json.dumps(extra_metrics, sort_keys=True),
+        "verified": 0,
+        "created_at": row.get("timestamp"),
+    }
+    try:
+        return post_node(node_payload, url=url, token=resolved_token, timeout=timeout)
+    except FlywheelError:
+        return None
+
+
+def register_contributor(
+    handle: str,
+    invite_code: str,
+    *,
+    url: str = DEFAULT_PUBLIC_URL,
+    timeout: float = 10.0,
+) -> dict[str, Any] | None:
+    """Self-register a personal revocable contributor token using a community invite code."""
+    return _request_json(
+        "POST", "/api/register", {"handle": handle, "invite_code": invite_code},
+        url=url, token="", timeout=timeout,
+    )
+
+
+def mint_key(
+    handle: str,
+    *,
+    role: str = "contributor",
+    hourly_limit: int = 120,
+    url: str | None = None,
+    token: str | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any] | None:
+    """Admin-only: mint a personal revocable contributor/admin key."""
+    return _request_json(
+        "POST", "/api/admin/keys", {"handle": handle, "role": role, "hourly_limit": hourly_limit},
+        url=url, token=token, timeout=timeout,
+    )
+
+
+def revoke_key(
+    key_id: str,
+    *,
+    url: str | None = None,
+    token: str | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any] | None:
+    """Admin-only: revoke an issued API key by its key_id."""
+    encoded = urllib.parse.quote(key_id, safe="")
+    return _request_json("DELETE", f"/api/admin/keys/{encoded}", url=url, token=token, timeout=timeout)
+
+
+def verify_node(
+    node_id: str,
+    *,
+    verified: bool = True,
+    real_stan_passed: int | None = None,
+    real_stan_total: int | None = None,
+    real_ess_per_cost: float | None = None,
+    url: str | None = None,
+    token: str | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any] | None:
+    """Admin-only: mark a node verified=1 (optionally attaching reproduced real-Stan metrics)."""
+    payload: dict[str, Any] = {"verified": verified}
+    if real_stan_passed is not None:
+        payload["real_stan_passed"] = int(real_stan_passed)
+    if real_stan_total is not None:
+        payload["real_stan_total"] = int(real_stan_total)
+    if real_ess_per_cost is not None:
+        payload["real_ess_per_cost"] = float(real_ess_per_cost)
+    encoded = urllib.parse.quote(node_id, safe="")
+    return _request_json("POST", f"/api/admin/nodes/{encoded}/verify", payload, url=url, token=token, timeout=timeout)

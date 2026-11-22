@@ -56,12 +56,32 @@ Refresh `seed.sql` and `public/snapshot.json` from local runs at any time:
 | `GET /api/nodes/:id` | Public | Node details plus `parent` and `children` |
 | `GET /api/frontier` | Public | Best kept/verified node per lane |
 | `GET /api/claims` | Public | Active, unexpired claims (optional `lane` filter) |
-| `POST /api/nodes` | Bearer* | Create/upsert a trial node (`lane`, `run_id`, `decision` required) |
-| `POST /api/claims` | Bearer* | Lease a task (default 60m TTL; HTTP 409 on duplicate unless `force: true`) |
-| `PATCH /api/claims/:id` | Bearer* | Mark a claim `done` or `abandoned` |
-| `POST /api/mcp` | Read public / Write Bearer* | JSON-RPC 2.0 MCP endpoint (`initialize`, `tools/list`, `tools/call`) |
+| `POST /api/nodes` | Bearer (admin or contributor) | Create/upsert a trial node (`contributor` forced `verified=0`, stamped `author=handle`, cannot overwrite other authors) |
+| `POST /api/claims` | Bearer (admin or contributor) | Lease a task (HTTP 409 on duplicate; only owner or admin may `force: true`) |
+| `PATCH /api/claims/:id` | Bearer (owner or admin) | Mark a claim `done` or `abandoned` |
+| `POST /api/register` | Invite code (`FLYWHEEL_INVITE_CODE`) | Self-register a personal revocable `contributor` token (`apfw_...`, rate-limited) |
+| `GET /api/admin/keys` | Admin Bearer | List issued API keys (metadata only; hashes never exposed) |
+| `POST /api/admin/keys` | Admin Bearer | Mint a personal revocable contributor/admin token (`{ handle, role, hourly_limit }`) |
+| `DELETE /api/admin/keys/:id` | Admin Bearer | Revoke a key immediately |
+| `POST /api/admin/nodes/:id/verify` | Admin Bearer | Promote a node to `verified=1` (optionally attaching reproduced real-Stan metrics) |
+| `DELETE /api/admin/nodes/:id` | Admin Bearer | Delete a spam/invalid node |
+| `POST /api/mcp` | Read public / Write Bearer | JSON-RPC 2.0 MCP endpoint (`initialize`, `tools/list`, `tools/call`) |
 
-\*Auth is enforced whenever `FLYWHEEL_API_KEY` is set; open in local dev when unset.
+\*Auth is enforced whenever `FLYWHEEL_API_KEY` is set; open in local dev when unset. Contributor tokens are stored SHA-256 hashed in D1 `api_keys` and rate-limited per UTC hour (`rate_limits`).
+
+## Live Instance & Contributor Onboarding
+
+- **Public dashboard & read API:** `https://apin-flywheel.m0hawk.workers.dev`
+- **Auto-streaming trials:** Export `APIN_FLYWHEEL_TOKEN=<your-token>` (URL defaults to `https://apin-flywheel.m0hawk.workers.dev`); every `uv run apin autoresearch eval` automatically posts kept + discarded trials with parent→child lineage.
+- **Minting a contributor key (maintainer):**
+  ```bash
+  curl -fsS -X POST https://apin-flywheel.m0hawk.workers.dev/api/admin/keys \
+    -H "Authorization: Bearer $APIN_FLYWHEEL_ADMIN_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"handle":"researcher-name","role":"contributor","hourly_limit":120}'
+  ```
+- **Optional self-serve registration:** Run `npx wrangler secret put FLYWHEEL_INVITE_CODE` to enable `POST /api/register` with `{ "handle": "...", "invite_code": "..." }` (leave unset to keep registration invite-only via `/api/admin/keys`).
+- **Promoting winners into Git:** Only verified/notable submissions go into `Numenomics/apin` via GitHub PR (`records/<release>/<track>/<date>_<slug>/`); once reproduced, mark the Flywheel node verified via `POST /api/admin/nodes/<id>/verify`.
 
 ## MCP Client Config Snippet
 

@@ -39,7 +39,26 @@ CREATE TABLE IF NOT EXISTS claims (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS api_keys (
+  id TEXT PRIMARY KEY,
+  key_hash TEXT NOT NULL UNIQUE,
+  handle TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'contributor',
+  hourly_limit INTEGER NOT NULL DEFAULT 120,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rate_limits (
+  key_id TEXT NOT NULL,
+  bucket TEXT NOT NULL,
+  count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (key_id, bucket)
+);
+
 CREATE INDEX IF NOT EXISTS idx_nodes_lane_created ON nodes (lane, created_at);
 CREATE INDEX IF NOT EXISTS idx_nodes_parent_id ON nodes (parent_id);
 CREATE INDEX IF NOT EXISTS idx_claims_status_expires ON claims (status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_claims_task_status_expires ON claims (task_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys (key_hash);
+CREATE INDEX IF NOT EXISTS idx_api_keys_handle ON api_keys (handle);

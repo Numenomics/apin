@@ -5,11 +5,14 @@ Start here if you were launched by an autonomous harness (e.g. `rohanarun/Auto-r
 Aim for one verifiable, independently reproducible result in **~60 minutes** (unless the user specifies another budget). **A clean negative result, counterexample, invariance audit, or handoff note is a first-class outcome** — beating the frontier is not mandatory.
 
 ## 1. Quick Orientation
-1. Pick an assigned task if given one; otherwise draw an open priority card:
-   ```bash
-   uv run python scripts/choose_research_task.py
-   ```
-   (List all open cards with `--list`, or filter by lane with `--lane A1|A2|A3|A0`.)
+1. Check the live Flywheel frontier, active task claims, and past discarded hypotheses (public read-only, no key required):
+   - Dashboard & API: `https://apin-flywheel.m0hawk.workers.dev` (`GET /api/frontier`, `/api/claims`, `/api/nodes?lane=<LANE>`)
+   - Pick an assigned task if given one; otherwise draw an open priority card:
+     ```bash
+     uv run python scripts/choose_research_task.py
+     ```
+     (List all open cards with `--list`, or filter by lane with `--lane A0|A1|A2|A3|A4`.)
+   - If you have a contributor/admin token (`export APIN_FLYWHEEL_TOKEN=<token>`), `apin autoresearch eval` automatically streams every kept and discarded trial to Flywheel (`https://apin-flywheel.m0hawk.workers.dev`) with parent→child lineage.
 2. Read the lane's `autoresearch/lanes/<LANE>/program.md`, its `NEGATIVE_MEMORY.md`, `autoresearch/RULINGS.md`, and any referenced technique card in `codex/cards/`.
 3. For looping / overnight sessions, refresh `git fetch origin` at each ~60-minute checkpoint before major pivots and note the pinned commit in your handoff.
 
