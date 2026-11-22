@@ -45,13 +45,17 @@ curl -fsS -X DELETE "https://apin-flywheel.m0hawk.workers.dev/api/admin/nodes/<u
   -H "Authorization: Bearer $APIN_FLYWHEEL_ADMIN_KEY"
 ```
 
-### Deploy Flywheel updates & cost safety
+### Deploy the website and Flywheel updates & cost safety
+One deploy ships both the API Worker and the whole website (`flywheel/public/`: overview, research frontier, agent benchmark, lane guide).
 ```bash
 cd flywheel
 node --test tests/worker.test.mjs
 npx wrangler d1 execute apin-flywheel --remote --yes --file=./schema.sql   # if schema.sql changed
 npx wrangler deploy
 ```
+- **Publishing a benchmark sweep:** run `uv run python scripts/collect_harbor_results.py --release <tag> --jobs jobs/` (writes `flywheel/public/data/benchmark.json`), commit it, then deploy.
+- **Refreshing the offline snapshot:** `.venv/bin/python flywheel/seed_from_apin.py` rewrites `flywheel/public/snapshot.json`, which the site falls back to when the API is unreachable.
+- **Lane and track descriptions** on the site live in one place, `flywheel/public/assets/site.js` (`LANES`, `TRACKS`). Update them when a lane's `program.md` changes its contract.
 - **Zero-bill guarantee:** Keep Flywheel on the Cloudflare **Workers Free** plan ($0/mo). Free plans enforce hard fail-closed limits (100k req/day, 5M D1 reads/day, 100k D1 writes/day, 10ms CPU/req) and cannot incur overage charges. Public `GET` routes also carry a 30-second anti-cache-bust edge cache.
 
 ---

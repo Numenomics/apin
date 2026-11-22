@@ -98,8 +98,8 @@ def test_harbor_verify_rewind_writes_rewards(tmp_path):
     assert float((tmp_path / "verifier_out" / "reward.txt").read_text().strip()) == 1.0
 
 
-def test_harbor_verify_records_solution_complexity_and_collector_builds_page(tmp_path):
-    """harbor/verify.py records LOC/cyclomatic/AST stats & archives submission.py; collector renders HTML."""
+def test_harbor_verify_records_solution_complexity_and_collector_builds_site_data(tmp_path):
+    """harbor/verify.py records LOC/cyclomatic/AST stats & archives submission.py; collector builds the site's benchmark data."""
     import importlib.util
 
     verify_py = ROOT / "harbor" / "verify.py"
@@ -162,5 +162,9 @@ def test_harbor_verify_records_solution_complexity_and_collector_builds_page(tmp
     assert tr["cache_hit_rate"] == 0.8 and tr["test_runs"] == 1 and tr["tool_calls"] == 1 and tr["turns"] == 1
     assert tr["cost_usd"] > 0 and tr["agent_wall_s"] == 75.0
     assert "coin mixture" in tr["approach_summary"]
-    html = mod.render_html(data)
-    assert "Price Pareto Frontier" in html and "GLM-5.3-Flash" in html
+    row = data["leaderboard"][0]
+    assert row["label"] == "GLM-5.3-Flash" and row["infra_errors"] == 0 and row["agents"]
+    # Every task on the page is described from its own task.toml, never restated by hand.
+    meta = data["task_meta"][tr["task_id"]]
+    assert meta["category"] == tr["category"]
+    assert mod.load_task_meta(["a1-preconditioning"])["a1-preconditioning"]["lane"] == "A1"

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "release": "bench-v0.1.1",
-  "generated_at": "2026-11-22T22:46:44Z",
+  "generated_at": "2026-11-22T23:49:19Z",
   "tasks": [
     "a0-ground-up",
     "a1-preconditioning",
@@ -12,14 +12,76 @@
     "s3-position-gated-mh",
     "s3-unadjusted-ula"
   ],
+  "task_meta": {
+    "a0-ground-up": {
+      "category": "optimize",
+      "title": "Build an adjusted posterior sampler from a 43-LOC isotropic RWM stub",
+      "lane": "A0",
+      "difficulty": "hard",
+      "agent_timeout_s": 3600.0
+    },
+    "a1-preconditioning": {
+      "category": "optimize",
+      "title": "Optimize adapt_metric() preconditioning under fixed HMC judge",
+      "lane": "A1",
+      "difficulty": "medium",
+      "agent_timeout_s": 2700.0
+    },
+    "a2-funnel-dynamics": {
+      "category": "optimize",
+      "title": "Optimize multiscale and funnel-surviving transition dynamics",
+      "lane": "A2",
+      "difficulty": "hard",
+      "agent_timeout_s": 3600.0
+    },
+    "a3-integrator-trajectory": {
+      "category": "optimize",
+      "title": "Optimize symplectic/isokinetic integrators, momentum, trajectories, or PDMPs",
+      "lane": "A3",
+      "difficulty": "hard",
+      "agent_timeout_s": 3600.0
+    },
+    "a4-nonlinear-transport": {
+      "category": "optimize",
+      "title": "Optimize warm-start & diffeomorphic nonlinear transport under fixed latent HMC judge",
+      "lane": "A4",
+      "difficulty": "hard",
+      "agent_timeout_s": 3600.0
+    },
+    "s3-missing-jacobian-a4": {
+      "category": "rewind",
+      "title": "Fix missing log-det-Jacobian & pullback gradient in Lane A4 sinh-arcsinh transport",
+      "lane": null,
+      "difficulty": "easy",
+      "agent_timeout_s": 900.0
+    },
+    "s3-position-gated-mh": {
+      "category": "rewind",
+      "title": "Fix position-dependent kernel gating MH detailed-balance bias",
+      "lane": null,
+      "difficulty": "easy",
+      "agent_timeout_s": 900.0
+    },
+    "s3-unadjusted-ula": {
+      "category": "rewind",
+      "title": "Add Metropolis-Hastings adjustment to biased unadjusted Langevin (ULA) kernel",
+      "lane": null,
+      "difficulty": "easy",
+      "agent_timeout_s": 900.0
+    }
+  },
   "leaderboard": [
     {
       "config_key": "zai-coding-plan/glm-5.3-flash#max",
       "model": "zai-coding-plan/glm-5.3-flash",
       "label": "GLM-5.3-Flash",
       "effort": "max",
+      "agents": [
+        "opencode-v2"
+      ],
       "n_trials": 8,
       "passed": 7,
+      "infra_errors": 0,
       "pass_rate": 0.875,
       "rewind_passed": 3,
       "rewind_total": 3,
@@ -49,8 +111,12 @@
       "model": "zai-coding-plan/glm-5.3-flash",
       "label": "GLM-5.3-Flash",
       "effort": "low",
+      "agents": [
+        "opencode-v2"
+      ],
       "n_trials": 8,
       "passed": 8,
+      "infra_errors": 0,
       "pass_rate": 1.0,
       "rewind_passed": 3,
       "rewind_total": 3,
@@ -80,8 +146,12 @@
       "model": "zai-coding-plan/glm-5.3",
       "label": "GLM-5.3",
       "effort": "high",
+      "agents": [
+        "opencode-v2"
+      ],
       "n_trials": 8,
       "passed": 7,
+      "infra_errors": 1,
       "pass_rate": 0.875,
       "rewind_passed": 3,
       "rewind_total": 3,
@@ -111,8 +181,12 @@
       "model": "zai-coding-plan/glm-5.3",
       "label": "GLM-5.3",
       "effort": "low",
+      "agents": [
+        "opencode-v2"
+      ],
       "n_trials": 8,
       "passed": 7,
+      "infra_errors": 0,
       "pass_rate": 0.875,
       "rewind_passed": 3,
       "rewind_total": 3,
@@ -142,8 +216,12 @@
       "model": "zai-coding-plan/glm-5.3-flash",
       "label": "GLM-5.3-Flash",
       "effort": "high",
+      "agents": [
+        "opencode-v2"
+      ],
       "n_trials": 8,
       "passed": 7,
+      "infra_errors": 1,
       "pass_rate": 0.875,
       "rewind_passed": 3,
       "rewind_total": 3,
@@ -173,8 +251,12 @@
       "model": "opencode/tidepool-alpha-free",
       "label": "Tidepool Alpha Free",
       "effort": "low",
+      "agents": [
+        "opencode-v2"
+      ],
       "n_trials": 8,
       "passed": 4,
+      "infra_errors": 3,
       "pass_rate": 0.5,
       "rewind_passed": 1,
       "rewind_total": 3,

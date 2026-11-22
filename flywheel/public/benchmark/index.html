@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent benchmark | apin</title>
+    <meta name="description" content="How coding agents do at fixing and speeding up Bayesian samplers: eight tasks, the same container, time limit and hidden seeds for every model." />
+    <link rel="stylesheet" href="/assets/site.css" />
+    <style>
+      .matrix th.config {
+        text-align: center;
+        vertical-align: bottom;
+        white-space: normal;
+        min-width: 104px;
+        color: var(--ink);
+        font-size: 0.8rem;
+      }
+      .matrix th.config .tag {
+        margin-top: 4px;
+      }
+      .matrix td.cell {
+        padding: 4px;
+        text-align: center;
+      }
+      .matrix td.task {
+        white-space: normal;
+        min-width: 250px;
+      }
+      .matrix td.task code {
+        background: none;
+        padding: 0;
+        font-size: 0.8rem;
+      }
+      .matrix td.task a {
+        font-size: 0.78rem;
+        color: var(--ink-3);
+      }
+      .matrix td.task span {
+        display: block;
+        font-size: 0.8rem;
+        color: var(--ink-3);
+        line-height: 1.35;
+        max-width: 44ch;
+      }
+      .matrix tr.group td {
+        padding-top: 18px;
+        font-family: var(--display);
+        font-weight: 600;
+        font-size: 0.98rem;
+        border-bottom-color: var(--rule-2);
+      }
+      .heat {
+        appearance: none;
+        width: 100%;
+        min-height: 38px;
+        border: 1px solid var(--rule);
+        border-radius: 2px;
+        background: transparent;
+        color: var(--ink);
+        font: 500 0.8rem var(--mono);
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 5px;
+      }
+      .heat:hover,
+      .heat.is-open {
+        outline: 2px solid var(--ink);
+        outline-offset: 1px;
+      }
+      .heat svg {
+        width: 12px;
+        height: 12px;
+      }
+      .heat.h1 { background: var(--seq-1); border-color: transparent; color: light-dark(#0b0b0b, #f0efec); }
+      .heat.h2 { background: var(--seq-2); border-color: transparent; color: light-dark(#0b0b0b, #f0efec); }
+      .heat.h3 { background: var(--seq-3); border-color: transparent; color: light-dark(#0b0b0b, #ffffff); }
+      .heat.h4 { background: var(--seq-4); border-color: transparent; color: #0b0b0b; }
+      .heat.h5 { background: var(--seq-5); border-color: transparent; color: light-dark(#ffffff, #0b0b0b); }
+      .heat.h6 { background: var(--seq-6); border-color: transparent; color: light-dark(#ffffff, #0b0b0b); }
+      .heat.fail { color: var(--bad); border-color: var(--bad-mark); }
+      .heat.infra {
+        color: var(--ink-3);
+        background: repeating-linear-gradient(135deg, var(--rule) 0 2px, transparent 2px 6px);
+      }
+      .heat.none { cursor: default; color: var(--ink-3); border-style: dashed; }
+      .ramp {
+        white-space: nowrap;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.8rem;
+        color: var(--ink-2);
+      }
+      .ramp i {
+        display: inline-block;
+        width: 22px;
+        height: 12px;
+      }
+      .ramp .steps {
+        display: inline-flex;
+        gap: 2px;
+      }
+      .rules {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        border-top: 1px solid var(--ink);
+      }
+      .rules li {
+        padding: 12px 0;
+        border-bottom: 1px solid var(--rule);
+        color: var(--ink-2);
+        font-size: 0.96rem;
+      }
+      .rules strong {
+        color: var(--ink);
+        font-weight: 600;
+      }
+      .stack {
+        display: grid;
+        gap: 12px;
+        align-content: start;
+        min-width: 0;
+      }
+      .stack h3 {
+        font-size: 1.08rem;
+        margin-top: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <noscript><p class="wrap">This page needs JavaScript. The raw results are in <a href="/data/benchmark.json">benchmark.json</a>.</p></noscript>
+    <main class="wrap">
+      <header class="page-head">
+        <h1>Agent benchmark</h1>
+        <p class="lede">
+          Eight tasks taken from real sampler work: three bugs to fix and five samplers to make faster. Every model starts from the same code in the same container with the same time limit, and is graded on seeds it never saw.
+        </p>
+        <p class="meta-line" id="meta">Loading results.</p>
+      </header>
+
+      <section class="section" aria-labelledby="board-h">
+        <div class="section-head">
+          <div>
+            <h2 id="board-h">Leaderboard</h2>
+            <p>One row per model and reasoning-effort setting. Ranked by mean reward, then tasks passed, then cost.</p>
+          </div>
+          <div class="filters">
+            <label class="sr-only" for="f-model">Model</label>
+            <select id="f-model"><option value="">All models</option></select>
+            <label class="sr-only" for="f-effort">Effort</label>
+            <select id="f-effort"><option value="">All efforts</option></select>
+          </div>
+        </div>
+        <div class="table-scroll"><table class="data" id="board"></table></div>
+        <p class="caption">
+          Each block in the Tasks column is one run: the three fixes, then the five speed-ups. Select one to open that run. Typical speed-up is the geometric mean over the speed-up tasks that passed. Each task was run once per setting in this release, so no spread is shown.
+        </p>
+      </section>
+
+      <section class="section" aria-labelledby="cost-h">
+        <figure class="figure">
+          <div class="figure-bar">
+            <h2 id="cost-h" style="font-size:1.6rem">What a result costs</h2>
+            <div class="seg" role="group" aria-label="Horizontal axis">
+              <button type="button" data-x="cost" aria-pressed="true">Cost</button>
+              <button type="button" data-x="tokens" aria-pressed="false">Tokens</button>
+              <button type="button" data-x="time" aria-pressed="false">Agent time</button>
+            </div>
+          </div>
+          <div class="legend" id="scatter-legend"></div>
+          <div id="scatter-box"><svg class="chart" id="scatter" role="img" aria-labelledby="cost-h"></svg></div>
+          <figcaption class="caption">
+            Mean reward over the eight tasks against the total spent on them. The dashed line joins the settings that no other setting beats on both axes. The same numbers are in the leaderboard above.
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="section" aria-labelledby="matrix-h">
+        <div class="section-head">
+          <div>
+            <h2 id="matrix-h">Task by task</h2>
+            <p>Each task is a directory under <code>harbor/tasks/</code> with instructions, a frozen starting file and a hidden verifier. Select a cell to see that run: its score per target shape, tokens, time and the agent's closing note.</p>
+          </div>
+          <div class="ramp" aria-hidden="true">
+            <span>1×</span>
+            <span class="steps"><i style="background:var(--seq-1)"></i><i style="background:var(--seq-2)"></i><i style="background:var(--seq-3)"></i><i style="background:var(--seq-4)"></i><i style="background:var(--seq-5)"></i><i style="background:var(--seq-6)"></i></span>
+            <span>8× the baseline</span>
+          </div>
+        </div>
+        <div class="table-scroll"><table class="data matrix" id="matrix"></table></div>
+      </section>
+
+      <section class="section" aria-labelledby="score-h">
+        <div class="two-up">
+          <div class="stack">
+            <h2 id="score-h" style="font-size:1.6rem">How a run is scored</h2>
+            <ul class="rules">
+              <li><strong>Fix tasks pay 1 or 0.</strong> The agent gets a sampler with a real bug. The reward is 1 if the repaired kernel passes a hidden invariance check, and 0 otherwise.</li>
+              <li><strong>Speed-up tasks pay a ratio.</strong> The reward is the candidate's efficiency divided by the frozen baseline's, measured on hidden seeds. Any failed invariance or replay check makes it 0.</li>
+              <li><strong>The weakest shape sets the efficiency.</strong> Efficiency is a soft minimum over target classes (a power mean with exponent −4), so a gain on easy Gaussians cannot pay for a loss on funnels.</li>
+              <li><strong>Mean reward mixes both kinds.</strong> It averages eight rewards, so one large speed-up can outweigh a failed task. Read it next to the Passed column.</li>
+              <li><strong>Runs that never started count as 0.</strong> Rate limits and container failures are drawn hatched so they are not mistaken for a wrong answer.</li>
+            </ul>
+          </div>
+          <div class="stack">
+            <h2 style="font-size:1.6rem">Run it yourself</h2>
+            <p class="note">The full suite needs Docker and the Harbor CLI.</p>
+            <div id="cmd-run"></div>
+            <h3>Grade one file without Docker</h3>
+            <div id="cmd-verify"></div>
+            <h3>Publish a sweep to this page</h3>
+            <div id="cmd-collect"></div>
+            <p class="note">Task definitions and verifier are in <a href="https://github.com/Numenomics/apin/tree/main/harbor">harbor/</a>. Raw results: <a href="/data/benchmark.json">benchmark.json</a>.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+    <script src="/assets/site.js"></script>
+    <script src="/assets/benchmark.js"></script>
+  </body>
+</html>

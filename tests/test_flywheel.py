@@ -334,3 +334,36 @@ def test_token_only_defaults_to_public_url_and_post_trial_row(monkeypatch: pytes
     assert calls[0]["body"]["id"] == "A4:r1:T0002"
     assert calls[0]["body"]["parent_id"] == "A4:r1:T0001"
     assert calls[0]["body"]["verified"] == 0
+
+
+def test_cli_claim_and_release_report_next_step(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`apin autoresearch claim/release` wrap the claim ledger and say what to do next."""
+    from harness import cli
+
+    seen: dict[str, Any] = {}
+
+    def fake_claim(task_id, lane, agent, summary="", ttl_minutes=60, **_):
+        seen["claim"] = (task_id, lane, agent, summary, ttl_minutes)
+        return {"claim": {"id": "c-1", "expires_at": "2026-11-23T01:00:00Z"}}
+
+    monkeypatch.setattr(flywheel, "claim_task", fake_claim)
+    monkeypatch.setattr(flywheel, "release_claim", lambda claim_id, status="done", **_: {"claim": {"id": claim_id, "status": status}})
+
+    assert cli.main(["autoresearch", "claim", "--task", "a1-heavy-tail-robust-fisher", "--lane", "A1", "--agent", "me", "--summary", "MAD scale"]) == 0
+    assert seen["claim"] == ("a1-heavy-tail-robust-fisher", "A1", "me", "MAD scale", 60)
+    out = capsys.readouterr().out
+    assert "2026-11-23T01:00:00Z" in out and "release --claim c-1" in out
+
+    assert cli.main(["autoresearch", "release", "--claim", "c-1", "--status", "abandoned"]) == 0
+    assert "abandoned" in capsys.readouterr().out
+
+    def taken(*_, **__):
+        raise flywheel.FlywheelError("conflict", status=409)
+
+    monkeypatch.setattr(flywheel, "claim_task", taken)
+    assert cli.main(["autoresearch", "claim", "--task", "t", "--lane", "A1", "--agent", "me"]) == 1
+    assert "already claimed" in capsys.readouterr().err
+
+    monkeypatch.setattr(flywheel, "claim_task", lambda *_, **__: None)
+    assert cli.main(["autoresearch", "claim", "--task", "t", "--lane", "A1", "--agent", "me"]) == 1
+    assert "APIN_FLYWHEEL_TOKEN" in capsys.readouterr().err

@@ -1,6 +1,21 @@
-# apin Flywheel
+# apin Flywheel and website
 
-Lightweight, self-hosted research DAG, task claim ledger, alignment dashboard, and MCP endpoint for `apin`, running on Cloudflare's **$0/mo free tier** (Workers + D1 SQLite + Static Assets: 100k req/day, 5M D1 reads/day, 100k D1 writes/day, unlimited static bandwidth).
+Lightweight, self-hosted research DAG, task claim ledger and MCP endpoint for `apin`, plus the project website, running on Cloudflare's **$0/mo free tier** (Workers + D1 SQLite + Static Assets: 100k req/day, 5M D1 reads/day, 100k D1 writes/day, unlimited static bandwidth).
+
+## The website (`public/`)
+
+One static site, served by the same Worker as the API. Plain HTML, CSS and JavaScript: no build step.
+
+| URL | File | What it shows | Data |
+| --- | --- | --- | --- |
+| `/` | `public/index.html` | What apin is, the one-line join prompt, the three ways in | `/api/dag`, `data/benchmark.json` |
+| `/frontier/` | `public/frontier/index.html` | Best result per lane, every trial run by run, claims, searchable ledger | `/api/dag`, falling back to `snapshot.json` |
+| `/benchmark/` | `public/benchmark/index.html` | Agent benchmark leaderboard, cost chart, task-by-task matrix, run details | `data/benchmark.json` |
+| `/lanes/` | `public/lanes/index.html` | What each lane and track is, what you edit, the command to start | `/api/dag` for current standings |
+
+- `public/assets/site.css` and `public/assets/site.js` are shared by every page: colours and type, the masthead, lane and track definitions, tables, tooltips, the details drawer.
+- **To add a page:** create `public/<name>/index.html`, load `/assets/site.css` and `/assets/site.js`, call `apin.mount("<name>")`, and add one entry to `NAV` in `site.js`.
+- `data/benchmark.json` is written by `scripts/collect_harbor_results.py`; `snapshot.json` by `seed_from_apin.py`.
 
 ## 4-Command Cloudflare Free-Tier Deploy
 
@@ -29,7 +44,7 @@ Refresh `seed.sql` and `public/snapshot.json` from local runs at any time:
 
 ## Local Preview & Tests
 
-- **Pure static preview** (zero Cloudflare account needed; falls back cleanly to `public/snapshot.json`):
+- **Pure static preview** of the whole site (zero Cloudflare account needed; falls back cleanly to `public/snapshot.json`), then open `http://localhost:8788/`:
   ```bash
   python3 -m http.server 8788 --directory flywheel/public
   ```
@@ -71,7 +86,7 @@ Refresh `seed.sql` and `public/snapshot.json` from local runs at any time:
 
 ## Live Instance & Contributor Onboarding
 
-- **Public dashboard & read API:** `https://apin-flywheel.m0hawk.workers.dev` (no token needed for browsing or reading `/api/frontier`, `/api/dag`, `/api/nodes`, `/api/claims`).
+- **Public site & read API:** `https://apin-flywheel.m0hawk.workers.dev` (no token needed for browsing or reading `/api/frontier`, `/api/dag`, `/api/nodes`, `/api/claims`).
 - **How to get a contributor token:**
   1. **Invite-only (default):** Open a short GitHub issue on [Numenomics/apin](https://github.com/Numenomics/apin/issues) with your desired handle (e.g. your GitHub username). The maintainer mints a personal revocable `apfw_...` contributor token (rate-limited per hour; posts are stamped with your handle and `verified = 0`).
   2. **Self-serve (when an invite code is posted):**
@@ -81,6 +96,7 @@ Refresh `seed.sql` and `public/snapshot.json` from local runs at any time:
        -d '{"handle":"your-handle","invite_code":"<community-invite-code>"}'
      ```
 - **Auto-streaming trials:** Export `APIN_FLYWHEEL_TOKEN="<your-token>"` (URL defaults to `https://apin-flywheel.m0hawk.workers.dev`); every `uv run apin autoresearch eval` automatically posts kept + discarded trials with parent→child lineage.
+- **Claiming work from the shell:** `uv run apin autoresearch claim --task <id> --lane A1 --agent <handle>` and `uv run apin autoresearch release --claim <claim id>`.
 - **Minting a contributor key (maintainer):**
   ```bash
   curl -fsS -X POST https://apin-flywheel.m0hawk.workers.dev/api/admin/keys \

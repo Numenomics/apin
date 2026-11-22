@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lanes and tracks | apin</title>
+    <meta name="description" content="What each apin lane and track is, which file you edit, and the one command that scores it." />
+    <link rel="stylesheet" href="/assets/site.css" />
+    <style>
+      .words {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0 36px;
+        border-top: 1px solid var(--ink);
+        margin: 0;
+      }
+      .words div {
+        padding: 16px 0 18px;
+        border-bottom: 1px solid var(--rule);
+      }
+      .words dt {
+        font-family: var(--display);
+        font-weight: 600;
+        font-size: 1.14rem;
+      }
+      .words dd {
+        margin: 6px 0 0;
+        color: var(--ink-2);
+        font-size: 0.95rem;
+      }
+      .start {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        counter-reset: s;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 28px;
+      }
+      .start li {
+        counter-increment: s;
+        display: grid;
+        gap: 10px;
+        align-content: start;
+        min-width: 0;
+      }
+      .start h3 {
+        font-size: 1.1rem;
+      }
+      .start h3::before {
+        content: counter(s) ". ";
+        color: var(--ink-3);
+      }
+      .start p {
+        color: var(--ink-2);
+        font-size: 0.95rem;
+      }
+      .kind {
+        margin: 26px 0 0;
+        font-family: var(--display);
+        font-weight: 600;
+        font-size: 1.05rem;
+        color: var(--ink-2);
+      }
+      .kind + .rows {
+        margin-top: 10px;
+      }
+      .row:target {
+        background: var(--sunk);
+        box-shadow: -14px 0 0 var(--sunk), 14px 0 0 var(--sunk);
+      }
+      .row .links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 16px;
+        font-size: 0.88rem;
+      }
+      @media (max-width: 980px) {
+        .words,
+        .start {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <noscript><p class="wrap">This page needs JavaScript. The lane specifications are in <a href="https://github.com/Numenomics/apin/tree/main/autoresearch/lanes">autoresearch/lanes</a>.</p></noscript>
+    <main class="wrap">
+      <header class="page-head">
+        <h1>Lanes and tracks</h1>
+        <p class="lede">
+          A lane is where you work. A track is where a finished sampler is ranked. Pick a lane by what you want to change: each one has a single thing you may edit, a fixed judge, and one command that scores a trial.
+        </p>
+      </header>
+
+      <section class="section" aria-labelledby="words-h">
+        <div class="section-head">
+          <div>
+            <h2 id="words-h">Six words with a fixed meaning here</h2>
+          </div>
+        </div>
+        <dl class="words">
+          <div><dt>Lane</dt><dd>A research direction with one editable file and a judge you may not touch. A0 to A4 change the sampling algorithm, S1 and S2 change the engines underneath, S3 holds bug-fix tasks.</dd></div>
+          <div><dt>Trial</dt><dd>One change to a lane's file, with a hypothesis written down first. <code>apin autoresearch eval</code> scores it and decides whether it is kept.</dd></div>
+          <div><dt>Run</dt><dd>The trials one contributor makes under one <code>--run-id</code>. The first is the unmodified baseline. Efficiencies are comparable inside a run, not across runs.</dd></div>
+          <div><dt>Track</dt><dd>A ranking of finished samplers on real posteriors: L1 to L5 and S2. Each track answers a different question, so tracks are never pooled.</dd></div>
+          <div><dt>Task</dt><dd>One of the eight containerised problems in the <a href="/benchmark/">agent benchmark</a>. Five mirror lanes A0 to A4 with a time limit. Three are bugs from lane S3.</dd></div>
+          <div><dt>Record</dt><dd>A result a maintainer has reproduced, committed to the repository under <code>records/</code>. Everything before that lives on the <a href="/frontier/">frontier</a>.</dd></div>
+        </dl>
+      </section>
+
+      <section class="section" aria-labelledby="start-h">
+        <div class="section-head">
+          <div>
+            <h2 id="start-h">Start in any lane</h2>
+            <p>These three steps are the same for A0 to A4. The systems lanes differ only in the last command, shown with each lane below.</p>
+          </div>
+        </div>
+        <ol class="start">
+          <li>
+            <h3>Set up</h3>
+            <p>Needs <a href="https://docs.astral.sh/uv/">uv</a> and Python 3.12. No Docker, CmdStan or account.</p>
+            <div id="s-setup"></div>
+          </li>
+          <li>
+            <h3>Read the lane's brief</h3>
+            <p>Prints the current frontier, live claims, recent dead ends and the lane's list of refuted ideas.</p>
+            <div id="s-brief"></div>
+          </li>
+          <li>
+            <h3>Score the baseline, then your change</h3>
+            <p>Run the unmodified file once so you have something to beat. Then edit, state a hypothesis and run it again. A trial takes a few minutes.</p>
+            <div id="s-eval"></div>
+          </li>
+        </ol>
+        <p class="caption">
+          With a contributor token in <code>APIN_FLYWHEEL_TOKEN</code>, every trial is posted to the frontier automatically. Without one, everything still runs locally. <a href="https://github.com/Numenomics/apin/blob/main/CONTRIBUTING.md#get-a-contributor-token">How to get a token</a>.
+        </p>
+      </section>
+
+      <section class="section" aria-labelledby="lanes-h">
+        <div class="section-head">
+          <div>
+            <h2 id="lanes-h">The lanes</h2>
+            <p id="lanes-note">What you edit, what stays fixed, and where the lane stands today.</p>
+          </div>
+        </div>
+        <div id="lanes"></div>
+      </section>
+
+      <section class="section" aria-labelledby="tracks" id="tracks-section">
+        <div class="section-head">
+          <div>
+            <h2 id="tracks">The tracks</h2>
+            <p>Once a sampler survives its lane, a track measures it on real Stan posteriors. Passing a model means it passed the 0.1-SD gate at that budget. It never means the sampler is exact.</p>
+          </div>
+        </div>
+        <div class="table-scroll"><table class="data" id="track-table"></table></div>
+        <p class="caption">
+          To enter a track, package the sampler under <code>records/&lt;release&gt;/&lt;track&gt;/&lt;date&gt;_&lt;slug&gt;/</code>, check it with <code>uv run apin records validate</code>, and open a pull request. The rules are in <a href="https://github.com/Numenomics/apin/blob/main/BENCH.md">BENCH.md</a>.
+        </p>
+      </section>
+    </main>
+    <script src="/assets/site.js"></script>
+    <script src="/assets/lanes.js"></script>
+  </body>
+</html>

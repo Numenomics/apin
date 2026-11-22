@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from . import (
-    autoresearch, cost, grid, invariance, models, queue, records, reference,
+    autoresearch, cost, flywheel, grid, invariance, models, queue, records, reference,
     rewind, sampler, score, shapes, systems_lanes, tracks,
 )
 from .models import ROOT
@@ -57,6 +57,31 @@ def _validate_codex(index_path: Path) -> int:
     print(f"codex valid: {len(repos)} repositories, {len(cards)} cards ({index_path})")
     return 0
 
+
+
+def _claim_or_release(a: argparse.Namespace) -> int:
+    """Reserve or free a task on the Flywheel claim ledger; prints what to do next."""
+    try:
+        if a.ar_cmd == "claim":
+            res = flywheel.claim_task(a.task, a.lane, a.agent, a.summary, a.ttl_minutes)
+        else:
+            res = flywheel.release_claim(a.claim, a.status)
+    except flywheel.FlywheelError as exc:
+        if exc.status == 409:
+            print(f"{a.task} is already claimed. Pick another task: uv run python scripts/choose_research_task.py --list", file=sys.stderr)
+        else:
+            print(f"The Flywheel refused the request: {exc}", file=sys.stderr)
+        return 1
+    if res is None:
+        print("No Flywheel token is set, so nothing was claimed. Export APIN_FLYWHEEL_TOKEN (see CONTRIBUTING.md) and retry.", file=sys.stderr)
+        return 1
+    claim = res.get("claim") or res
+    if a.ar_cmd == "claim":
+        print(f"Claimed {a.task} in lane {a.lane} until {claim.get('expires_at', 'the TTL runs out')}.")
+        print(f"When you finish: uv run apin autoresearch release --claim {claim.get('id', '<claim id>')}")
+    else:
+        print(f"Claim {a.claim} marked {a.status}.")
+    return 0
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="apin")
@@ -170,6 +195,16 @@ def main(argv: list[str] | None = None) -> int:
     ab.add_argument("--run-id", help="optional local run_id to include stall & weakest-class diagnostics")
     ab.add_argument("--offline", action="store_true", help="skip live Flywheel fetch (local files only)")
     ab.add_argument("--max-failures", type=int, default=8)
+
+    ac = ar_sub.add_parser("claim", help="reserve a task on the Flywheel so nobody else runs the same idea (needs APIN_FLYWHEEL_TOKEN)")
+    ac.add_argument("--task", required=True, help="task id from scripts/choose_research_task.py --list, or a short slug of your own")
+    ac.add_argument("--lane", required=True, help="lane the task belongs to (A0..A4, S1..S3)")
+    ac.add_argument("--agent", required=True, help="your handle, or the model doing the work")
+    ac.add_argument("--summary", default="", help="one sentence on what you plan to try")
+    ac.add_argument("--ttl-minutes", type=int, default=60, help="how long the claim holds before it expires on its own")
+    arl = ar_sub.add_parser("release", help="mark a claim done or abandoned so the task is free again")
+    arl.add_argument("--claim", required=True, help="claim id printed by `apin autoresearch claim`")
+    arl.add_argument("--status", choices=("done", "abandoned"), default="done")
 
     as1 = ar_sub.add_parser("eval-s1", help="evaluate Lane S1 upstream sampler patch")
     as1.add_argument("--upstream", required=True, help="upstream submodule name (e.g. walnutpie, stan, nuts-rs)")
@@ -311,6 +346,8 @@ def main(argv: list[str] | None = None) -> int:
                 a.lane, run_id=a.run_id, offline=a.offline, max_failures=a.max_failures,
             ), end="")
             return 0
+        if a.ar_cmd in ("claim", "release"):
+            return _claim_or_release(a)
         if a.ar_cmd == "eval-s1":
             row = systems_lanes.evaluate_s1_trial(
                 a.upstream, a.hypothesis, allowed_paths=a.allowed_paths,

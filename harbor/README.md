@@ -72,10 +72,13 @@ uv run python harbor/verify.py optimize \
 
 Outputs Harbor-standard `reward.txt` (scalar float reward), `reward.json` (strictly numeric Harbor rewards dict), `details.json` (structured breakdown: `reward`, `passed`, `speedup`, `soft_min_eff`, `baseline_soft_min`, `b2_max`, `overhead_ratio`, `by_class`, `failed_targets`, and `solution` LOC/AST/cyclomatic complexity stats), and archives `submission.py`.
 
-## Building the Benchmark Page & Pareto Curves
+## Publishing Results to the Leaderboard
 
-Collect Harbor job directories into `benchmarks/results.json` and regenerate the standalone interactive leaderboard + Price/Token Pareto page ([benchmarks/index.html](../benchmarks/index.html)):
+The leaderboard is a page of the project website: [apin-flywheel.m0hawk.workers.dev/benchmark/](https://apin-flywheel.m0hawk.workers.dev/benchmark/). It reads one data file, `flywheel/public/data/benchmark.json`. Collect Harbor job directories into that file, then deploy the site:
 
 ```bash
-uv run python scripts/collect_harbor_results.py --release bench-v0.1.0 --jobs jobs/
+uv run python scripts/collect_harbor_results.py --release bench-v0.1.1 --jobs jobs/
+cd flywheel && npx wrangler deploy
 ```
+
+The collector reads each task's title, lane, difficulty and time limit from its `task.toml`, so the page never restates them by hand. Runs that never started (provider rate limits, container failures) are recorded as `infra_error` and drawn differently from wrong answers. Preview the page locally with `python3 -m http.server 8788 --directory flywheel/public` and open `http://localhost:8788/benchmark/`.
