@@ -22,6 +22,8 @@ Tasks derived from real MCMC / transport bugs discovered in `apin` campaigns. Ba
 ### Category 2 — Open-Ended Optimization vs. Frozen Baseline (Continuous Speedup, 45–60 min)
 KernelBench-style optimization tasks. Agent starts from a frozen baseline and maximizes dual-horizon (`H=150/1000`, `dims=6,20`) verified efficiency on **hidden held-out verification seeds** (unseen during agent dev runs). Any invariance or replay failure scores **`0.0`**.
 
+> **How `soft_min_eff` works (critical for A0–A4):** Per-class geometric means are aggregated with a **$p = -4$ power mean** (`(mean_c eff_c^{-4})^{-1/4}`), so **the worst target class dominates the score** (e.g., a small regression on `hybrid_rosenbrock` or `banana` can erase +50% gains on easier classes). Check `by_class` / `CLASS_METRIC` after every edit and improve the weakest class first.
+
 | Task | Lane | Frozen Baseline | Reward |
 |---|---|---|---|
 | `a0-ground-up` | `A0` | 43-LOC isotropic RWM stub | `soft_min_cand / soft_min_base` (0 if invariance fails) |
@@ -34,35 +36,38 @@ KernelBench-style optimization tasks. Agent starts from a frozen baseline and ma
 
 ## Running with Harbor
 
-Build the shared base image once from repo root, then run any task or the full suite with Harbor:
+Install the Harbor CLI once, build the shared base image from repo root, then run any task or the full suite:
 
 ```bash
-# 1. Build shared base image
+# 1. Install Harbor CLI (requires Docker daemon for containerized runs)
+uv tool install harbor
+
+# 2. Build shared base image
 docker build -f harbor/base.Dockerfile -t apin-harbor-base:latest .
 
-# 2. Run one task or the full suite via Harbor CLI
+# 3. Run one task or the full suite via Harbor CLI
 harbor run -p harbor/tasks/a1-preconditioning -a claude-code -m anthropic/claude-sonnet-4-5
 harbor run -p harbor/tasks -a codex -m openai/gpt-5
 ```
 
-## Running the Verifier Locally (No Docker Required)
+## Running the Verifier Locally (No Docker or Harbor CLI Required)
 
-Every `tests/test.sh` delegates to [harbor/verify.py](verify.py), which you can also invoke directly:
+Every `tests/test.sh` delegates to [harbor/verify.py](verify.py), which you can invoke directly on your host machine. Both hyphenated task slugs (e.g. `s3-position-gated-mh`) and internal IDs (`s3_position_gated_mh_bias`) are accepted, and `--out-dir` defaults to `./verifier_out` outside Docker:
 
 ```bash
-# Rewind task verification
+# Rewind task verification (reference fix -> reward 1.0)
 uv run python harbor/verify.py rewind \
-  --task-id s3_position_gated_mh_bias \
+  --task-id s3-position-gated-mh \
   --submission autoresearch/lanes/S3/fixtures/position_gated_ref.py \
   --out-dir /tmp/harbor-check
 
-# Optimization task verification (paired hidden seeds vs frozen baseline)
+# Optimization task verification (baseline self-check -> reward 1.0; replace --submission with your edit)
 uv run python harbor/verify.py optimize \
   --lane A1 \
-  --submission autoresearch/lanes/A1/submission.py \
+  --submission harbor/tasks/a1-preconditioning/environment/baseline.py \
   --baseline harbor/tasks/a1-preconditioning/environment/baseline.py \
   --dims 6,20 --repeats 2 \
   --out-dir /tmp/harbor-opt-check
 ```
 
-Outputs Harbor-standard `/logs/verifier/reward.txt` (scalar float reward) and `/logs/verifier/reward.json` (structured breakdown: `reward`, `passed`, `speedup`, `soft_min_eff`, `baseline_soft_min`, `b2_max`, `overhead_ratio`).
+Outputs Harbor-standard `reward.txt` (scalar float reward) and `reward.json` (structured breakdown: `reward`, `passed`, `speedup`, `soft_min_eff`, `baseline_soft_min`, `b2_max`, `overhead_ratio`, `by_class`, and `failed_targets` on failure).

@@ -22,6 +22,8 @@ Run continuously until token/compute exhaustion (or until stopped by the user). 
 ## 1.5 Research Strategy (Avoid Tunnel Vision)
 - **Composition before invention:** Check the Flywheel frontier across lanes first — combining two already-verified mechanisms (e.g., an A1 warmup/metric estimator + an A0/A2/A3 kernel improvement) frequently outperforms isolated micro-tweaks.
 - **Fork-and-Flush on stall:** If $\ge 5$ consecutive trials fail to beat the incumbent, do not keep tweaking hyperparameters in the same basin. Save a compact factual `RESEARCH_HANDOFF.md`, start a fresh context from `incumbent.py` + `apin autoresearch brief --lane <LANE>`, and attack a **different bottleneck** surfaced by the diagnostics (e.g. `short_horizon_soft_min`, `median_adapt_cost`, `overhead_ratio`, or the weakest `CLASS_METRIC` such as `Funnel` or `StiffAR`).
+- **Frontier comparability:** Always judge gains against your own **paired local incumbent** under the same `--dims` (default `6,20`) and `judge_digest`. Flywheel frontier nodes from earlier `dims=[6]` runs or older `judge_digest` hashes are directional references, not directly comparable absolute numbers (flagged automatically in `apin autoresearch brief`).
+- **Unpaired keeps (`decision=keep_incumbent_failed`):** If a paired incumbent flakes on fresh heavy-tail seeds while your candidate passes, the runner flags `decision=keep_incumbent_failed` with `ratio=None` and prints a warning — do **not** treat that as a proven win; re-run or verify on fresh seeds before claiming improvement.
 - **Final-source invariant:** Freeze `submission.py` before running full real-Stan verification (`apin run logdensity` + `apin score --submission`). Any edit after the last diagnostic invalidates prior verification until re-run.
 
 ## 2. Evaluation & Validation Bar
@@ -46,7 +48,7 @@ Every trial is judged by the read-only harness (`harness/judge.py`, `harness/inv
 
 ## 3. Handoff & Continuation
 - Restore from `autoresearch/lanes/<LANE>/runs/<RUN_ID>/incumbent.py` on discard (avoid `git reset --hard` when multiple agents share a workspace).
-- Append to `NEGATIVE_MEMORY.md` only after $\ge 2$ disciplined variants fail cleanly.
+- Append to `autoresearch/lanes/<LANE>/NEGATIVE_MEMORY.md` only after $\ge 2$ disciplined variants fail cleanly.
 - Maintain `autoresearch/lanes/<LANE>/runs/<RUN_ID>/RESEARCH_HANDOFF.md` with: pinned commit, `results.tsv` summary, verified `dim=20` / real-Stan numbers, what failed and why, and concrete next questions.
 - When running inside a continuation-aware harness, end each research turn with a final line:
   `RESEARCH_STATUS: continue` | `RESEARCH_STATUS: needs_input` | `RESEARCH_STATUS: finished`.

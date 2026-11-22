@@ -53,7 +53,8 @@ The same verification harness powers **two distinct modes**:
 # Setup (uv + Python 3.12+)
 uv sync && uv run apin fetch-data && uv run pytest -q
 
-# Agent Benchmark (Harbor)
+# Agent Benchmark (Harbor — requires Docker + Harbor CLI)
+uv tool install harbor
 docker build -f harbor/base.Dockerfile -t apin-harbor-base:latest .
 harbor run -p harbor/tasks -a claude-code -m anthropic/claude-sonnet-4-5
 

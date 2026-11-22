@@ -243,3 +243,41 @@ def test_evaluator_json_contract_and_research_brief_stall_detection(tmp_path):
     assert "Funnel=0.11" in brief
     assert "Do not shrink step size below 1e-4" in brief
     assert "Pinned commit abc123" in brief
+
+
+def test_unpaired_keep_flagged_when_incumbent_fails_tier1(tmp_path, monkeypatch):
+    """If the paired incumbent flakes on fresh seeds, decision must be keep_incumbent_failed (incumbent_ok=False)."""
+    lane_dir = tmp_path / "lanes" / "A1"
+    lane_dir.mkdir(parents=True)
+    shutil.copy2(A1_SUB, lane_dir / "submission.py")
+    run_dir = lane_dir / "runs" / "inc_fail"
+    run_dir.mkdir(parents=True)
+    shutil.copy2(A1_SUB, run_dir / "incumbent.py")
+    # Distinct candidate so it passes duplicate filter
+    (lane_dir / "submission.py").write_text(A1_SUB.read_text() + "\n_TAG = 123\n")
+
+    monkeypatch.setattr(autoresearch, "_eval_tier0", lambda *a, **kw: (True, {"ok": True}))
+    calls = {"n": 0}
+
+    def fake_tier1(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "passed": True, "soft_min_eff": 0.0009, "short_horizon_soft_min": 0.0008,
+                "long_horizon_soft_min": 0.001, "median_adapt_cost": 100.0,
+                "overhead_ratio": 2.0, "b2_max": 0.05, "by_class": {"Gaussian": 0.0009},
+            }
+        return {
+            "passed": False, "soft_min_eff": 0.0, "short_horizon_soft_min": 0.0,
+            "long_horizon_soft_min": 0.0, "median_adapt_cost": 100.0,
+            "overhead_ratio": 2.0, "b2_max": 0.35, "by_class": {"Gaussian": 0.0},
+        }
+
+    monkeypatch.setattr(autoresearch, "_eval_tier1_multi", fake_tier1)
+    row = autoresearch.evaluate_lane_trial(
+        "A1", "Candidate vs flaking incumbent", seed=77, dim=6,
+        autoresearch_dir=tmp_path, run_id="inc_fail", use_queue=False,
+    )
+    assert row["decision"] == "keep_incumbent_failed"
+    assert row["incumbent_ok"] is False
+    assert row["ratio_vs_incumbent"] is None

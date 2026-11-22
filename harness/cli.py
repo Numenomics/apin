@@ -354,11 +354,12 @@ def main(argv: list[str] | None = None) -> int:
                   f"dup={row['is_duplicate']} lint_ok={row['lint_ok']} loc={row['loc']} "
                   f"consts={row['magic_constants']}")
             return 0 if row["decision"] == "dry_run_ok" else 2
+        inc_note = " [WARNING: paired incumbent failed Tier 1 on fresh seeds — UNPAIRED keep; re-verify]" if row.get("incumbent_ok") is False else ""
         print(f"{row['trial_id']} [{row['lane']}] decision={row['decision']} "
               f"tier0={row['tier0_ok']} tier1={row['tier1_ok']} "
               f"soft_min={row.get('soft_min_eff')} ratio={row.get('ratio_vs_incumbent')} "
               f"dims={','.join(str(x) for x in (row.get('dims') or []))} repeats={row.get('repeats')} "
-              f"qwait={row.get('queue_wait_s')}s wall={row['wall_s']}s")
+              f"qwait={row.get('queue_wait_s')}s wall={row['wall_s']}s{inc_note}")
         # pi-autoresearch / external-harness compatible METRIC lines
         for mkey, rkey in (
             ("soft_min_eff", "soft_min_eff"),

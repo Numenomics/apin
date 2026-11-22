@@ -17,7 +17,7 @@ from typing import Any
 ENV_URL = "APIN_FLYWHEEL_URL"
 ENV_TOKEN = "APIN_FLYWHEEL_TOKEN"
 DEFAULT_PUBLIC_URL = "https://apin-flywheel.m0hawk.workers.dev"
-KEPT_DECISIONS = {"keep", "keep_baseline", "keep_simpler"}
+KEPT_DECISIONS = {"keep", "keep_baseline", "keep_simpler", "keep_incumbent_failed"}
 
 
 class FlywheelError(RuntimeError):

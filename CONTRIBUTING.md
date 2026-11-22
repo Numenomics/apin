@@ -4,7 +4,7 @@ Welcome! You can contribute in **two ways**:
 1. **Open-Ended Autoresearch (push the frontier):** Anything goes on process (single agent, council of 5 LLMs, custom harness, human math) — stream trials to the live **[apin Flywheel](https://apin-flywheel.m0hawk.workers.dev)** and submit verified winners via PR.
 2. **Agent Benchmark (fair LLM/agent evaluation):** Run models/agents through our standardized **[Harbor](harbor/README.md)** task containers (`harbor/tasks/`) to measure apples-to-apples capability and speedup over frozen baselines.
 
-Everything runs locally in ~3 minutes with **no Cloudflare account and no CmdStan install** required for the Python invariance, autoresearch, and Harbor tasks.
+Everything runs locally in ~3 minutes with **no Cloudflare account, Docker, or CmdStan install** required for Python invariance, autoresearch, and local `harbor/verify.py` grading (Docker + `uv tool install harbor` is only needed for full containerized Harbor runs).
 
 ---
 
@@ -33,10 +33,10 @@ uv run pytest -q
 ```
 
 ### 2. *(Optional)* Get a Flywheel contributor token
-Browsing **[apin-flywheel.m0hawk.workers.dev](https://apin-flywheel.m0hawk.workers.dev)** and running locally need **no token**. To claim tasks and stream live trials (including discarded ideas so others don't repeat them):
+Browsing **[apin-flywheel.m0hawk.workers.dev](https://apin-flywheel.m0hawk.workers.dev)**, pulling briefs (`uv run apin autoresearch brief --lane A1`), and running locally need **no token** — autonomous agents can run end-to-end read-only without one. To claim tasks and stream live trials (including discarded ideas so others don't repeat them):
 
-1. Open a short GitHub issue on [Numenomics/apin](https://github.com/Numenomics/apin/issues) with your desired handle (e.g. your GitHub username) to receive a personal revocable `apfw_...` token.
-   *(If a community invite code is posted, self-register immediately via `POST https://apin-flywheel.m0hawk.workers.dev/api/register` with `{"handle":"...","invite_code":"..."}`.)*
+1. *(Human step — agents must not open GitHub issues)* Open a short GitHub issue on [Numenomics/apin](https://github.com/Numenomics/apin/issues) with your desired handle (e.g. your GitHub username) to receive a personal revocable `apfw_...` token.
+   *(If a community invite code is posted in a release or discussion, self-register via `POST https://apin-flywheel.m0hawk.workers.dev/api/register` with `{"handle":"...","invite_code":"..."}`.)*
 2. Export it in your shell (never commit it to git):
    ```bash
    export APIN_FLYWHEEL_TOKEN="apfw_..."
@@ -48,7 +48,7 @@ Browsing **[apin-flywheel.m0hawk.workers.dev](https://apin-flywheel.m0hawk.worke
 | What you want to do | Where to start | Command |
 |---|---|---|
 | **Open-ended autoresearch (`A0`–`A4`)** | `uv run python scripts/choose_research_task.py --list`, then read `autoresearch/lanes/<LANE>/program.md` | `uv run apin autoresearch eval --lane A1 --run-id <handle>_a1 --dims 6,20 --repeats 2 --hypothesis "..."` |
-| **Run the standardized Agent Benchmark** | [harbor/README.md](harbor/README.md) (8 Harbor tasks: 3 bug-fix rewinds + 5 optimization tasks) | `docker build -f harbor/base.Dockerfile -t apin-harbor-base:latest . && harbor run -p harbor/tasks ...` |
+| **Run the standardized Agent Benchmark** | [harbor/README.md](harbor/README.md) (8 Harbor tasks: 3 bug-fix rewinds + 5 optimization tasks) | `uv tool install harbor && docker build -f harbor/base.Dockerfile -t apin-harbor-base:latest . && harbor run -p harbor/tasks ...` (or local `uv run python harbor/verify.py ...` without Docker) |
 | **Benchmark your own Python posterior approximator** | Implement `adapt`/`transition` (see `examples/samplers/hmc.py` or `elliptical_rwm_l5.py`) | `uv run apin invariance --sampler path/to/mine.py` · `uv run apin track run --track L3\|L4\|L5 --sampler path/to/mine.py` |
 | **Test on real Stan posteriors** (BridgeStan builds once per model) | Public models in `BENCH.md` | `uv run apin run logdensity --label mine --opt sampler=path/to/mine.py --models blr,gp_regr,garch11 --reps 3` |
 | **Add an external adapter, Harbor task, or codex card** | `harness/adapters/`, `harbor/tasks/`, or `codex/cards/` | `uv run pytest -q && uv run apin codex validate` |

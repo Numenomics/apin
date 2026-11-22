@@ -69,12 +69,12 @@ def test_harbor_verify_rewind_writes_rewards(tmp_path):
     assert float((out_base / "reward.txt").read_text().strip()) == 0.0
     assert json.loads((out_base / "reward.json").read_text())["passed"] == 0
 
-    # Reference fix passes -> reward 1.0
+    # Reference fix passes -> reward 1.0 (also verify hyphenated Harbor slug alias works)
     out_ref = tmp_path / "ref"
     r_ref = subprocess.run(
         [
             sys.executable, str(verify_py), "rewind",
-            "--task-id", "s3_missing_jacobian_transport",
+            "--task-id", "s3-missing-jacobian-a4",
             "--submission", str(ROOT / "autoresearch" / "lanes" / "S3" / "fixtures" / "missing_jacobian_a4_ref.py"),
             "--out-dir", str(out_ref),
         ],
@@ -83,3 +83,16 @@ def test_harbor_verify_rewind_writes_rewards(tmp_path):
     assert r_ref.returncode == 0, r_ref.stdout + r_ref.stderr
     assert float((out_ref / "reward.txt").read_text().strip()) == 1.0
     assert json.loads((out_ref / "reward.json").read_text())["passed"] == 1
+
+    # Verify default --out-dir outside Docker writes to cwd/verifier_out instead of crashing on /logs/verifier
+    r_def = subprocess.run(
+        [
+            sys.executable, str(verify_py), "rewind",
+            "--task-id", "s3-position-gated-mh",
+            "--submission", str(ROOT / "autoresearch" / "lanes" / "S3" / "fixtures" / "position_gated_ref.py"),
+        ],
+        cwd=tmp_path,
+        capture_output=True, text=True,
+    )
+    assert r_def.returncode == 0, r_def.stdout + r_def.stderr
+    assert float((tmp_path / "verifier_out" / "reward.txt").read_text().strip()) == 1.0

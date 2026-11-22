@@ -73,7 +73,7 @@ def _write_results_tsv(ledger_path: Path, tsv_path: Path) -> None:
     cols = [
         "trial_id", "timestamp", "candidate_sha", "loc", "magic_constants",
         "dim", "dims", "seed", "repeats", "k_steps", "adapt_draws", "horizon_steps",
-        "tier0_ok", "tier1_ok", "soft_min_eff", "incumbent_soft_min", "ratio_vs_incumbent",
+        "tier0_ok", "tier1_ok", "incumbent_ok", "soft_min_eff", "incumbent_soft_min", "ratio_vs_incumbent",
         "short_horizon_soft_min", "long_horizon_soft_min", "median_adapt_cost",
         "b2_max", "overhead_ratio", "queue_wait_s", "decision", "archive_cells",
         "codex_refs", "hypothesis",
@@ -502,6 +502,7 @@ def evaluate_lane_trial(
             return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id)
 
         inc_sha = None
+        inc_ok: bool | None = None
         if not incumbent_path.is_file():
             inc_res = None
             ratio = 1.0 if cand_res["passed"] else 0.0
@@ -512,11 +513,14 @@ def evaluate_lane_trial(
                 incumbent_path, suites, n_chains=n_chains, k_steps=k_steps,
                 adapt_draws=adapt_draws, lane=lane, horizon_steps=horizon_steps,
             )
-            inc_sm = inc_res["soft_min_eff"]
+            inc_ok = bool(inc_res["passed"])
+            inc_sm = inc_res["soft_min_eff"] if inc_ok else 0.0
             cand_sm = cand_res["soft_min_eff"]
             ratio = (cand_sm / inc_sm) if inc_sm > 0 else (math.inf if cand_sm > 0 else 0.0)
             if not cand_res["passed"]:
                 decision = "discard_tier1"
+            elif not inc_ok:
+                decision = "keep_incumbent_failed"
             elif ratio >= 1.0 + NOISE_MARGIN:
                 decision = "keep"
             elif ratio >= 1.0 - NOISE_MARGIN and _is_simpler(
@@ -564,7 +568,7 @@ def evaluate_lane_trial(
             if decision == "discard_no_gain" and archived_cells:
                 decision = "archive_only"
 
-        if decision in ("keep", "keep_simpler", "keep_baseline"):
+        if decision in ("keep", "keep_simpler", "keep_baseline", "keep_incumbent_failed"):
             shutil.copy2(snap_path, incumbent_path)
 
     (trial_work / "metrics.json").write_text(
@@ -576,6 +580,7 @@ def evaluate_lane_trial(
         **base_meta,
         "tier0_ok": True,
         "tier1_ok": cand_res["passed"],
+        "incumbent_ok": inc_ok,
         "soft_min_eff": round(cand_res["soft_min_eff"], 6),
         "incumbent_soft_min": round(inc_res["soft_min_eff"], 6) if inc_res else round(cand_res["soft_min_eff"], 6),
         "short_horizon_soft_min": round(cand_res.get("short_horizon_soft_min", 0.0), 6),
@@ -699,16 +704,34 @@ def build_research_brief(
             nodes = _extract_list(nodes_raw, "nodes", "items")
             claims = _extract_list(claims_raw, "claims", "items")
 
-            lines.append(f"## Live Flywheel Frontier (`{flywheel_url}`)")
+            local_digest = _judge_digest()
+            lines.append(f"## Live Flywheel Frontier (`{flywheel_url}` | local judge_digest=`{local_digest}`)")
             if frontier:
                 for row in frontier:
                     rlane = row.get("lane") or "?"
                     sm = row.get("soft_min_eff")
                     sm_s = f"{float(sm):.4g}" if isinstance(sm, (int, float)) else "n/a"
                     ver = "verified" if row.get("verified") else "unverified"
-                    title = str(row.get("title") or row.get("hypothesis") or row.get("id") or "")[:90]
+                    rdims = row.get("dims")
+                    dims_s = ",".join(str(x) for x in rdims) if isinstance(rdims, list) and rdims else "?"
+                    rdigest = ""
+                    mj = row.get("metrics_json")
+                    if isinstance(mj, str) and mj:
+                        try:
+                            rdigest = str(json.loads(mj).get("judge_digest") or "")[:8]
+                        except ValueError:
+                            rdigest = ""
+                    elif isinstance(mj, dict):
+                        rdigest = str(mj.get("judge_digest") or "")[:8]
+                    compat = ""
+                    if (rdigest and not local_digest.startswith(rdigest)) or dims_s != "6,20":
+                        compat = " [diff dims/judge — compare vs local incumbent]"
+                    title = str(row.get("title") or row.get("hypothesis") or row.get("id") or "")[:80]
                     tag = " <-- THIS LANE" if rlane == lane else ""
-                    lines.append(f"- **{rlane}** ({ver}, soft_min={sm_s}): `{row.get('id', '?')}` — {title}{tag}")
+                    lines.append(
+                        f"- **{rlane}** ({ver}, soft_min={sm_s}, dims={dims_s}, judge={rdigest or '?'}): "
+                        f"`{row.get('id', '?')}` — {title}{compat}{tag}"
+                    )
             else:
                 lines.append("- (no frontier nodes yet)")
             lines.append("")

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -25,6 +26,20 @@ from harness import autoresearch, rewind  # noqa: E402
 # Hidden verifier seed offset (disjoint from default autoresearch dev seed 20261120)
 HIDDEN_VERIFIER_SEED = 88421077
 
+# Accept either Harbor task directory slugs (hyphenated) or internal tasks.json IDs (underscored).
+REWIND_TASK_ALIASES = {
+    "s3-position-gated-mh": "s3_position_gated_mh_bias",
+    "s3-missing-jacobian-a4": "s3_missing_jacobian_transport",
+    "s3-unadjusted-ula": "s3_unadjusted_ula_bias",
+}
+
+
+def _default_out_dir() -> Path:
+    harbor_dir = Path("/logs/verifier")
+    if harbor_dir.parent.is_dir() and os.access(harbor_dir.parent, os.W_OK):
+        return harbor_dir
+    return Path.cwd() / "verifier_out"
+
 
 def _write_rewards(out_dir: Path, reward: float, payload: dict) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -37,10 +52,12 @@ def _write_rewards(out_dir: Path, reward: float, payload: dict) -> None:
 
 def verify_rewind(task_id: str, submission: Path, out_dir: Path, tasks_path: Path) -> int:
     tasks = {t.task_id: t for t in rewind.load_tasks(tasks_path)}
-    if task_id not in tasks:
-        _write_rewards(out_dir, 0.0, {"passed": 0, "error": f"unknown task_id {task_id!r}"})
+    resolved_id = REWIND_TASK_ALIASES.get(task_id, task_id)
+    if resolved_id not in tasks:
+        valid = sorted(set(tasks) | set(REWIND_TASK_ALIASES))
+        _write_rewards(out_dir, 0.0, {"passed": 0, "error": f"unknown task_id {task_id!r}; valid: {valid}"})
         return 1
-    res = rewind.evaluate_rewind_task(tasks[task_id], submission)
+    res = rewind.evaluate_rewind_task(tasks[resolved_id], submission)
     passed = 1 if res["passed"] else 0
     _write_rewards(out_dir, float(passed), {"passed": passed, **res})
     return 0 if passed else 1
@@ -87,6 +104,12 @@ def verify_optimize(
             adapt_draws=adapt_draws, lane=lane, horizon_steps=horizon_steps,
         )
         if not cand["passed"]:
+            failed = [
+                f"{p['family']}(rot={p.get('rotated')}): {p.get('reason')}"
+                for r in (cand.get("per_repeat") or [])
+                for p in (r.get("per_target") or [])
+                if not p.get("passed")
+            ]
             _write_rewards(
                 out_dir, 0.0,
                 {
@@ -95,6 +118,7 @@ def verify_optimize(
                     "tier1_ok": False,
                     "lane": lane,
                     "b2_max": round(float(cand["b2_max"]), 5),
+                    "failed_targets": failed[:8],
                     "by_class": cand["by_class"],
                 },
             )
@@ -138,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     rw.add_argument("--task-id", required=True)
     rw.add_argument("--submission", type=Path, required=True)
     rw.add_argument("--tasks", type=Path, default=rewind.DEFAULT_TASKS_PATH)
-    rw.add_argument("--out-dir", type=Path, default=Path("/logs/verifier"))
+    rw.add_argument("--out-dir", type=Path, default=None)
 
     op = sub.add_parser("optimize")
     op.add_argument("--lane", required=True)
@@ -151,14 +175,15 @@ def main(argv: list[str] | None = None) -> int:
     op.add_argument("--k-steps", type=int, default=16)
     op.add_argument("--adapt-draws", type=int, default=100)
     op.add_argument("--horizon-steps", type=int, default=500)
-    op.add_argument("--out-dir", type=Path, default=Path("/logs/verifier"))
+    op.add_argument("--out-dir", type=Path, default=None)
 
     a = ap.parse_args(argv)
+    out_dir = a.out_dir if a.out_dir is not None else _default_out_dir()
     if a.mode == "rewind":
-        return verify_rewind(a.task_id, a.submission, a.out_dir, a.tasks)
+        return verify_rewind(a.task_id, a.submission, out_dir, a.tasks)
     dims = tuple(int(x.strip()) for x in a.dims.split(",") if x.strip())
     return verify_optimize(
-        a.lane, a.submission, a.baseline, a.out_dir,
+        a.lane, a.submission, a.baseline, out_dir,
         dims=dims, repeats=a.repeats, seed=a.seed,
         n_chains=a.n_chains, k_steps=a.k_steps,
         adapt_draws=a.adapt_draws, horizon_steps=a.horizon_steps,

@@ -717,7 +717,11 @@ def check_target_invariance(
         if sd_true <= 0:
             continue
         chain_means = np.mean(disp_funcs[name], axis=1)
-        mse = float(np.mean((chain_means - mu_true) ** 2))
+        diff = chain_means - mu_true
+        if not np.all(np.isfinite(diff)) or float(np.max(np.abs(diff))) > 1e150:
+            mse = math.inf
+        else:
+            mse = float(np.mean(diff * diff))
         ess_effs.append((sd_true ** 2) / max(mse, 1e-12))
 
     # Bill adapt_counter amortized to a realistic sampling horizon (default 500 steps, ~1:5 warmup:sampling

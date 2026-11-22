@@ -1,9 +1,9 @@
 # Fix position-dependent kernel gating MH detailed-balance bias
 
-The sampler in `/app/submission.py` fails exact-draw invariance because it switches between HMC and RWM based on the current radial position without correcting for reverse kernel selection probability. Diagnose and fix `/app/submission.py` so it preserves the target distribution and mixes well on rotated ill-conditioned Gaussians.
+The sampler in `/app/submission.py` (when running on a host checkout outside Docker, edit your copy of `environment/baseline.py`) fails exact-draw invariance because it switches between HMC and RWM based on the current radial position without correcting for reverse kernel selection probability. Diagnose and fix it so it preserves the target distribution and mixes well on rotated ill-conditioned Gaussians.
 
-Verify locally with:
+Quick dev smoke check (fast, looser than final hidden grading):
 ```bash
 uv run apin invariance --sampler /app/submission.py --dim 4
 ```
-Do not edit `harness/` or `models/`. Only edit `/app/submission.py`.
+Final grading uses `harbor/verify.py rewind --task-id s3-position-gated-mh --submission <path>` on hidden seeds. Do not edit `harness/` or `models/`. Only edit `/app/submission.py`.
