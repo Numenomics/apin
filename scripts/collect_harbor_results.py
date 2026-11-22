@@ -298,7 +298,15 @@ def parse_trial_dir(trial_dir: Path, pricing: dict[str, Any], *, release_tag: st
     # Distinguish real agent timeouts / late rate-limits (partial work on disk may be a real pass!)
     # from 0-edit crashes where an untouched optimization baseline would falsely score 1.0.
     oc_raw_text = (trial_dir / "agent" / "opencode-v2.txt").read_text(encoding="utf-8", errors="replace") if (trial_dir / "agent" / "opencode-v2.txt").is_file() else ""
-    rate_limited = ("provider.free-limit" in oc_raw_text) or ("FreeUsageLimitError" in oc_raw_text) or ("rate limit" in oc_raw_text.lower() and exc_type == "NonZeroAgentExitCodeError")
+    oc_low = oc_raw_text.lower()
+    rate_limited = (
+        ("provider.free-limit" in oc_raw_text)
+        or ("provider.quota" in oc_raw_text)
+        or ("provider.rate-limit" in oc_raw_text)
+        or ("FreeUsageLimitError" in oc_raw_text)
+        or ("usage limit reached" in oc_low)
+        or ("rate limit" in oc_low and exc_type in ("NonZeroAgentExitCodeError", "ApiRateLimitError"))
+    )
     infra_error = bool(
         (exc_type == "NonZeroAgentExitCodeError" and tool_calls == 0)
         or (rate_limited and tool_calls == 0)
