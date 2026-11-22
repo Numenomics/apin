@@ -67,3 +67,25 @@ def test_a4_autoresearch_dry_run_works(tmp_path):
     )
     assert row["decision"] == "dry_run_ok"
     assert row["lint_ok"] is True
+
+
+def test_a4_parent_on_nonzero_axis_preserves_jacobian_contract():
+    """Regression: when _parent_scan picks c > 0, tri_a[0]/tri_b[0] must stay 0 so ldj matches FD."""
+    sub_path = ROOT / "autoresearch" / "lanes" / "A4" / "submission.py"
+    mod = judge.load_a4_submission(sub_path)
+    rng = np.random.default_rng(123)
+    n, d = 300, 6
+    # Put the funnel parent on axis c = 2 with larger variance so PCA/direct scan lands on c > 0.
+    v = rng.normal(0.0, 2.0, size=n)
+    S = np.zeros((n, d))
+    S[:, 2] = v
+    for j in range(d):
+        if j != 2:
+            S[:, j] = rng.normal(0.0, np.exp(0.5 * v))
+    t = mod._fit_affine(S)
+    t = mod._fit_nonlinear(t, S)
+    assert t["tri_a"][0] == 0.0
+    assert t["tri_b"][0] == 0.0
+    assert np.any(t["tri_a"][1:] > 0.0)
+    judge.validate_a4_transport(mod, t, d, np.random.default_rng(7))
+

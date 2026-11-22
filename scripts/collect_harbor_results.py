@@ -309,9 +309,12 @@ def parse_trial_dir(trial_dir: Path, pricing: dict[str, Any], *, release_tag: st
         passed = False
         reward = 0.0
 
+    m_rel = re.match(r"^(bench-v\d+\.\d+\.\d+)\b", trial_dir.parent.name)
+    trial_release = m_rel.group(1) if m_rel else release_tag
+
     return {
         "trial_id": str(res.get("trial_name") or trial_dir.name),
-        "release": release_tag,
+        "release": trial_release,
         "model": model,
         "effort": effort,
         "config_key": f"{model}#{effort}",

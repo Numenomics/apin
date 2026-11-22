@@ -56,7 +56,7 @@ def forward(transport_tuning, z):
     y[1:] = e[1:] * u[1:] + t["tri_c"][1:] * u[0] ** 2 + t["tri_m"][1:] * u[0] + t["tri_g"][1:]
     theta = t["loc"] + t["chol"] @ y
     log_sp, _ = _sas_log_terms(t["delta"], z_arr)
-    ldj = t["logdet0"] + float(np.sum(log_sp)) + float(np.sum(t["tri_a"] * u[0] + t["tri_b"]))
+    ldj = t["logdet0"] + float(np.sum(log_sp)) + float(np.sum(t["tri_a"][1:] * u[0] + t["tri_b"][1:]))
     return theta, ldj
 
 
@@ -75,7 +75,7 @@ def pullback_grad(transport_tuning, z, grad_theta):
     w = e * v
     w[0] = v[0] + float(np.dot(coeff0, v[1:]))
     gz = sp * w
-    gz[0] += sp[0] * float(np.sum(t["tri_a"]))
+    gz[0] += sp[0] * float(np.sum(t["tri_a"][1:]))
     return gz + dlog_sp
 
 
@@ -252,9 +252,13 @@ def _fit_nonlinear(t, S):
     tri_b = np.zeros(d)
     if tri_on:
         for j in range(d):
-            if j != c and sig[j] and 0.05 <= slope[j] <= 3.0:
+            # j == 0 is a hardcoded identity in forward/inverse (parent coordinate), so its
+            # scale coefficients must stay zero or ldj/pullback_grad double-count.
+            if 0 < j != c and sig[j] and 0.05 <= slope[j] <= 3.0:
                 tri_a[j] = slope[j]
                 tri_b[j] = float(np.median(LW[:, j] - slope[j] * wc)) - _MED_ABS_N
+        tri_a[0] = 0.0
+        tri_b[0] = 0.0
         if not np.any(tri_a > 0.0):
             tri_a[:] = 0.0
             tri_b[:] = 0.0
