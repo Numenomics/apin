@@ -293,6 +293,21 @@ def parse_trial_dir(trial_dir: Path, pricing: dict[str, Any], *, release_tag: st
 
     exc = res.get("exception_info")
     error = f"{exc.get('exception_type')}: {exc.get('exception_message')}" if isinstance(exc, dict) else None
+    exc_type = exc.get("exception_type") if isinstance(exc, dict) else None
+
+    # Distinguish real agent timeouts / late rate-limits (partial work on disk may be a real pass!)
+    # from 0-edit crashes where an untouched optimization baseline would falsely score 1.0.
+    oc_raw_text = (trial_dir / "agent" / "opencode-v2.txt").read_text(encoding="utf-8", errors="replace") if (trial_dir / "agent" / "opencode-v2.txt").is_file() else ""
+    rate_limited = ("provider.free-limit" in oc_raw_text) or ("FreeUsageLimitError" in oc_raw_text) or ("rate limit" in oc_raw_text.lower() and exc_type == "NonZeroAgentExitCodeError")
+    infra_error = bool(
+        (exc_type == "NonZeroAgentExitCodeError" and tool_calls == 0)
+        or (rate_limited and tool_calls == 0)
+        or (rate_limited and not passed)
+        or exc_type in ("EnvironmentStartTimeoutError", "VerifierOutputParseError")
+    )
+    if infra_error:
+        passed = False
+        reward = 0.0
 
     return {
         "trial_id": str(res.get("trial_name") or trial_dir.name),
@@ -304,6 +319,8 @@ def parse_trial_dir(trial_dir: Path, pricing: dict[str, Any], *, release_tag: st
         "task_id": task_id,
         "category": category,
         "passed": passed,
+        "infra_error": infra_error,
+        "rate_limited": rate_limited,
         "reward": round(reward, 6),
         "speedup": reward_data.get("speedup"),
         "soft_min_eff": reward_data.get("soft_min_eff"),
@@ -734,8 +751,8 @@ function renderMatrix(rows) {
       if (!t) {
         html += `<td class="num"><span class="hint">—</span></td>`;
       } else {
-        const cls = !t.passed ? "cell-fail" : (cat === "optimize" && t.reward > 1.02 ? "cell-win" : "cell-pass");
-        const txt = cat === "rewind" ? (t.passed ? "PASS" : "FAIL") : (t.passed ? t.reward.toFixed(3) + "x" : "FAIL");
+        const cls = t.infra_error ? "cell-fail" : (!t.passed ? "cell-fail" : (cat === "optimize" && t.reward > 1.02 ? "cell-win" : "cell-pass"));
+        const txt = t.rate_limited ? "429" : (t.infra_error ? "ERR" : (cat === "rewind" ? (t.passed ? "PASS" : "FAIL") : (t.passed ? t.reward.toFixed(3) + "x" : "FAIL")));
         html += `<td class="num"><button class="cell-btn ${cls}" data-key="${esc(r.config_key + "||" + tid)}">${txt}</button></td>`;
       }
     }
