@@ -141,7 +141,7 @@ uv run apin score --models public --reps 3 --baseline cmdstan --track L1 --submi
 | `codex/` | Short cards on sampling techniques, cited by trials. |
 | `upstream/` | Stan, stan-math, stanc3, CmdStan, BridgeStan, walnutpie and posteriordb, pinned as submodules. |
 | `results/` | Tables and notes from the 2026 campaign that preceded this benchmark. [REPORT.md](REPORT.md) summarises it. |
-| `tests/` | `uv run pytest` runs the fast suite in about five minutes; `-m slow` adds end-to-end model runs. |
+| `tests/` | `uv run pytest` runs the fast suite in about ten minutes; `-m slow` adds end-to-end model runs. |
 
 ## Documents
 
