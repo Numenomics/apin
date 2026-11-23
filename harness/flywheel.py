@@ -70,27 +70,57 @@ def strict_json(value: Any) -> str:
     return json.dumps(clean(value), sort_keys=True, allow_nan=False)
 
 
-def token_path() -> Path:
-    """Where `apin autoresearch register` saves the personal token."""
-    override = os.environ.get(ENV_TOKEN_FILE)
-    if override:
-        return Path(override).expanduser()
+def _user_token_path() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     return Path(base) / "apin" / "flywheel_token"
 
 
+def token_path() -> Path:
+    """Where `apin autoresearch register` saves the personal token: inside this checkout.
+
+    A token is one contributor. Two agents on one machine each clone the repository, so a token
+    kept with the clone gives each its own handle; a token kept in the user's home directory made
+    the second agent post under the first one's name. `APIN_FLYWHEEL_TOKEN_FILE` overrides."""
+    override = os.environ.get(ENV_TOKEN_FILE)
+    if override:
+        return Path(override).expanduser()
+    return Path(__file__).resolve().parent.parent / ".apin" / "flywheel_token"
+
+
 def _read_token_file() -> str | None:
-    path = token_path()
+    # The checkout's own token first; the per-user file is read only for tokens saved before
+    # tokens moved into the checkout, and never when the file is named explicitly.
+    paths = [token_path()] if os.environ.get(ENV_TOKEN_FILE) else [token_path(), _user_token_path()]
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        cleaned = text.strip().splitlines()[0].strip() if text.strip() else ""
+        if cleaned:
+            return cleaned
+    return None
+
+
+def identity_path() -> Path:
+    return token_path().with_name("flywheel_identity.json")
+
+
+def save_identity(handle: str, agent: str | None, model: str | None) -> None:
+    """Remember who registered this checkout, so posted trials name their model."""
+    identity_path().write_text(json.dumps({"handle": handle, "agent": agent, "model": model}) + "\n", encoding="utf-8")
+
+
+def read_identity() -> dict[str, Any]:
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    cleaned = text.strip().splitlines()[0].strip() if text.strip() else ""
-    return cleaned or None
+        data = json.loads(identity_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def save_token(token: str, *, path: Path | None = None, force: bool = False) -> Path:
-    """Write the token to the user config file with mode 0600 (directory 0700)."""
+    """Write the token to its file with mode 0600 (directory 0700)."""
     target = path or token_path()
     if target.exists() and not force:
         raise FileExistsError(str(target))
@@ -720,7 +750,7 @@ def post_trial_row(
         run_id=run_id,
         parent_id=parent_id,
         parents=parents,
-        agent_model=agent_model or os.environ.get("APIN_AGENT_MODEL"),
+        agent_model=agent_model or os.environ.get("APIN_AGENT_MODEL") or read_identity().get("model"),
         author=author or os.environ.get("APIN_AUTHOR"),
         source=source,
     )

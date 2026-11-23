@@ -95,18 +95,36 @@ def test_token_comes_from_env_first_then_the_0600_file(_isolated: Path, monkeypa
     assert flywheel._resolve_token("") is None  # explicit "no token" still wins
 
 
-def test_suite_never_sees_real_credentials_and_default_path_follows_xdg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_token_lives_in_the_checkout_and_the_user_file_is_only_a_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # tests/conftest.py points every test at an empty token file and clears the environment token.
     assert "APIN_FLYWHEEL_TOKEN" not in os.environ
     assert not flywheel.token_path().exists() and flywheel._resolve_token() is None
 
-    # Without the override the token is read from the user's config directory.
+    # Without the override the token belongs to the checkout, so two clones are two contributors.
     monkeypatch.delenv("APIN_FLYWHEEL_TOKEN_FILE", raising=False)
+    repo_token = Path(flywheel.__file__).resolve().parent.parent / ".apin" / "flywheel_token"
+    assert flywheel.token_path() == repo_token
+
+    # A token saved in the user's config directory before this change still works as a fallback...
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     (tmp_path / "apin").mkdir()
     (tmp_path / "apin" / "flywheel_token").write_text("apfw_user_token\n")
-    assert flywheel.token_path() == tmp_path / "apin" / "flywheel_token"
-    assert flywheel._resolve_token() == "apfw_user_token"
+    if not repo_token.exists():
+        assert flywheel._resolve_token() == "apfw_user_token"
+    # ...but never when a token file is named explicitly.
+    monkeypatch.setenv("APIN_FLYWHEEL_TOKEN_FILE", str(tmp_path / "none"))
+    assert flywheel._resolve_token() is None
+
+
+def test_registered_model_is_sent_with_trials(_isolated: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("APIN_AGENT_MODEL", raising=False)
+    flywheel.save_token("apfw_x")
+    flywheel.save_identity("ada", "claude-code", "claude-opus-5-5")
+    assert flywheel.read_identity()["model"] == "claude-opus-5-5"
+    sent: dict[str, Any] = {}
+    monkeypatch.setattr(flywheel, "post_node", lambda payload, **kw: sent.update(payload) or {"ok": True})
+    flywheel.post_trial_row({"trial_id": "T0001", "lane": "A1", "decision": "keep_baseline"}, run_id="r1")
+    assert sent["agent_model"] == "claude-opus-5-5"
 
 
 def test_cli_register_saves_token_once_and_refuses_to_clobber(
