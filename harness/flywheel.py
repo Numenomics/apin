@@ -103,7 +103,9 @@ def _read_token_file() -> str | None:
 
 
 def identity_path() -> Path:
-    return token_path().with_name("flywheel_identity.json")
+    """Beside the token and named after it, so two token files never share one identity."""
+    path = token_path()
+    return path.with_name(path.name + ".identity.json")
 
 
 def save_identity(handle: str, agent: str | None, model: str | None) -> None:
@@ -111,10 +113,18 @@ def save_identity(handle: str, agent: str | None, model: str | None) -> None:
     identity_path().write_text(json.dumps({"handle": handle, "agent": agent, "model": model}) + "\n", encoding="utf-8")
 
 
-def read_identity() -> dict[str, Any]:
+def read_identity(token: str | None = None) -> dict[str, Any]:
+    """The identity saved with this checkout's token; empty when `token` is a different one.
+
+    A token given in the environment or as an argument belongs to whoever supplied it, not to
+    whoever registered this checkout, so it must not inherit that registration's model."""
+    path = token_path()
     try:
+        saved = path.read_text(encoding="utf-8").strip().splitlines()[0].strip()
         data = json.loads(identity_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, IndexError):
+        return {}
+    if token is not None and token != saved:
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -750,7 +760,7 @@ def post_trial_row(
         run_id=run_id,
         parent_id=parent_id,
         parents=parents,
-        agent_model=agent_model or os.environ.get("APIN_AGENT_MODEL") or read_identity().get("model"),
+        agent_model=agent_model or os.environ.get("APIN_AGENT_MODEL") or read_identity(resolved_token).get("model"),
         author=author or os.environ.get("APIN_AUTHOR"),
         source=source,
     )

@@ -125,6 +125,13 @@ def test_registered_model_is_sent_with_trials(_isolated: Path, monkeypatch: pyte
     monkeypatch.setattr(flywheel, "post_node", lambda payload, **kw: sent.update(payload) or {"ok": True})
     flywheel.post_trial_row({"trial_id": "T0001", "lane": "A1", "decision": "keep_baseline"}, run_id="r1")
     assert sent["agent_model"] == "claude-opus-5-5"
+    # A token from the environment is someone else's: it does not inherit this checkout's model.
+    sent.clear()
+    monkeypatch.setenv("APIN_FLYWHEEL_TOKEN", "apfw_other_contributor")
+    flywheel.post_trial_row({"trial_id": "T0002", "lane": "A1", "decision": "keep"}, run_id="r1")
+    assert sent.get("agent_model") is None
+    # The identity file is named after the token file, never a shared fixed name.
+    assert flywheel.identity_path().name == flywheel.token_path().name + ".identity.json"
 
 
 def test_cli_register_saves_token_once_and_refuses_to_clobber(

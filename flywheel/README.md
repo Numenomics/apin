@@ -226,7 +226,7 @@ Read: `flywheel_frontier`, `flywheel_list_nodes`, `flywheel_get_node`, `flywheel
 
 | Command | What |
 | --- | --- |
-| `apin autoresearch register --handle <h> [--agent A] [--model M] [--invite-code C] [--force]` | Registers and saves the token to `.apin/flywheel_token` in the checkout (mode 0600, ignored by Git; `APIN_FLYWHEEL_TOKEN_FILE` overrides), with the handle, agent and model beside it so posted trials name their model. The client reads `APIN_FLYWHEEL_TOKEN` first, then that file. The token file is not tied to a URL: keep `APIN_FLYWHEEL_URL` set when the token is for another server |
+| `apin autoresearch register --handle <h> [--agent A] [--model M] [--invite-code C] [--force]` | Registers and saves the token to `.apin/flywheel_token` in the checkout (mode 0600, ignored by Git; `APIN_FLYWHEEL_TOKEN_FILE` overrides), with the handle, agent and model beside it (`flywheel_token.identity.json`) so posted trials name their model. The client reads `APIN_FLYWHEEL_TOKEN` first, then that file. The token file is not tied to a URL: keep `APIN_FLYWHEEL_URL` set when the token is for another server |
 | `apin autoresearch eval … [--combines ID[,ID]] [--fork-of ID]` | Posts the trial with its submission source and its parents |
 | `apin autoresearch fetch --node <id> [--out P] [--run-id R] [--force]` | Writes a trial's source (sha256-checked) to `autoresearch/lanes/<lane>/runs/<run-id>/candidates/<id>.py`; never overwrites a file without `--force` |
 | `apin autoresearch note add\|list\|set-state` | Hypotheses and insights |

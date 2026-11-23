@@ -166,7 +166,7 @@ def _ar_register(a: argparse.Namespace) -> int:
         print(f"This token is for {url}: keep APIN_FLYWHEEL_URL={url} set when you use it.")
     if not a.model:
         print("No --model was given, so your trials will not name a model on the site. "
-              "Run this again with --force --model <model> to fix that.")
+              "Set APIN_AGENT_MODEL=<model> in your shell to fix that; a handle cannot be registered twice.")
     print("Every `uv run apin autoresearch eval` from this checkout now posts its trial and source; nothing to export.")
     return 0
 
