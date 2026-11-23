@@ -98,6 +98,10 @@ function requests(n, target) {
     ["/api/runs?limit=60 (max page)", true, get("/api/runs?limit=60")],
     ["/api/nodes (first page)", true, get("/api/nodes")],
     ["/api/nodes?outcome=kept&stan=1", true, get("/api/nodes?outcome=kept&stan=1")],
+    ["/api/nodes?lane=A1&outcome=archived", true, get("/api/nodes?lane=A1&outcome=archived")],
+    ["/api/nodes?decision=never_used (zero match)", true, get("/api/nodes?decision=never_used")],
+    ["/api/nodes?lane=A1&state=verified (sparse)", true, get("/api/nodes?lane=A1&state=verified")],
+    ["/api/nodes?model=qwen-4&decision=keep (sparse)", true, get("/api/nodes?model=qwen-4&decision=keep")],
     ["/api/nodes?q=james", true, get("/api/nodes?q=james")],
     ["/api/nodes/:id", true, get(`/api/nodes/${encodeURIComponent(target)}`)],
     ["/api/frontier", true, get("/api/frontier")],
@@ -158,13 +162,26 @@ function sqliteDb(n) {
         const info = sqlite.prepare(query).run(...values);
         return { results: [], success: true, meta: { changes: Number(info.changes ?? 0) } };
       }),
+    execSync: () => {
+      const results = sqlite.prepare(query).all(...values).map((r) => ({ ...r }));
+      return { results, success: true, meta: { changes: Number(sqlite.prepare("SELECT changes() AS c").get().c) } };
+    },
   });
   const db = {
     prepare: (q) => stmt(q),
+    // Like D1: one transaction, all or nothing.
     async batch(stmts) {
-      const res = [];
-      for (const s of stmts) res.push(await s.all());
-      return res;
+      return timed(() => {
+        sqlite.exec("BEGIN");
+        try {
+          const res = stmts.map((st) => st.execSync());
+          sqlite.exec("COMMIT");
+          return res;
+        } catch (err) {
+          sqlite.exec("ROLLBACK");
+          throw err;
+        }
+      });
     },
   };
   return { db, clock, target };
@@ -249,8 +266,9 @@ async function rowsRead(getPlatformProxy, n) {
     const d1 = proxy.env.DB;
     for (const sql of [SCHEMA, ...MIGRATIONS]) for (const s of splitSql(sql)) await d1.prepare(s).run();
     const { statements, target } = synthesize(n);
-    for (let i = 0; i < statements.length; i += 500) {
-      await d1.batch(statements.slice(i, i + 500).map(([sql, params]) => d1.prepare(sql).bind(...params)));
+    // Batches of 100: the local runtime drops the connection on long single batches.
+    for (let i = 0; i < statements.length; i += 100) {
+      await d1.batch(statements.slice(i, i + 100).map(([sql, params]) => d1.prepare(sql).bind(...params)));
     }
     const counter = { rows: 0 };
     const env = envFor(countingD1(d1, counter));
@@ -274,12 +292,16 @@ async function rowsRead(getPlatformProxy, n) {
 const RUN_SLICE = LIMITS.runsLimitMax * LIMITS.runNodes;
 const SITE_BOUNDS = {
   "/api/overview":
-    LIMITS.overviewLanes * (LIMITS.runStepsWindow + LIMITS.laneStanWindow + 40) +
+    LIMITS.overviewLanes * (LIMITS.runStepsWindow + 45) +
     LIMITS.alignmentPoints * 2 + LIMITS.overviewModels * 2 + LIMITS.overviewClaims + 200,
   "/api/runs": LIMITS.runsLimitDefault * (LIMITS.runNodes + 1) + 200,
   "/api/runs?limit=60 (max page)": RUN_SLICE + LIMITS.runsLimitMax + 200,
   "/api/nodes (first page)": LIMITS.nodesLimitDefault * 2 + 50,
-  "/api/nodes?outcome=kept&stan=1": (LIMITS.countCap + 1) * 2 + LIMITS.nodesLimitDefault * 2 + 50,
+  "/api/nodes?outcome=kept&stan=1": LIMITS.searchWindow * 2 + 50,
+  "/api/nodes?lane=A1&outcome=archived": LIMITS.nodesLimitDefault * 2 + 50,
+  "/api/nodes?decision=never_used (zero match)": LIMITS.searchWindow * 2 + 50,
+  "/api/nodes?lane=A1&state=verified (sparse)": LIMITS.searchWindow * 2 + 50,
+  "/api/nodes?model=qwen-4&decision=keep (sparse)": LIMITS.searchWindow * 2 + 50,
   "/api/nodes?q=james": LIMITS.searchWindow * 3 + 50,
   "/api/nodes/:id": LIMITS.nodeChildren * 2 + LIMITS.nodeNotes * 2 + 100,
   "/api/frontier": LIMITS.overviewLanes * 40 + 50,

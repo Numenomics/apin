@@ -1,6 +1,7 @@
 -- 0003: fixes from the Worker review.
 --
---   * run_stats.author / author_tier now follow the run's earliest surviving trial whenever
+--   * run_stats.author / author_tier are those of the run's earliest surviving trial (even when
+--     that trial has no author), refreshed whenever
 --     the run's membership changes (the three nodes triggers from 0002 are recreated).
 --   * lane_stats: one row per lane, kept current by triggers on run_stats, so totals, lane
 --     lists and counts read a row per lane instead of a row per run.
@@ -103,9 +104,9 @@ CREATE TRIGGER nodes_run_stats_ai AFTER INSERT ON nodes BEGIN
     agent_model = coalesce(new.agent_model, agent_model),
     first_at = (SELECT MIN(created_at) FROM nodes WHERE lane = new.lane AND run_id = new.run_id),
     last_at = (SELECT MAX(created_at) FROM nodes WHERE lane = new.lane AND run_id = new.run_id),
-    author = (SELECT author FROM nodes WHERE lane = new.lane AND run_id = new.run_id AND author IS NOT NULL
+    author = (SELECT author FROM nodes WHERE lane = new.lane AND run_id = new.run_id
                 ORDER BY created_at, id LIMIT 1),
-    author_tier = (SELECT author_tier FROM nodes WHERE lane = new.lane AND run_id = new.run_id AND author IS NOT NULL
+    author_tier = (SELECT author_tier FROM nodes WHERE lane = new.lane AND run_id = new.run_id
                      ORDER BY created_at, id LIMIT 1),
     base_eff = (SELECT soft_min_eff FROM nodes WHERE lane = new.lane AND run_id = new.run_id
                   AND decision IN ('keep', 'keep_baseline', 'keep_simpler', 'keep_incumbent_failed')
@@ -124,9 +125,9 @@ CREATE TRIGGER nodes_run_stats_ad AFTER DELETE ON nodes BEGIN
     stan = stan - (coalesce(old.real_stan_total, 0) > 0),
     first_at = (SELECT MIN(created_at) FROM nodes WHERE lane = old.lane AND run_id = old.run_id),
     last_at = (SELECT MAX(created_at) FROM nodes WHERE lane = old.lane AND run_id = old.run_id),
-    author = (SELECT author FROM nodes WHERE lane = old.lane AND run_id = old.run_id AND author IS NOT NULL
+    author = (SELECT author FROM nodes WHERE lane = old.lane AND run_id = old.run_id
                 ORDER BY created_at, id LIMIT 1),
-    author_tier = (SELECT author_tier FROM nodes WHERE lane = old.lane AND run_id = old.run_id AND author IS NOT NULL
+    author_tier = (SELECT author_tier FROM nodes WHERE lane = old.lane AND run_id = old.run_id
                      ORDER BY created_at, id LIMIT 1),
     base_eff = (SELECT soft_min_eff FROM nodes WHERE lane = old.lane AND run_id = old.run_id
                   AND decision IN ('keep', 'keep_baseline', 'keep_simpler', 'keep_incumbent_failed')
@@ -165,9 +166,9 @@ BEGIN
     first_at = (SELECT MIN(created_at) FROM nodes n WHERE n.lane = run_stats.lane AND n.run_id = run_stats.run_id),
     last_at = (SELECT MAX(created_at) FROM nodes n WHERE n.lane = run_stats.lane AND n.run_id = run_stats.run_id),
     author = (SELECT author FROM nodes n WHERE n.lane = run_stats.lane AND n.run_id = run_stats.run_id
-                AND n.author IS NOT NULL ORDER BY n.created_at, n.id LIMIT 1),
+                ORDER BY n.created_at, n.id LIMIT 1),
     author_tier = (SELECT author_tier FROM nodes n WHERE n.lane = run_stats.lane AND n.run_id = run_stats.run_id
-                     AND n.author IS NOT NULL ORDER BY n.created_at, n.id LIMIT 1),
+                     ORDER BY n.created_at, n.id LIMIT 1),
     base_eff = (SELECT soft_min_eff FROM nodes n WHERE n.lane = run_stats.lane AND n.run_id = run_stats.run_id
                   AND n.decision IN ('keep', 'keep_baseline', 'keep_simpler', 'keep_incumbent_failed')
                   AND +n.soft_min_eff > 0 ORDER BY n.created_at, n.id LIMIT 1)
@@ -184,9 +185,9 @@ END;
 
 UPDATE run_stats SET
   author = (SELECT author FROM nodes n WHERE n.lane = run_stats.lane AND n.run_id = run_stats.run_id
-              AND n.author IS NOT NULL ORDER BY n.created_at, n.id LIMIT 1),
+              ORDER BY n.created_at, n.id LIMIT 1),
   author_tier = (SELECT author_tier FROM nodes n WHERE n.lane = run_stats.lane AND n.run_id = run_stats.run_id
-                   AND n.author IS NOT NULL ORDER BY n.created_at, n.id LIMIT 1);
+                   ORDER BY n.created_at, n.id LIMIT 1);
 
 INSERT OR IGNORE INTO lane_stats (lane, trials, kept, archived, stan, runs, latest_at)
   SELECT lane, SUM(trials), SUM(kept), SUM(archived), SUM(stan), COUNT(*), MAX(last_at)
@@ -202,3 +203,22 @@ UPDATE flywheel_counters SET value = (SELECT COUNT(*) FROM author_stats) WHERE n
 
 -- Newest notes of a lane, for the bounded search window.
 CREATE INDEX IF NOT EXISTS idx_notes_lane_updated ON notes (lane, updated_at, id);
+
+-- /api/nodes reads each filter through an index (see DRIVING_INDEXES in src/index.ts).
+CREATE INDEX IF NOT EXISTS idx_nodes_runid_created ON nodes (run_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_nodes_kept_created ON nodes (created_at, id)
+  WHERE decision IN ('keep', 'keep_baseline', 'keep_simpler', 'keep_incumbent_failed');
+CREATE INDEX IF NOT EXISTS idx_nodes_archived_created ON nodes (created_at, id) WHERE decision = 'archive_only';
+CREATE INDEX IF NOT EXISTS idx_nodes_discarded_created ON nodes (created_at, id)
+  WHERE decision NOT IN ('keep', 'keep_baseline', 'keep_simpler', 'keep_incumbent_failed', 'archive_only');
+CREATE INDEX IF NOT EXISTS idx_nodes_lane_kept ON nodes (lane, created_at, id)
+  WHERE decision IN ('keep', 'keep_baseline', 'keep_simpler', 'keep_incumbent_failed');
+CREATE INDEX IF NOT EXISTS idx_nodes_lane_archived ON nodes (lane, created_at, id) WHERE decision = 'archive_only';
+CREATE INDEX IF NOT EXISTS idx_nodes_lane_discarded ON nodes (lane, created_at, id)
+  WHERE decision NOT IN ('keep', 'keep_baseline', 'keep_simpler', 'keep_incumbent_failed', 'archive_only');
+
+-- Overview `stan`: the lane's best real-Stan pass share (newest on ties), read as one index row.
+-- The expression must match laneStanStmt() in src/index.ts exactly.
+CREATE INDEX IF NOT EXISTS idx_nodes_stan_share ON nodes
+  (lane, (CAST(coalesce(real_stan_passed, 0) AS REAL) / real_stan_total) DESC, created_at DESC, id DESC)
+  WHERE real_stan_total > 0;

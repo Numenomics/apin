@@ -750,15 +750,19 @@ def check_target_invariance(
     overhead_ratio = max(0.0, total_elapsed - total_eval_s) / total_eval_s if total_eval_s > 0 else 0.0
 
     passed = invariance_ok and mixing_ok and adapt_cap_ok
-    reason = ""
+    # Every gate that failed is named, joined by "; ". A caller that treats statistical rejections
+    # differently (harbor/verify.py reruns them on a second seed) must be able to see that the same
+    # target also got stuck or blew the adaptation budget.
+    failures = []
     if not omnibus_ok:
-        reason = f"invariance rejected on {worst_fn}: |z|={max_z:.2f} > {z_thresh:.2f} (b2_max={b2_max:.4g})"
-    elif not rank_ok:
-        reason = rank_reason
-    elif not mixing_ok:
-        reason = f"stuck/identity kernel: late mean latent step {mean_move:.3g} < {min_movement_sd:.3g}"
-    elif not adapt_cap_ok:
-        reason = f"adapt cost {adapt_cost:.0f} exceeded cap {max_adapt_cost:.0f}"
+        failures.append(f"invariance rejected on {worst_fn}: |z|={max_z:.2f} > {z_thresh:.2f} (b2_max={b2_max:.4g})")
+    if not rank_ok:
+        failures.append(rank_reason)
+    if not mixing_ok:
+        failures.append(f"stuck/identity kernel: late mean latent step {mean_move:.3g} < {min_movement_sd:.3g}")
+    if not adapt_cap_ok:
+        failures.append(f"adapt cost {adapt_cost:.0f} exceeded cap {max_adapt_cost:.0f}")
+    reason = "; ".join(failures)
 
     return InvarianceResult(
         target=target.family,

@@ -435,6 +435,9 @@ def test_cli_refuses_a_lane_name_that_would_move_a_write(monkeypatch: pytest.Mon
         with pytest.raises(ValueError):
             cli._local_lane(bad)
     assert cli._local_lane("A1") == "A1"
+    # A trial id made only of dots must not become `.` or `..` in a path.
+    assert cli._safe_name("..") not in ("", ".", "..") and cli._safe_name("...").startswith("trial_")
+    assert cli._safe_name("A1:run:T0001") == "A1_run_T0001"
 
     monkeypatch.setattr(flywheel, "get_source", lambda node_id, **kw: {"source": "x = 1\n", "sha256": __import__("hashlib").sha256(b"x = 1\n").hexdigest(), "size": 6})
     monkeypatch.setattr(flywheel, "get_node", lambda node_id, **kw: {"node": {"id": node_id, "lane": "../../../../tmp/apin_escape"}})

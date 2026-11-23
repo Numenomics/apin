@@ -435,7 +435,7 @@
       state.ledger.next = page.next_offset;
       state.ledger.count = page.count;
       state.ledger.capped = Boolean(page.count_capped);
-      state.ledger.window = page.window_truncated ? page.search_window : 0;
+      state.ledger.window = page.window_truncated ? page.filter_window || page.search_window || 0 : 0;
     } catch {
       if (seq !== state.ledger.seq) return;
       state.ledger.nodes = [];
@@ -451,11 +451,11 @@
   function renderLedger(filtered) {
     const list = state.ledger.nodes;
     const total = state.ledger.count;
-    /* A filtered count is exact up to a cap; a search covers the newest trials only. The page says so. */
+    /* Some filters and every search look only at the newest trials; the page says so when older ones exist. */
     const many = state.ledger.capped ? fmt.int(total) + " or more" : fmt.int(total);
     $("#ledger-count").textContent =
       `${filtered ? many + " matching" : "All " + many} trials, newest first${list.length < total || state.ledger.capped ? `; showing ${fmt.int(list.length)}` : ""}.` +
-      (state.ledger.window ? ` The search covers the newest ${fmt.int(state.ledger.window)} trials.` : "");
+      (state.ledger.window ? ` These filters cover the newest ${fmt.int(state.ledger.window)} trials.` : "");
     $("#ledger-more").hidden = state.ledger.next === null;
     if (!list.length) {
       $("#ledger").innerHTML = '<tbody><tr><td class="empty">No trial matches these filters. Clear the search or pick another lane.</td></tr></tbody>';

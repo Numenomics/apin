@@ -290,5 +290,7 @@ def test_collector_termination_rule_does_not_score_runs_that_never_had_a_fair_ch
     assert kind("ApiRateLimitError", rate_limited=False, tool_calls=9) == "provider_limit"
     # An exception with no verifier result cannot be an invalid attempt: nothing was graded.
     assert kind("SomeNewHarborError", rate_limited=False, tool_calls=9, graded=False) == "infrastructure"
+    assert kind("AgentTimeoutError", rate_limited=False, tool_calls=9, graded=False) == "infrastructure"
+    assert kind("AgentTimeoutError", rate_limited=True, tool_calls=9, graded=False) == "provider_limit"
     assert kind("NonZeroAgentExitCodeError", rate_limited=False, tool_calls=9) == "agent_error"
     assert {"provider_limit", "infrastructure", "agent_crash"} == set(mod.INTERRUPTED)

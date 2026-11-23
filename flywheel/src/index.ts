@@ -110,7 +110,6 @@ export const LIMITS = {
   nodeNotes: 20,
   // D1 rows read per request (the free plan's daily read quota).
   runStepsWindow: 500,
-  laneStanWindow: 200,
   countCap: 1000,
   searchWindow: 2000,
   searchOffsetMax: 500,
@@ -339,9 +338,9 @@ const RESERVED_HANDLES = new Set([
 ]);
 const HANDLE_RULE = "2-40 chars matching ^[a-zA-Z0-9][a-zA-Z0-9_.-]+$";
 /** Identifiers reach shells and file paths on clients: letters, digits and `_.:-` only. */
-const ID_RE = /^[A-Za-z0-9_.:-]{1,200}$/;
+const ID_RE = /^(?=.*[A-Za-z0-9])[A-Za-z0-9_.:-]{1,200}$/;
 const LANE_RE = /^[A-Za-z0-9]{1,8}$/;
-const ID_RULE = "letters, digits and _.:- only, at most 200 characters";
+const ID_RULE = "letters, digits and _.:- only, at least one letter or digit, at most 200 characters";
 const LANE_RULE = "letters and digits only, at most 8 characters";
 
 /** 400 for the first present field that is not a safe identifier (lane fields use the lane rule). */
@@ -781,6 +780,14 @@ function stripRaw(n: NodeRecord): NodeWithoutRaw {
   return rest;
 }
 
+/** Runs statements as one D1 batch (one transaction); sequentially where batch() is missing. */
+async function runBatch(db: D1DatabaseLike, stmts: D1PreparedStatement[]): Promise<D1Result[]> {
+  if (db.batch) return db.batch(stmts);
+  const results: D1Result[] = [];
+  for (const s of stmts) results.push(await s.run());
+  return results;
+}
+
 /** Runs read statements in one D1 round trip when the binding supports batch(). */
 async function batchAll<T>(db: D1DatabaseLike, stmts: D1PreparedStatement[]): Promise<T[][]> {
   if (stmts.length === 0) return [];
@@ -903,15 +910,15 @@ interface StanRow {
   real_stan_total: number;
 }
 
+/** The lane's best real-Stan pass share, newest on ties: one row of idx_nodes_stan_share (exact, no window). */
 function laneStanStmt(db: D1DatabaseLike, lane: string): D1PreparedStatement {
   return db
     .prepare(
-      `SELECT * FROM (
-         SELECT id, run_id, trial_id, real_stan_passed, real_stan_total, created_at FROM nodes INDEXED BY idx_nodes_stan_lane
-         WHERE lane = ? AND real_stan_total > 0 ORDER BY created_at DESC, id DESC LIMIT ?
-       ) ORDER BY CAST(coalesce(real_stan_passed, 0) AS REAL) / real_stan_total DESC, created_at DESC, id DESC LIMIT 1`
+      `SELECT id, run_id, trial_id, real_stan_passed, real_stan_total FROM nodes INDEXED BY idx_nodes_stan_share
+       WHERE lane = ? AND real_stan_total > 0
+       ORDER BY CAST(coalesce(real_stan_passed, 0) AS REAL) / real_stan_total DESC, created_at DESC, id DESC LIMIT 1`
     )
-    .bind(lane, LIMITS.laneStanWindow);
+    .bind(lane);
 }
 
 const ALIGNMENT_COLUMNS =
@@ -1029,66 +1036,104 @@ async function edgesAmong(db: D1DatabaseLike, nodes: NodeRecord[]): Promise<DagE
 
 const NODE_OUTCOMES = new Set(["kept", "archived", "discarded"]);
 
-/** WHERE clause for /api/nodes filters, plus a run_stats column when the count can come from there. */
-function nodeFilters(args: Args): { where: string; params: unknown[]; statCount: string | null } | Outcome {
-  const clauses: string[] = [];
-  const params: unknown[] = [];
-  const used = new Set<string>();
-  const eq = (key: string, col: string) => {
+/** SQL for an outcome; the same predicates define the partial outcome indexes (migration 0003). */
+const OUTCOME_SQL: Record<string, string> = {
+  kept: `decision IN (${SQL_OUTCOME_KEPT})`,
+  archived: "decision = 'archive_only'",
+  discarded: `decision NOT IN (${SQL_OUTCOME_KEPT}, 'archive_only')`,
+};
+
+/**
+ * Index-served filter groups for /api/nodes, tried in order: the first group whose filters
+ * are all present drives the read through its index; every other filter is "remaining".
+ */
+const DRIVING_INDEXES: { keys: string[]; index: (outcome: string | null) => string }[] = [
+  { keys: ["lane", "run_id"], index: () => "idx_nodes_run_created" },
+  { keys: ["run_id"], index: () => "idx_nodes_runid_created" },
+  { keys: ["lane", "outcome"], index: (o) => `idx_nodes_lane_${o}` },
+  { keys: ["lane", "stan"], index: () => "idx_nodes_stan_lane" },
+  { keys: ["lane"], index: () => "idx_nodes_lane_created" },
+  { keys: ["outcome"], index: (o) => `idx_nodes_${o}_created` },
+  { keys: ["stan"], index: () => "idx_nodes_stan_created" },
+  { keys: ["model"], index: () => "idx_nodes_model_created" },
+  { keys: [], index: () => "idx_nodes_created" },
+];
+
+interface NodeQueryPlan {
+  /** FROM clause: the driving index, wrapped in a newest-first window when filters remain. */
+  from: string;
+  fromParams: unknown[];
+  where: string;
+  whereParams: unknown[];
+  windowed: boolean;
+  /** lane_stats / run_stats column when the count is exact from the counters. */
+  statCount: string | null;
+  lane: string | null;
+  runId: string | null;
+}
+
+/**
+ * Plans an /api/nodes read whose D1 cost is bounded: one filter group is served by its index;
+ * any other filter (decision, state, verified, q, or a second group) is applied inside the
+ * newest LIMITS.searchWindow trials of that index, so a sparse or empty filter never scans
+ * the table.
+ */
+function planNodeQuery(args: Args): NodeQueryPlan | Outcome {
+  const clauses = new Map<string, { sql: string; params: unknown[] }>();
+  for (const [key, col] of [["lane", "lane"], ["run_id", "run_id"], ["decision", "decision"], ["state", "state"], ["model", "agent_model"]]) {
     const val = toNullableString(args[key]);
-    if (val) {
-      clauses.push(`${col} = ?`);
-      params.push(val);
-      used.add(key);
-    }
-  };
-  eq("lane", "lane");
-  eq("run_id", "run_id");
-  eq("decision", "decision");
-  eq("state", "state");
-  eq("model", "agent_model");
+    if (val) clauses.set(key, { sql: `${col} = ?`, params: [val] });
+  }
   const verified = args.verified;
   if (verified !== undefined && verified !== null && verified !== "") {
-    clauses.push("verified = ?");
-    params.push(toBool(String(verified).toLowerCase()) ? 1 : 0);
-    used.add("verified");
+    clauses.set("verified", { sql: "verified = ?", params: [toBool(String(verified).toLowerCase()) ? 1 : 0] });
   }
   const outcome = toNullableString(args.outcome);
   if (outcome) {
     if (!NODE_OUTCOMES.has(outcome)) return out(400, { error: "invalid_outcome", allowed: [...NODE_OUTCOMES] });
-    clauses.push(
-      outcome === "kept"
-        ? `decision IN (${SQL_OUTCOME_KEPT})`
-        : outcome === "archived"
-          ? "decision = 'archive_only'"
-          : `decision NOT IN (${SQL_OUTCOME_KEPT}, 'archive_only')`
-    );
-    used.add("outcome");
+    clauses.set("outcome", { sql: OUTCOME_SQL[outcome], params: [] });
   }
-  if (toBool(args.stan)) {
-    clauses.push("real_stan_total > 0");
-    used.add("stan");
-  }
+  if (toBool(args.stan)) clauses.set("stan", { sql: "real_stan_total > 0", params: [] });
   const q = toNullableString(args.q);
   if (q) {
     if (q.length > LIMITS.queryChars) return out(400, { error: "field_too_long", field: "q", max: LIMITS.queryChars });
     const terms = searchTerms(q);
     if (terms.length === 0) return out(400, { error: "empty_query" });
-    for (const t of terms) {
-      clauses.push(`${NODE_SEARCH_TEXT} LIKE ? ESCAPE '\\'`);
-      params.push(likePattern(t));
-    }
-    used.add("q");
+    clauses.set("q", {
+      sql: terms.map(() => `${NODE_SEARCH_TEXT} LIKE ? ESCAPE '\\'`).join(" AND "),
+      params: terms.map(likePattern),
+    });
   }
-  // Counts restricted to lane / run_id and at most one of outcome / stan come from run_stats.
+
+  const driving = DRIVING_INDEXES.find((d) => d.keys.every((k) => clauses.has(k))) as (typeof DRIVING_INDEXES)[number];
+  const join = (keys: string[]) => {
+    const parts = keys.map((k) => clauses.get(k) as { sql: string; params: unknown[] });
+    return { sql: parts.map((p) => p.sql).join(" AND "), params: parts.flatMap((p) => p.params) };
+  };
+  const drive = join(driving.keys);
+  const remainingKeys = [...clauses.keys()].filter((k) => !driving.keys.includes(k));
+  const remaining = join(remainingKeys);
+  const indexed = `nodes INDEXED BY ${driving.index(outcome)}${drive.sql ? ` WHERE ${drive.sql}` : ""}`;
+  const windowed = remainingKeys.length > 0;
+
   let statCount: string | null = null;
-  const rest = [...used].filter((k) => k !== "lane" && k !== "run_id");
-  if (rest.length === 0) statCount = "trials";
-  else if (rest.length === 1 && rest[0] === "stan") statCount = "stan";
-  else if (rest.length === 1 && rest[0] === "outcome") {
-    statCount = outcome === "kept" ? "kept" : outcome === "archived" ? "archived" : "trials - kept - archived";
+  const used = [...clauses.keys()];
+  if (!windowed && used.every((k) => ["lane", "run_id", "outcome", "stan"].includes(k)) && !(clauses.has("outcome") && clauses.has("stan"))) {
+    statCount = outcome === "kept" ? "kept" : outcome === "archived" ? "archived" : outcome === "discarded"
+      ? "trials - kept - archived" : clauses.has("stan") ? "stan" : "trials";
   }
-  return { where: clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "", params, statCount };
+  return {
+    // The window orders by created_at alone so every driving index serves it without a sort
+    // (some lack the id column); the page itself still orders by created_at, then id.
+    from: windowed ? `(SELECT * FROM ${indexed} ORDER BY created_at DESC LIMIT ?) AS nodes` : indexed,
+    fromParams: windowed ? [...drive.params, LIMITS.searchWindow] : drive.params,
+    where: windowed ? `WHERE ${remaining.sql}` : "",
+    whereParams: windowed ? remaining.params : [],
+    windowed,
+    statCount,
+    lane: toNullableString(args.lane),
+    runId: toNullableString(args.run_id),
+  };
 }
 
 interface ParentEdge {
@@ -1319,6 +1364,9 @@ const opPostNode: Op = async (ctx, payload) => {
   // A reviewed or leased trial is frozen: a re-post that changes what was scored (source,
   // lane, decision, scores) is refused unless the trial is still unverified and unleased.
   // An identical re-post stays a no-op success. Maintainers are exempt.
+  if (existing && !isAdmin && existing.lane !== lane) {
+    return out(409, { error: "lane_immutable", detail: "a trial's lane cannot change; post a new trial", lane: existing.lane });
+  }
   const changed = existing && !isAdmin ? scoredFieldsChanged(existing, values, sourceSha) : [];
   if (changed.length > 0) {
     const lease = await db
@@ -1353,28 +1401,52 @@ const opPostNode: Op = async (ctx, payload) => {
       );
     }
   }
-  // The same freeze, inside the statement, so a lease taken between the check and the write still wins.
-  const freeze = changed.length > 0
-    ? " AND nodes.state = 'unverified' AND NOT EXISTS (SELECT 1 FROM verify_queue q WHERE q.node_id = nodes.id AND q.status = 'leased' AND q.lease_expires_at > ?)"
-    : "";
-  const guard = isAdmin ? "" : ` WHERE nodes.author IS excluded.author${freeze}`;
-  const res = await db
+  // The lock lives in the write itself, for every non-maintainer update: the row is updated
+  // only if it is still unverified and unleased, or if neither this post (checked above) nor
+  // anyone since the read (checked here, against the row as read) changed what was scored.
+  const asRead = existing as unknown as Record<string, unknown> | null;
+  const lockParams: unknown[] = [
+    now,
+    existing && changed.length === 0 ? 1 : 0,
+    ...SCORED_COLUMNS.map((c) => asRead?.[c] ?? null),
+    ...SCORED_JSON_COLUMNS.map((c) => asRead?.[c] ?? null),
+    existing?.source_sha ?? null,
+    existing?.state ?? null,
+  ];
+  const lock = [
+    "nodes.author IS excluded.author",
+    "nodes.lane IS excluded.lane",
+    `((nodes.state = 'unverified' AND NOT EXISTS (SELECT 1 FROM verify_queue q WHERE q.node_id = nodes.id AND q.status = 'leased' AND q.lease_expires_at > ?))
+      OR (? = 1 AND ${[...SCORED_COLUMNS, ...SCORED_JSON_COLUMNS, "source_sha", "state"].map((c) => `nodes.${c} IS ?`).join(" AND ")}))`,
+  ].join(" AND ");
+  const guard = isAdmin ? "" : ` WHERE ${lock}`;
+  const upsert = db
     .prepare(
       `INSERT INTO nodes (${columns.join(", ")}) VALUES (${placeholders(columns.length)})
        ON CONFLICT(id) DO UPDATE SET ${updates.join(", ")}${guard}`
     )
-    .bind(...columns.map((c) => values[c]), ...(freeze ? [now] : []))
-    .run();
-  if (changesOf(res) === 0) {
-    return changed.length > 0
-      ? out(409, { error: "trial_locked", detail: "the trial was leased or reviewed meanwhile", fields: changed })
-      : out(403, { error: "forbidden_node_owner", id });
-  }
+    .bind(...columns.map((c) => values[c]), ...(isAdmin ? [] : lockParams));
+  // One batch (one transaction in D1): the trial row and the source body it points to are
+  // stored together, and a maintainer's lane change moves the queue entry with it.
+  const writes: D1PreparedStatement[] = [upsert];
   if (sourceSha && sourceBytes) {
-    await db
-      .prepare("INSERT OR IGNORE INTO sources (sha256, body, size, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?)")
-      .bind(sourceSha, source, sourceBytes.length, principal.handle, now)
-      .run();
+    writes.push(
+      db
+        .prepare(
+          `INSERT OR IGNORE INTO sources (sha256, body, size, uploaded_by, created_at)
+           SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ? AND source_sha = ?)`
+        )
+        .bind(sourceSha, source, sourceBytes.length, principal.handle, now, id, sourceSha)
+    );
+  }
+  if (isAdmin && existing && existing.lane !== lane) {
+    writes.push(db.prepare("UPDATE verify_queue SET lane = ?, updated_at = ? WHERE node_id = ?").bind(lane, now, id));
+  }
+  const [res] = await runBatch(db, writes);
+  if (changesOf(res) === 0) {
+    return existing && existing.author === principal.handle
+      ? out(409, { error: "trial_locked", detail: "the trial changed, was leased or was reviewed since it was read", fields: changed })
+      : out(403, { error: "forbidden_node_owner", id });
   }
 
   if (parents.given) {
@@ -1401,39 +1473,38 @@ const opPostNode: Op = async (ctx, payload) => {
 
 const opListNodes: Op = async (ctx, args) => {
   const db = ctx.env.DB;
-  const filters = nodeFilters(args);
-  if ("status" in filters) return filters;
+  const plan = planNodeQuery(args);
+  if ("status" in plan) return plan;
   const limit = clampLimit(args.limit, LIMITS.nodesLimitDefault, LIMITS.nodesLimitMax);
   const offset = clampOffset(args.offset);
-  const lane = toNullableString(args.lane);
-  const runId = toNullableString(args.run_id);
-  // `q` matches only within the newest LIMITS.searchWindow trials (of the lane, when given).
-  const q = toNullableString(args.q);
-  const from = q
-    ? `(SELECT * FROM nodes${lane ? " WHERE lane = ?" : ""} ORDER BY created_at DESC, id DESC LIMIT ?) AS nodes`
-    : "nodes";
-  const fromParams = q ? [...(lane ? [lane] : []), LIMITS.searchWindow] : [];
   const res = await db
-    .prepare(`SELECT * FROM ${from} ${filters.where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
-    .bind(...fromParams, ...filters.params, limit, offset)
+    .prepare(`SELECT * FROM ${plan.from} ${plan.where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
+    .bind(...plan.fromParams, ...plan.whereParams, limit, offset)
     .all<NodeRow>();
   const nodes = (res.results ?? []).map((r) => stripRaw(deserializeNode(r)));
 
-  // Exact counts come from the counter tables; any other filter is counted up to LIMITS.countCap.
+  // Exact from the counters, exact within the window, or counted up to LIMITS.countCap.
   let count: number;
   let capped = false;
-  if (filters.statCount) {
-    const where = [lane ? "lane = ?" : "", runId ? "run_id = ?" : ""].filter(Boolean).join(" AND ");
-    const table = runId ? "run_stats" : "lane_stats";
+  let windowFull = false;
+  if (plan.statCount) {
+    const where = [plan.lane ? "lane = ?" : "", plan.runId ? "run_id = ?" : ""].filter(Boolean).join(" AND ");
     const row = await db
-      .prepare(`SELECT COALESCE(SUM(${filters.statCount}), 0) AS n FROM ${table}${where ? ` WHERE ${where}` : ""}`)
-      .bind(...[lane, runId].filter((x): x is string => Boolean(x)))
+      .prepare(`SELECT COALESCE(SUM(${plan.statCount}), 0) AS n FROM ${plan.runId ? "run_stats" : "lane_stats"}${where ? ` WHERE ${where}` : ""}`)
+      .bind(...[plan.lane, plan.runId].filter((x): x is string => Boolean(x)))
       .first<{ n: number }>();
     count = Number(row?.n ?? 0);
+  } else if (plan.windowed) {
+    const row = await db
+      .prepare(`SELECT COUNT(*) AS seen, COALESCE(SUM(CASE WHEN ${plan.where.slice("WHERE ".length)} THEN 1 ELSE 0 END), 0) AS n FROM ${plan.from}`)
+      .bind(...plan.whereParams, ...plan.fromParams) // the CASE comes before FROM in the statement
+      .first<{ seen: number; n: number }>();
+    count = Number(row?.n ?? 0);
+    windowFull = Number(row?.seen ?? 0) >= LIMITS.searchWindow;
   } else {
     const row = await db
-      .prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM ${from} ${filters.where} LIMIT ?)`)
-      .bind(...fromParams, ...filters.params, LIMITS.countCap + 1)
+      .prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM ${plan.from} LIMIT ?)`)
+      .bind(...plan.fromParams, LIMITS.countCap + 1)
       .first<{ n: number }>();
     count = Math.min(Number(row?.n ?? 0), LIMITS.countCap);
     capped = Number(row?.n ?? 0) > LIMITS.countCap;
@@ -1446,9 +1517,11 @@ const opListNodes: Op = async (ctx, args) => {
     offset,
     next_offset: nextOffset(offset, limit, nodes.length, capped ? null : count),
   };
-  if (q) {
-    body.search_window = LIMITS.searchWindow;
-    body.window_truncated = (await totalTrials(db, lane)) > LIMITS.searchWindow;
+  if (plan.windowed) {
+    // Filters without an index ran over the newest LIMITS.searchWindow trials of the indexed part.
+    body.filter_window = LIMITS.searchWindow;
+    body.window_truncated = windowFull;
+    if (args.q) body.search_window = LIMITS.searchWindow;
   }
   return out(200, body);
 };
@@ -2338,17 +2411,32 @@ const opVerifyResult: Op = async (ctx, args) => {
   const leaseHash = await sha256Hex(leaseToken);
   const holderClause = principal.role === "admin" ? "" : " AND leased_by = ?";
   const holderParams = principal.role === "admin" ? [] : [principal.handle];
-  const done = await db
-    .prepare(
-      `UPDATE verify_queue SET status = 'done', result = ?, result_json = ?, verifier = ?,
-         lease_token_hash = NULL, updated_at = ?
-       WHERE node_id = ? AND status = 'leased' AND lease_token_hash = ? AND lease_expires_at > ?${holderClause}
-       RETURNING node_id`
-    )
-    .bind(passed ? "pass" : "fail", metricsJson, principal.handle, now, nodeId, leaseHash, now, ...holderParams)
-    .first<{ node_id: string }>();
+  const leaseOk = `node_id = ? AND status = 'leased' AND lease_token_hash = ? AND lease_expires_at > ?${holderClause}`;
+  const leaseParams = [nodeId, leaseHash, now, ...holderParams];
+  const newState = passed ? "replicated" : "disputed";
+  const reason = `independent rerun by ${principal.handle}: ${passed ? "pass" : "fail"}${note ? ` (${note})` : ""}`;
+  // One batch (one transaction in D1): the trial's reviewed state and the queue result commit
+  // together, both guarded by the same lease check, so the trial is never unleased and still
+  // unverified in between (when its author could change it).
+  const [, done] = await runBatch(db, [
+    db
+      .prepare(
+        `UPDATE nodes SET state = ?, verified = 0, state_reason = ?, state_by = ?, state_at = ?
+         WHERE id = ? AND state IN (${placeholders(RESULT_WRITABLE_STATES.length)})
+           AND EXISTS (SELECT 1 FROM verify_queue WHERE ${leaseOk})`
+      )
+      .bind(newState, reason.slice(0, LIMITS.reasonChars), principal.handle, now, nodeId, ...RESULT_WRITABLE_STATES, ...leaseParams),
+    db
+      .prepare(
+        `UPDATE verify_queue SET status = 'done', result = ?, result_json = ?, verifier = ?,
+           lease_token_hash = NULL, updated_at = ?
+         WHERE ${leaseOk}
+         RETURNING node_id`
+      )
+      .bind(passed ? "pass" : "fail", metricsJson, principal.handle, now, ...leaseParams),
+  ]);
 
-  if (!done) {
+  if ((done?.results ?? []).length === 0) {
     const item = await db.prepare("SELECT * FROM verify_queue WHERE node_id = ?").bind(nodeId).first<QueueRow>();
     if (!item) return out(404, { error: "not_queued", node_id: nodeId });
     if (item.status !== "leased") return out(409, { error: "not_leased", status: item.status });
@@ -2356,15 +2444,6 @@ const opVerifyResult: Op = async (ctx, args) => {
     return out(409, { error: "stale_lease", detail: "lease token does not match the current lease" });
   }
 
-  const newState = passed ? "replicated" : "disputed";
-  const reason = `independent rerun by ${principal.handle}: ${passed ? "pass" : "fail"}${note ? ` (${note})` : ""}`;
-  await db
-    .prepare(
-      `UPDATE nodes SET state = ?, verified = 0, state_reason = ?, state_by = ?, state_at = ?
-       WHERE id = ? AND state IN (${placeholders(RESULT_WRITABLE_STATES.length)})`
-    )
-    .bind(newState, reason.slice(0, LIMITS.reasonChars), principal.handle, now, nodeId, ...RESULT_WRITABLE_STATES)
-    .run();
   const updated = await getNodeRow(db, nodeId);
   return out(200, { ok: true, node_id: nodeId, result: passed ? "pass" : "fail", node: updated ? deserializeNode(updated) : null });
 };

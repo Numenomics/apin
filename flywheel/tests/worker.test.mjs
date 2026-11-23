@@ -51,6 +51,12 @@ function createD1Shim(preMigration) {
           meta: { changes: Number(info.changes ?? 0) },
         };
       },
+      // Synchronous execution for batch(): rows (RETURNING or SELECT) and the change count.
+      execSync() {
+        const rows = sqlite.prepare(query).all(...boundValues).map((r) => ({ ...r }));
+        const changes = Number(sqlite.prepare("SELECT changes() AS c").get().c);
+        return { results: rows, success: true, meta: { changes } };
+      },
     };
   }
 
@@ -60,11 +66,17 @@ function createD1Shim(preMigration) {
       prepare(query) {
         return makeStatement(query);
       },
-      // D1 runs a batch in one round trip; the shim runs the statements in order.
+      // Like D1: one transaction, no other request interleaves, all or nothing.
       async batch(statements) {
-        const results = [];
-        for (const stmt of statements) results.push(await stmt.all());
-        return results;
+        sqlite.exec("BEGIN");
+        try {
+          const results = statements.map((stmt) => stmt.execSync());
+          sqlite.exec("COMMIT");
+          return results;
+        } catch (err) {
+          sqlite.exec("ROLLBACK");
+          throw err;
+        }
       },
     },
   };
@@ -1703,7 +1715,7 @@ describe("review fixes", () => {
     // Replicated: source, lane and decision are frozen too; Stan results stay.
     await reqJson(env, "POST", `/api/verify/${encodeURIComponent("A1:f:T0001")}/result`, { lease_token: lease.json.lease.lease_token, passed: true }, bearer(verifier));
     sqlite.prepare("UPDATE nodes SET real_stan_passed = 4, real_stan_total = 5 WHERE id = 'A1:f:T0001'").run();
-    for (const change of [{ source: "print('v2')\n" }, { lane: "A2" }, { decision: "archive_only" }, { b2_max: 0.5 }]) {
+    for (const change of [{ source: "print('v2')\n" }, { decision: "archive_only" }, { b2_max: 0.5 }]) {
       const res = await post(change);
       assert.equal(res.status, 409, JSON.stringify(change));
       assert.equal(res.json.state, "replicated");
@@ -1826,13 +1838,25 @@ describe("review fixes", () => {
     assert.equal((await reqJson(env, "GET", "/api/overview")).json.totals.contributors, 1);
   });
 
-  it("bounds D1 reads: capped filtered counts and a windowed q= and search, both labelled", async () => {
+  it("bounds D1 reads: capped filtered counts, and windowed unindexed filters, q= and search, all labelled", async () => {
     const { env, sqlite } = makeEnv();
     seedTrials(sqlite, Array.from({ length: 2600 }, (_, i) => ({
       id: `A1:r${i % 40}:T${i}`, decision: "discard_tier0", hypothesis: i < 100 ? "ancient zigzag" : "plain", created_at: ts(i),
     })));
+    // decision has no index: it applies inside the newest 2,000 trials and says so.
     const counted = (await reqJson(env, "GET", "/api/nodes?decision=discard_tier0")).json;
-    assert.deepEqual({ count: counted.count, capped: counted.count_capped, next: counted.next_offset }, { count: 1000, capped: true, next: 50 });
+    assert.deepEqual(
+      { count: counted.count, window: counted.filter_window, truncated: counted.window_truncated, next: counted.next_offset },
+      { count: 2000, window: 2000, truncated: true, next: 50 }
+    );
+    // Zero-match and sparse filters read only the window, never the whole table.
+    const none = (await reqJson(env, "GET", "/api/nodes?decision=never_used")).json;
+    assert.deepEqual({ count: none.count, n: none.nodes.length, window: none.filter_window, truncated: none.window_truncated }, { count: 0, n: 0, window: 2000, truncated: true });
+    const sparse = (await reqJson(env, "GET", "/api/nodes?lane=A1&state=verified")).json;
+    assert.deepEqual({ count: sparse.count, window: sparse.filter_window }, { count: 0, window: 2000 });
+    // model is indexed: counted through its index, capped at 1,000.
+    const byModel = (await reqJson(env, "GET", "/api/nodes?model=model-x")).json;
+    assert.deepEqual({ count: byModel.count, capped: byModel.count_capped, window: byModel.filter_window }, { count: 1000, capped: true, window: undefined });
     const exact = (await reqJson(env, "GET", "/api/nodes?lane=A1")).json;
     assert.deepEqual({ count: exact.count, capped: exact.count_capped }, { count: 2600, capped: false });
     // The 100 oldest trials are outside the 2,000-trial window, so q= and search do not see them.
@@ -1870,5 +1894,151 @@ describe("review fixes", () => {
     assert.equal((await reqJson(env, "POST", "/api/notes", { kind: "insight", title: "t", lane: "A_1" }, bearer(token))).status, 400);
     assert.equal((await register(env, "bad:handle")).status, 400);
     assert.equal((await register(env, "bad/handle")).status, 400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review round 2.
+// ---------------------------------------------------------------------------
+
+/** Runs `hook` once, right after the first statement whose SQL matches `pattern` has executed. */
+function injectAfter(env, pattern, hook) {
+  const db = env.DB;
+  let fired = false;
+  const fire = async (q) => {
+    if (!fired && pattern.test(q)) {
+      fired = true;
+      await hook();
+    }
+  };
+  const wrap = (q, stmt) => ({
+    q,
+    bind: (...v) => wrap(q, stmt.bind(...v)),
+    first: async (c) => { const r = await stmt.first(c); await fire(q); return r; },
+    all: async () => { const r = await stmt.all(); await fire(q); return r; },
+    run: async () => { const r = await stmt.run(); await fire(q); return r; },
+    execSync: () => stmt.execSync(),
+  });
+  env.DB = {
+    prepare: (q) => wrap(q, db.prepare(q)),
+    async batch(stmts) {
+      const r = await db.batch(stmts);
+      for (const st of stmts) await fire(st.q);
+      return r;
+    },
+  };
+}
+
+/** Makes every statement whose SQL matches `pattern` throw, as a failed D1 write would. */
+function failOn(env, pattern) {
+  const db = env.DB;
+  const wrap = (q, stmt) => {
+    const boom = () => { throw new Error("D1_ERROR: simulated write failure"); };
+    const bad = pattern.test(q);
+    return {
+      q,
+      bind: (...v) => wrap(q, stmt.bind(...v)),
+      first: bad ? async () => boom() : (c) => stmt.first(c),
+      all: bad ? async () => boom() : () => stmt.all(),
+      run: bad ? async () => boom() : () => stmt.run(),
+      execSync: bad ? boom : () => stmt.execSync(),
+    };
+  };
+  env.DB = { prepare: (q) => wrap(q, db.prepare(q)), batch: (stmts) => db.batch(stmts) };
+}
+
+describe("review round 2", () => {
+  it("1a: the lock is in the write: an identical-looking re-post cannot overwrite a row changed or leased since the read", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    const author = await registerToken(env, "race-author");
+    const t = trial("A1:race:T1", { soft_min_eff: 0.002, source: "print(1)\n" });
+    assert.equal((await reqJson(env, "POST", "/api/nodes", t, bearer(author))).status, 201);
+    // Between the re-post's read and its write, the score changes and a verifier leases the trial.
+    injectAfter(env, /^SELECT \* FROM nodes WHERE id = \?$/, async () => {
+      sqlite.prepare("UPDATE nodes SET soft_min_eff = 0.003 WHERE id = 'A1:race:T1'").run();
+      sqlite
+        .prepare("UPDATE verify_queue SET status = 'leased', leased_by = 'v', lease_token_hash = 'h', lease_expires_at = ? WHERE node_id = 'A1:race:T1'")
+        .run(new Date(Date.now() + 3_600_000).toISOString());
+    });
+    const res = await reqJson(env, "POST", "/api/nodes", t, bearer(author));
+    assert.equal(res.status, 409);
+    assert.equal(res.json.error, "trial_locked");
+    assert.equal(sqlite.prepare("SELECT soft_min_eff FROM nodes WHERE id = 'A1:race:T1'").get().soft_min_eff, 0.003);
+  });
+
+  it("1b: a lease result and the reviewed state commit together, with no unlocked moment in between", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    env.FLYWHEEL_INVITE_CODE = "inv";
+    const author = (await register(env, "r2-author", { invite_code: "inv" }, "192.0.2.101")).json.token;
+    const verifier = (await register(env, "r2-verifier", { invite_code: "inv" }, "192.0.2.102")).json.token;
+    const t = trial("A1:gap:T1", { soft_min_eff: 0.002, source: "print(2)\n" });
+    await reqJson(env, "POST", "/api/nodes", t, bearer(author));
+    const lease = (await reqJson(env, "POST", "/api/verify/claim", {}, bearer(verifier))).json.lease;
+    let repost = null;
+    // The author re-posts a new score the moment the queue entry is marked done.
+    injectAfter(env, /UPDATE verify_queue SET status = 'done'/, async () => {
+      repost = await reqJson(env, "POST", "/api/nodes", { ...t, soft_min_eff: 0.9 }, bearer(author));
+    });
+    const result = await reqJson(env, "POST", `/api/verify/${encodeURIComponent("A1:gap:T1")}/result`, { lease_token: lease.lease_token, passed: true }, bearer(verifier));
+    assert.equal(result.status, 200);
+    assert.equal(repost.status, 409);
+    const row = sqlite.prepare("SELECT state, soft_min_eff FROM nodes WHERE id = 'A1:gap:T1'").get();
+    assert.deepEqual({ ...row }, { state: "replicated", soft_min_eff: 0.002 });
+  });
+
+  it("2: a trial and its source body are written together; a failed body write publishes nothing", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    const author = await registerToken(env, "atomic-author");
+    failOn(env, /INTO sources/);
+    const res = await reqJson(env, "POST", "/api/nodes", trial("A1:atomic:T1", { source: "print(3)\n" }), bearer(author));
+    assert.equal(res.status, 500);
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS c FROM nodes WHERE id = 'A1:atomic:T1'").get().c, 0);
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS c FROM sources").get().c, 0);
+  });
+
+  it("3: a trial's lane never changes for non-maintainers; a maintainer's change moves the queue entry", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    const author = await registerToken(env, "lane-author");
+    const t = trial("A1:lane:T1", { soft_min_eff: 0.002, source: "print(4)\n" });
+    assert.equal((await reqJson(env, "POST", "/api/nodes", t, bearer(author))).json.verify_queued, true);
+    const moved = await reqJson(env, "POST", "/api/nodes", { ...t, lane: "A2" }, bearer(author));
+    assert.equal(moved.status, 409);
+    assert.equal(moved.json.error, "lane_immutable");
+    assert.equal((await reqJson(env, "POST", "/api/nodes", { ...t, lane: "A2" }, ADMIN)).status, 200);
+    assert.equal(sqlite.prepare("SELECT lane FROM verify_queue WHERE node_id = 'A1:lane:T1'").get().lane, "A2");
+    assert.equal(sqlite.prepare("SELECT lane FROM nodes WHERE id = 'A1:lane:T1'").get().lane, "A2");
+  });
+
+  it("5: run_stats takes the author of the earliest surviving trial, even when it has none", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    const author = await registerToken(env, "late-author");
+    await reqJson(env, "POST", "/api/nodes", trial("A1:mixed:T1", { created_at: ts(1) }), ADMIN); // no author
+    await reqJson(env, "POST", "/api/nodes", trial("A1:mixed:T2", { created_at: ts(2) }), bearer(author));
+    const row = sqlite.prepare("SELECT author, author_tier FROM run_stats WHERE run_id = 'mixed'").get();
+    assert.deepEqual({ ...row }, { author: null, author_tier: null });
+    await reqJson(env, "DELETE", `/api/admin/nodes/${encodeURIComponent("A1:mixed:T1")}`, undefined, ADMIN);
+    assert.equal(sqlite.prepare("SELECT author FROM run_stats WHERE run_id = 'mixed'").get().author, "late-author");
+  });
+
+  it("6: the overview's Stan pick is the lane's exact best pass share, not a window's", async () => {
+    const { env, sqlite } = makeEnv();
+    seedTrials(sqlite, Array.from({ length: 250 }, (_, i) => ({
+      id: `A1:stan:T${i}`, decision: "keep", soft_min_eff: 0.001, real_stan_total: 5, real_stan_passed: i === 0 ? 5 : 1, created_at: ts(i),
+    })));
+    const stan = (await reqJson(env, "GET", "/api/overview")).json.lanes[0].stan;
+    assert.deepEqual({ id: stan.id, passed: stan.real_stan_passed }, { id: "A1:stan:T0", passed: 5 });
+  });
+
+  it("7: identifiers need at least one letter or digit", async () => {
+    const { env } = makeEnv({ apiKey: "root-admin-secret" });
+    const token = await registerToken(env, "dots");
+    for (const bad of [".", "..", "-", "_:", "...."]) {
+      for (const field of ["id", "run_id", "trial_id"]) {
+        const res = await reqJson(env, "POST", "/api/nodes", { ...trial("A1:ok:T1"), [field]: bad }, bearer(token));
+        assert.equal(res.status, 400, `${field}=${bad}`);
+        assert.equal(res.json.error, "invalid_identifier");
+      }
+    }
+    assert.equal((await reqJson(env, "POST", "/api/nodes", { ...trial("A1:ok:T1"), run_id: "ok_run.1" }, bearer(token))).status, 201);
   });
 });

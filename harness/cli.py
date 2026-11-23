@@ -104,9 +104,12 @@ def _refusal(exc: flywheel.FlywheelError) -> str:
 
 
 def _safe_name(node_id: str) -> str:
+    """A file or directory name for a trial id written by someone else: never `.`, `..` or empty."""
+    import hashlib
     import re
 
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", node_id)
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", node_id).strip(".")
+    return name or "trial_" + hashlib.sha256(node_id.encode("utf-8")).hexdigest()[:12]
 
 
 def _local_lane(lane: object) -> str:

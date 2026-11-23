@@ -345,7 +345,8 @@ def test_no_ratio_when_the_first_run_has_no_usable_numbers(verify, judge_stub, t
     r = verify.score_file(tmp_path / "s.py", "A2", cfg, tmp_path / "w")
     # A score from the confirmation seed is never divided by primary-seed denominators.
     assert r["valid"] and r["unpaired"] and r["confirmation"]["efficiency_source"] == "none"
-    assert r["soft_min_eff"] != pytest.approx(4e-3)
+    # No efficiency survives, so the file cannot serve as a denominator either, live or frozen.
+    assert r["soft_min_eff"] == 0.0 and verify.classify(True, 1.0, r, r)["outcome"] == "unscorable"
 
 
 def test_confirmed_pass_in_the_verifier_output(verify, judge_stub, tmp_path, monkeypatch):
@@ -420,3 +421,11 @@ def test_unchanged_starting_code_gives_no_gain_and_matches_its_frozen_score(veri
     assert rc == 0 and details["outcome"] == "no_gain"
     assert details["start_speedup"] == 1.0
     assert all(d["source"] == "frozen" for d in details["denominators"].values())
+
+
+def test_a_statistical_rejection_does_not_hide_a_stuck_kernel(verify):
+    # The judge joins every failed gate of one target with "; ".
+    both = {"per_target": [{"passed": False, "reason": REJECT + "; " + STUCK}]}
+    only = {"per_target": [{"passed": False, "reason": REJECT}, {"passed": True, "reason": ""}]}
+    assert not verify._only_statistical(both)
+    assert verify._only_statistical(only)

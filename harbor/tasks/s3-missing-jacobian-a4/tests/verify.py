@@ -308,7 +308,9 @@ def _failures(res: dict) -> list[str]:
 
 
 def _only_statistical(res: dict) -> bool:
-    reasons = [str(p.get("reason") or "") for p in (res.get("per_target") or []) if not p.get("passed")]
+    # The judge joins every failed gate of a target with "; ": all of them must be statistical.
+    reasons = [part for p in (res.get("per_target") or []) if not p.get("passed")
+               for part in (str(p.get("reason") or "").split("; ") or [""])]
     return bool(reasons) and all(r.startswith(STATISTICAL_REJECTIONS) for r in reasons)
 
 
@@ -374,7 +376,7 @@ def score_file(path: Path, lane: str, cfg: dict, work_dir: Path, *, confirm: boo
                     # The first run left no usable efficiency. A score from the confirmation seed
                     # is not paired with the frozen denominators, so no ratio is reported.
                     conf["efficiency_source"] = "none"
-                    out["unpaired"] = True
+                    out.update(unpaired=True, soft_min_eff=0.0, short_horizon_soft_min=0.0, long_horizon_soft_min=0.0)
                 out.update(valid=True, tier1_ok=True, failed_targets=[])
             else:
                 out["failed_targets"] = conf["failed_targets"]

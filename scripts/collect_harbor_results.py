@@ -454,12 +454,16 @@ def classify_termination(exc_type: str | None, *, rate_limited: bool, tool_calls
     infrastructure failure whatever the exception was called: there is no result to count."""
     if exc_type is None:
         return "finished"
+    if any(marker in exc_type for marker in _PROVIDER_MARKERS):
+        return "provider_limit"
+    if exc_type in _INFRA_EXCEPTIONS:
+        return "infrastructure"
+    if not graded:
+        return "provider_limit" if rate_limited else "infrastructure"
     if exc_type == "AgentTimeoutError":
         return "time_limit"
-    if rate_limited or any(marker in exc_type for marker in _PROVIDER_MARKERS):
+    if rate_limited:
         return "provider_limit"
-    if exc_type in _INFRA_EXCEPTIONS or not graded:
-        return "infrastructure"
     if exc_type == "NonZeroAgentExitCodeError" and tool_calls == 0:
         return "agent_crash"
     return "agent_error"
