@@ -10,6 +10,7 @@ autoresearch runs work identically offline.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -108,25 +109,32 @@ def identity_path() -> Path:
     return path.with_name(path.name + ".identity.json")
 
 
-def save_identity(handle: str, agent: str | None, model: str | None) -> None:
-    """Remember who registered this checkout, so posted trials name their model."""
-    identity_path().write_text(json.dumps({"handle": handle, "agent": agent, "model": model}) + "\n", encoding="utf-8")
+def _fingerprint(token: str) -> str:
+    return hashlib.sha256(token.strip().encode("utf-8")).hexdigest()[:16]
 
 
-def read_identity(token: str | None = None) -> dict[str, Any]:
-    """The identity saved with this checkout's token; empty when `token` is a different one.
+def save_identity(handle: str, agent: str | None, model: str | None, token: str) -> None:
+    """Remember who registered `token`, so trials posted with it name their model."""
+    identity_path().write_text(
+        json.dumps({"handle": handle, "agent": agent, "model": model, "token_sha256": _fingerprint(token)}) + "\n",
+        encoding="utf-8",
+    )
 
-    A token given in the environment or as an argument belongs to whoever supplied it, not to
-    whoever registered this checkout, so it must not inherit that registration's model."""
-    path = token_path()
+
+def read_identity(token: str | None) -> dict[str, Any]:
+    """The identity registered for `token`; empty for any other token.
+
+    The file carries a fingerprint of the token it was written for. A token from the environment,
+    or a token that replaced the registered one, is someone else: it must not inherit the model."""
+    if not token:
+        return {}
     try:
-        saved = path.read_text(encoding="utf-8").strip().splitlines()[0].strip()
         data = json.loads(identity_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError, IndexError):
+    except (OSError, ValueError):
         return {}
-    if token is not None and token != saved:
+    if not isinstance(data, dict) or data.get("token_sha256") != _fingerprint(token):
         return {}
-    return data if isinstance(data, dict) else {}
+    return data
 
 
 def save_token(token: str, *, path: Path | None = None, force: bool = False) -> Path:

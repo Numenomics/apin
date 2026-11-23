@@ -156,7 +156,7 @@ def _ar_register(a: argparse.Namespace) -> int:
         print(f"Registration returned no token: {res}", file=sys.stderr)
         return 1
     saved = flywheel.save_token(token, force=True)
-    flywheel.save_identity(str(res.get("handle") or a.handle), a.agent, a.model)
+    flywheel.save_identity(str(res.get("handle") or a.handle), a.agent, a.model, token)
     url = flywheel.read_url()
     print(f"Registered `{res.get('handle')}` on {url} at tier `{res.get('role')}` "
           f"({res.get('hourly_limit')} writes/hour"

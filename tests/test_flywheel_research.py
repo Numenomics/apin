@@ -119,8 +119,8 @@ def test_token_lives_in_the_checkout_and_the_user_file_is_only_a_fallback(monkey
 def test_registered_model_is_sent_with_trials(_isolated: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("APIN_AGENT_MODEL", raising=False)
     flywheel.save_token("apfw_x")
-    flywheel.save_identity("ada", "claude-code", "claude-opus-5-5")
-    assert flywheel.read_identity()["model"] == "claude-opus-5-5"
+    flywheel.save_identity("ada", "claude-code", "claude-opus-5-5", "apfw_x")
+    assert flywheel.read_identity("apfw_x")["model"] == "claude-opus-5-5"
     sent: dict[str, Any] = {}
     monkeypatch.setattr(flywheel, "post_node", lambda payload, **kw: sent.update(payload) or {"ok": True})
     flywheel.post_trial_row({"trial_id": "T0001", "lane": "A1", "decision": "keep_baseline"}, run_id="r1")
@@ -130,6 +130,12 @@ def test_registered_model_is_sent_with_trials(_isolated: Path, monkeypatch: pyte
     monkeypatch.setenv("APIN_FLYWHEEL_TOKEN", "apfw_other_contributor")
     flywheel.post_trial_row({"trial_id": "T0002", "lane": "A1", "decision": "keep"}, run_id="r1")
     assert sent.get("agent_model") is None
+    # A replaced token does not inherit the identity written for the old one.
+    monkeypatch.delenv("APIN_FLYWHEEL_TOKEN")
+    flywheel.save_token("apfw_replacement", force=True)
+    sent.clear()
+    flywheel.post_trial_row({"trial_id": "T0003", "lane": "A1", "decision": "keep"}, run_id="r1")
+    assert sent.get("agent_model") is None and flywheel.read_identity("apfw_replacement") == {}
     # The identity file is named after the token file, never a shared fixed name.
     assert flywheel.identity_path().name == flywheel.token_path().name + ".identity.json"
 
