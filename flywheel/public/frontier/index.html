@@ -115,6 +115,14 @@
         font-size: 13.5px;
         fill: var(--ink);
       }
+      #break .run-end {
+        font-family: var(--mono);
+        font-size: 11px;
+        fill: var(--ink-2);
+        paint-order: stroke;
+        stroke: var(--paper);
+        stroke-width: 4px;
+      }
       #break .call-who {
         font-size: 12px;
         fill: var(--ink-3);
@@ -191,14 +199,15 @@
           <div class="figure-bar">
             <div>
               <h2 id="break-h" style="font-size:1.6rem">Breakthroughs</h2>
+              <p class="legend-note" id="break-count"></p>
             </div>
-            <p class="legend-note" id="break-count"></p>
+            <div class="seg" role="group" aria-label="Lane" id="break-tabs"></div>
           </div>
           <div id="break-box"><svg class="chart" id="break" role="group" aria-labelledby="break-h"></svg></div>
-          <figcaption class="caption">
-            Each dot is a kept trial that beat the version it replaced, in time order. Height is how much faster it was on the same seeds, on a log scale. The largest gains say what was tried and who tried it. Select a dot or a note to read the trial.
-          </figcaption>
+          <figcaption class="caption" id="break-caption"></figcaption>
         </figure>
+        <div class="table-scroll" style="margin-top:18px"><table class="data" id="break-list"></table></div>
+        <p class="more"><button class="btn quiet small" type="button" id="break-more" hidden>Show all improvements</button></p>
       </section>
 
       <section class="section" aria-labelledby="field-h">
