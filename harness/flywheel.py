@@ -10,6 +10,7 @@ autoresearch runs work identically offline.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -70,27 +71,74 @@ def strict_json(value: Any) -> str:
     return json.dumps(clean(value), sort_keys=True, allow_nan=False)
 
 
-def token_path() -> Path:
-    """Where `apin autoresearch register` saves the personal token."""
-    override = os.environ.get(ENV_TOKEN_FILE)
-    if override:
-        return Path(override).expanduser()
+def _user_token_path() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     return Path(base) / "apin" / "flywheel_token"
 
 
+def token_path() -> Path:
+    """Where `apin autoresearch register` saves the personal token: inside this checkout.
+
+    A token is one contributor. Two agents on one machine each clone the repository, so a token
+    kept with the clone gives each its own handle; a token kept in the user's home directory made
+    the second agent post under the first one's name. `APIN_FLYWHEEL_TOKEN_FILE` overrides."""
+    override = os.environ.get(ENV_TOKEN_FILE)
+    if override:
+        return Path(override).expanduser()
+    return Path(__file__).resolve().parent.parent / ".apin" / "flywheel_token"
+
+
 def _read_token_file() -> str | None:
+    # The checkout's own token first; the per-user file is read only for tokens saved before
+    # tokens moved into the checkout, and never when the file is named explicitly.
+    paths = [token_path()] if os.environ.get(ENV_TOKEN_FILE) else [token_path(), _user_token_path()]
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        cleaned = text.strip().splitlines()[0].strip() if text.strip() else ""
+        if cleaned:
+            return cleaned
+    return None
+
+
+def identity_path() -> Path:
+    """Beside the token and named after it, so two token files never share one identity."""
     path = token_path()
+    return path.with_name(path.name + ".identity.json")
+
+
+def _fingerprint(token: str) -> str:
+    return hashlib.sha256(token.strip().encode("utf-8")).hexdigest()[:16]
+
+
+def save_identity(handle: str, agent: str | None, model: str | None, token: str) -> None:
+    """Remember who registered `token`, so trials posted with it name their model."""
+    identity_path().write_text(
+        json.dumps({"handle": handle, "agent": agent, "model": model, "token_sha256": _fingerprint(token)}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def read_identity(token: str | None) -> dict[str, Any]:
+    """The identity registered for `token`; empty for any other token.
+
+    The file carries a fingerprint of the token it was written for. A token from the environment,
+    or a token that replaced the registered one, is someone else: it must not inherit the model."""
+    if not token:
+        return {}
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    cleaned = text.strip().splitlines()[0].strip() if text.strip() else ""
-    return cleaned or None
+        data = json.loads(identity_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("token_sha256") != _fingerprint(token):
+        return {}
+    return data
 
 
 def save_token(token: str, *, path: Path | None = None, force: bool = False) -> Path:
-    """Write the token to the user config file with mode 0600 (directory 0700)."""
+    """Write the token to its file with mode 0600 (directory 0700)."""
     target = path or token_path()
     if target.exists() and not force:
         raise FileExistsError(str(target))
@@ -720,7 +768,7 @@ def post_trial_row(
         run_id=run_id,
         parent_id=parent_id,
         parents=parents,
-        agent_model=agent_model or os.environ.get("APIN_AGENT_MODEL"),
+        agent_model=agent_model or os.environ.get("APIN_AGENT_MODEL") or read_identity(resolved_token).get("model"),
         author=author or os.environ.get("APIN_AUTHOR"),
         source=source,
     )

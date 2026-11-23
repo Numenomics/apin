@@ -17,3 +17,5 @@ flywheel/node_modules/
 flywheel/seed.sql
 verifier_out/
 jobs/
+# The contributor token and identity that `apin autoresearch register` saves for this checkout
+/.apin/
