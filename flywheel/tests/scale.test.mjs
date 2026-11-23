@@ -1,4 +1,4 @@
-// Scaling check for the reads the website uses, at 1,000 and 20,000 synthetic trials.
+// Scaling check for the reads the website uses, at 1,000 and 20,000 synthetic trials (plus a fixed tie block).
 //
 //  1. Worker JavaScript time per request, with the time spent inside SQLite subtracted
 //     (that part runs in D1, not under the Worker's 10 ms CPU limit). node:sqlite.
@@ -45,7 +45,9 @@ const INSERT_EDGE = "INSERT OR IGNORE INTO node_parents (child, parent, relation
 const INSERT_NOTE =
   "INSERT INTO notes (id, kind, lane, title, body, state, author, node_ids, created_at, updated_at) VALUES (?, 'insight', 'A1', 'Note', 'body', 'open', 'x', ?, ?, ?)";
 
-/** N trials over 8 lanes: one run of N/10 trials in A1, the rest in runs of about 60; 30 notes. */
+const TIE_TRIALS = 3000;
+
+/** N trials over 8 lanes (one run of N/10 trials in A1, the rest in runs of about 60), a tie block, 30 notes. */
 function synthesize(n) {
   const longRun = Math.round(n / 10);
   const runCount = Math.max(8, Math.round((n - longRun) / 60));
@@ -81,6 +83,16 @@ function synthesize(n) {
     if (decision === "keep") incumbent.set(run.run_id, id);
     last.set(run.run_id, id);
   });
+  // A block of TIE_TRIALS trials sharing the newest timestamp (lane TIE, model tie-model):
+  // newest-first reads must page through it without sorting the whole tie.
+  const tieAt = new Date(Date.UTC(2026, 0, 1) + slots.length * 30_000).toISOString();
+  for (let k = 0; k < TIE_TRIALS; k += 1) {
+    statements.push([INSERT_NODE, [
+      `TIE:tie:T${String(k).padStart(4, "0")}`, null, "TIE", "tie", `T${k}`, "tie-model", "agent-tie", "provisional",
+      `T${k}: tie`, HYPOTHESIS, "discard_tier1", 0.001, 1, null, null, 4, 0.1, "[6,20]", '["fisher-low-rank"]',
+      "cbc54bbbd03d8511", METRICS, 0, "unverified", tieAt,
+    ]]);
+  }
   const target = incumbent.get("long-run");
   for (let j = 0; j < 30; j += 1) {
     const at = `2026-02-01T00:00:${String(j).padStart(2, "0")}Z`;
@@ -102,6 +114,9 @@ function requests(n, target) {
     ["/api/nodes?decision=never_used (zero match)", true, get("/api/nodes?decision=never_used")],
     ["/api/nodes?lane=A1&state=verified (sparse)", true, get("/api/nodes?lane=A1&state=verified")],
     ["/api/nodes?model=qwen-4&decision=keep (sparse)", true, get("/api/nodes?model=qwen-4&decision=keep")],
+    ["/api/nodes?lane=TIE (timestamp tie)", true, get("/api/nodes?lane=TIE")],
+    ["/api/nodes?model=tie-model (timestamp tie)", true, get("/api/nodes?model=tie-model")],
+    ["/api/nodes?lane=TIE&state=verified (tie, windowed)", true, get("/api/nodes?lane=TIE&state=verified")],
     ["/api/nodes?q=james", true, get("/api/nodes?q=james")],
     ["/api/nodes/:id", true, get(`/api/nodes/${encodeURIComponent(target)}`)],
     ["/api/frontier", true, get("/api/frontier")],
@@ -302,6 +317,10 @@ const SITE_BOUNDS = {
   "/api/nodes?decision=never_used (zero match)": LIMITS.searchWindow * 2 + 50,
   "/api/nodes?lane=A1&state=verified (sparse)": LIMITS.searchWindow * 2 + 50,
   "/api/nodes?model=qwen-4&decision=keep (sparse)": LIMITS.searchWindow * 2 + 50,
+  "/api/nodes?lane=TIE (timestamp tie)": LIMITS.nodesLimitDefault * 2 + 50,
+  // Counted through the index up to LIMITS.countCap.
+  "/api/nodes?model=tie-model (timestamp tie)": LIMITS.nodesLimitDefault * 2 + LIMITS.countCap + 50,
+  "/api/nodes?lane=TIE&state=verified (tie, windowed)": LIMITS.searchWindow * 2 + 50,
   "/api/nodes?q=james": LIMITS.searchWindow * 3 + 50,
   "/api/nodes/:id": LIMITS.nodeChildren * 2 + LIMITS.nodeNotes * 2 + 100,
   "/api/frontier": LIMITS.overviewLanes * 40 + 50,

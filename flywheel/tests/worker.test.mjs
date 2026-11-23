@@ -2042,3 +2042,97 @@ describe("review round 2", () => {
     assert.equal((await reqJson(env, "POST", "/api/nodes", { ...trial("A1:ok:T1"), run_id: "ok_run.1" }, bearer(token))).status, 201);
   });
 });
+
+describe("review round 3", () => {
+  /** Records every statement (SQL and bound values) a request runs. */
+  function recordQueries(env) {
+    const db = env.DB;
+    const seen = [];
+    const wrap = (q, stmt, values = []) => ({
+      q,
+      values,
+      bind: (...v) => wrap(q, stmt.bind(...v), v),
+      first: (c) => (seen.push([q, values]), stmt.first(c)),
+      all: () => (seen.push([q, values]), stmt.all()),
+      run: () => (seen.push([q, values]), stmt.run()),
+      execSync: () => stmt.execSync(),
+    });
+    env.DB = {
+      prepare: (q) => wrap(q, db.prepare(q)),
+      batch: (stmts) => {
+        for (const st of stmts) seen.push([st.q, st.values]);
+        return db.batch(stmts);
+      },
+    };
+    return seen;
+  }
+
+  it("1: lane and model pages read their index in page order, never sorting a timestamp tie", async () => {
+    const { env, sqlite } = makeEnv();
+    const plainDb = env.DB;
+    // 6,000 trials sharing one timestamp, as the reviewer reproduced.
+    seedTrials(sqlite, Array.from({ length: 6000 }, (_, i) => ({ id: `A1:tie:T${String(i).padStart(4, "0")}`, agent_model: "tie-model", created_at: ts(1) })));
+    for (const path of ["/api/nodes?lane=A1&limit=50", "/api/nodes?model=tie-model&limit=50", "/api/nodes?lane=A1&state=verified", "/api/nodes?model=tie-model&decision=keep"]) {
+      const seen = recordQueries(env);
+      const res = await reqJson(env, "GET", path);
+      assert.equal(res.status, 200, path);
+      for (const [q, values] of seen.filter(([q]) => /FROM nodes INDEXED BY/.test(q))) {
+        const plan = sqlite.prepare(`EXPLAIN QUERY PLAN ${q}`).all(...values).map((r) => r.detail).join(" | ");
+        assert.ok(!/TEMP B-TREE/.test(plan), `${path}: ${plan}`);
+      }
+      env.DB = plainDb;
+    }
+    assert.deepEqual((await reqJson(env, "GET", "/api/nodes?lane=A1&limit=2")).json.nodes.map((n) => n.id), ["A1:tie:T5999", "A1:tie:T5998"]);
+  });
+
+  it("the frontier pick reads one index row, even for a lane with no eligible trial and a long score tie", async () => {
+    const { env, sqlite } = makeEnv();
+    const plainDb = env.DB;
+    seedTrials(sqlite, [
+      ...Array.from({ length: 3000 }, (_, i) => ({ id: `A5:tie:T${i}`, decision: "discard_tier1", soft_min_eff: 0.001, created_at: ts(1) })),
+      ...Array.from({ length: 3000 }, (_, i) => ({ id: `A6:tie:T${i}`, decision: "keep", soft_min_eff: 0.001, created_at: ts(1) })),
+    ]);
+    for (const path of ["/api/frontier", "/api/overview", "/api/dag"]) {
+      const seen = recordQueries(env);
+      assert.equal((await reqJson(env, "GET", path)).status, 200, path);
+      const picks = seen.filter(([q]) => /INDEXED BY idx_nodes_frontier/.test(q));
+      assert.ok(picks.length > 0, path);
+      for (const [q, values] of picks) {
+        const plan = sqlite.prepare(`EXPLAIN QUERY PLAN ${q}`).all(...values).map((r) => r.detail).join(" | ");
+        assert.ok(!/TEMP B-TREE/.test(plan), `${path}: ${plan}`);
+      }
+      env.DB = plainDb;
+    }
+    const frontier = (await reqJson(env, "GET", "/api/frontier")).json.frontier;
+    assert.deepEqual([frontier.A5.id, frontier.A6.id], ["A5:tie:T999", "A6:tie:T999"]); // newest on ties: highest id as text
+  });
+
+  it("2: the filter window takes the newest trials in the page's own order when a tie crosses the cutoff", async () => {
+    const { env, sqlite } = makeEnv();
+    // 2,100 trials in one timestamp tie, inserted in descending id order so row order and id order differ.
+    const rows = Array.from({ length: 2100 }, (_, i) => ({
+      id: `A4:tie:T${String(2099 - i).padStart(4, "0")}`, agent_model: "m", created_at: ts(1),
+      state: i === 0 || i === 2099 ? "disputed" : "unverified",
+    }));
+    seedTrials(sqlite, rows);
+    // In created_at DESC, id DESC order the window holds T2099..T0100: T2099 is in, T0000 is out.
+    for (const path of ["/api/nodes?lane=A4&state=disputed", "/api/nodes?model=m&state=disputed"]) {
+      const res = (await reqJson(env, "GET", path)).json;
+      assert.deepEqual({ ids: res.nodes.map((n) => n.id), count: res.count, truncated: res.window_truncated }, { ids: ["A4:tie:T2099"], count: 1, truncated: true }, path);
+    }
+  });
+
+  it("3: a maintainer's re-post sets the queue entry's lane from the stored trial, even after a concurrent move", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    const t = trial("A1:move:T1", { soft_min_eff: 0.002, source: "print(5)\n" });
+    assert.equal((await reqJson(env, "POST", "/api/nodes", t, ADMIN)).json.verify_queued, true);
+    // Maintainer 1 re-posts it in A1; between its read and its write, maintainer 2 moves it to A2.
+    injectAfter(env, /^SELECT \* FROM nodes WHERE id = \?$/, async () => {
+      assert.equal((await reqJson(env, "POST", "/api/nodes", { ...t, lane: "A2" }, ADMIN)).status, 200);
+    });
+    assert.equal((await reqJson(env, "POST", "/api/nodes", t, ADMIN)).status, 200);
+    const node = sqlite.prepare("SELECT lane FROM nodes WHERE id = 'A1:move:T1'").get().lane;
+    const queued = sqlite.prepare("SELECT lane FROM verify_queue WHERE node_id = 'A1:move:T1'").get().lane;
+    assert.equal(queued, node);
+  });
+});

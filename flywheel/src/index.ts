@@ -832,7 +832,8 @@ async function laneStats(db: D1DatabaseLike, lane?: string | null): Promise<Lane
 /** Best kept-or-verified trial per lane (falling back to any non-excluded trial), one indexed LIMIT 1 query per lane. */
 async function laneFrontiers(db: D1DatabaseLike, lanes: string[]): Promise<Record<string, NodeRecord>> {
   const pick = (eligible: boolean) =>
-    `SELECT * FROM nodes INDEXED BY idx_nodes_lane_eff WHERE lane = ? AND ${SQL_FRONTIER_OK}${eligible ? ` AND ${SQL_FRONTIER_ELIGIBLE}` : ""} ${SQL_FRONTIER_ORDER} LIMIT 1`;
+    `SELECT * FROM nodes INDEXED BY ${eligible ? "idx_nodes_frontier_pick" : "idx_nodes_frontier_any"}
+     WHERE lane = ? AND ${SQL_FRONTIER_OK}${eligible ? ` AND ${SQL_FRONTIER_ELIGIBLE}` : ""} ${SQL_FRONTIER_ORDER} LIMIT 1`;
   const frontier: Record<string, NodeRecord> = {};
   const first = await batchAll<NodeRow>(db, lanes.map((l) => db.prepare(pick(true)).bind(l)));
   const missing: string[] = [];
@@ -1052,10 +1053,10 @@ const DRIVING_INDEXES: { keys: string[]; index: (outcome: string | null) => stri
   { keys: ["run_id"], index: () => "idx_nodes_runid_created" },
   { keys: ["lane", "outcome"], index: (o) => `idx_nodes_lane_${o}` },
   { keys: ["lane", "stan"], index: () => "idx_nodes_stan_lane" },
-  { keys: ["lane"], index: () => "idx_nodes_lane_created" },
+  { keys: ["lane"], index: () => "idx_nodes_lane_newest" },
   { keys: ["outcome"], index: (o) => `idx_nodes_${o}_created` },
   { keys: ["stan"], index: () => "idx_nodes_stan_created" },
-  { keys: ["model"], index: () => "idx_nodes_model_created" },
+  { keys: ["model"], index: () => "idx_nodes_model_newest" },
   { keys: [], index: () => "idx_nodes_created" },
 ];
 
@@ -1123,9 +1124,9 @@ function planNodeQuery(args: Args): NodeQueryPlan | Outcome {
       ? "trials - kept - archived" : clauses.has("stan") ? "stan" : "trials";
   }
   return {
-    // The window orders by created_at alone so every driving index serves it without a sort
-    // (some lack the id column); the page itself still orders by created_at, then id.
-    from: windowed ? `(SELECT * FROM ${indexed} ORDER BY created_at DESC LIMIT ?) AS nodes` : indexed,
+    // The window takes the newest trials in the page's own order; every driving index ends
+    // in (created_at, id), so neither needs a sort.
+    from: windowed ? `(SELECT * FROM ${indexed} ORDER BY created_at DESC, id DESC LIMIT ?) AS nodes` : indexed,
     fromParams: windowed ? [...drive.params, LIMITS.searchWindow] : drive.params,
     where: windowed ? `WHERE ${remaining.sql}` : "",
     whereParams: windowed ? remaining.params : [],
@@ -1218,9 +1219,9 @@ async function maybeEnqueue(db: D1DatabaseLike, node: NodeRecord): Promise<boole
   const res = await db
     .prepare(
       `INSERT OR IGNORE INTO verify_queue (node_id, lane, status, reason, attempts, created_at, updated_at)
-       VALUES (?, ?, 'queued', 'beats_frontier', 0, ?, ?)`
+       SELECT id, lane, 'queued', 'beats_frontier', 0, ?, ? FROM nodes WHERE id = ?`
     )
-    .bind(node.id, node.lane, now, now)
+    .bind(now, now, node.id)
     .run();
   return changesOf(res) > 0;
 }
@@ -1439,8 +1440,17 @@ const opPostNode: Op = async (ctx, payload) => {
         .bind(sourceSha, source, sourceBytes.length, principal.handle, now, id, sourceSha)
     );
   }
-  if (isAdmin && existing && existing.lane !== lane) {
-    writes.push(db.prepare("UPDATE verify_queue SET lane = ?, updated_at = ? WHERE node_id = ?").bind(lane, now, id));
+  if (isAdmin) {
+    // Inside the batch, from the stored row: a concurrent lane move cannot split the trial
+    // and its queue entry across lanes.
+    writes.push(
+      db
+        .prepare(
+          `UPDATE verify_queue SET lane = (SELECT lane FROM nodes WHERE id = ?), updated_at = ?
+           WHERE node_id = ? AND lane IS NOT (SELECT lane FROM nodes WHERE id = ?)`
+        )
+        .bind(id, now, id, id)
+    );
   }
   const [res] = await runBatch(db, writes);
   if (changesOf(res) === 0) {
@@ -1804,12 +1814,12 @@ const opSetNodeState: Op = async (ctx, args) => {
     await db
       .prepare(
         `INSERT INTO verify_queue (node_id, lane, status, reason, attempts, created_at, updated_at)
-         VALUES (?, ?, 'queued', 'needs-replication', 0, ?, ?)
-         ON CONFLICT(node_id) DO UPDATE SET status = 'queued', reason = excluded.reason,
+         SELECT id, lane, 'queued', 'needs-replication', 0, ?, ? FROM nodes WHERE id = ?
+         ON CONFLICT(node_id) DO UPDATE SET status = 'queued', reason = excluded.reason, lane = excluded.lane,
            lease_token_hash = NULL, leased_by = NULL, lease_expires_at = NULL, updated_at = excluded.updated_at
          WHERE verify_queue.status = 'done'`
       )
-      .bind(id, node.lane, now, now)
+      .bind(now, now, id)
       .run();
   } else if (LOCKED_STATES.has(state)) {
     await db

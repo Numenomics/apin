@@ -13,7 +13,7 @@
 -- Like 0002, the triggers avoid conflict clauses (an outer statement's conflict mode
 -- overrides them in SQLite), and nodes must never be written with INSERT OR REPLACE.
 -- `+soft_min_eff` keeps the run-order lookups on idx_nodes_run_created: without the unary
--- plus SQLite picks idx_nodes_lane_eff and reads every scored trial of the lane per write.
+-- plus SQLite may pick a (lane, soft_min_eff) index and read every scored trial of the lane per write.
 
 CREATE INDEX IF NOT EXISTS idx_nodes_reviewed_eff ON nodes (lane, soft_min_eff)
   WHERE state IN ('replicated', 'verified') AND source_sha IS NOT NULL;
@@ -222,3 +222,21 @@ CREATE INDEX IF NOT EXISTS idx_nodes_lane_discarded ON nodes (lane, created_at, 
 CREATE INDEX IF NOT EXISTS idx_nodes_stan_share ON nodes
   (lane, (CAST(coalesce(real_stan_passed, 0) AS REAL) / real_stan_total) DESC, created_at DESC, id DESC)
   WHERE real_stan_total > 0;
+
+-- Newest-first reads by lane or model carry id, so ORDER BY created_at DESC, id DESC LIMIT n
+-- never sorts a whole timestamp tie. They replace idx_nodes_lane_created (base schema, kept
+-- because schema.sql recreates it) and idx_nodes_model_created (0002, dropped here).
+CREATE INDEX IF NOT EXISTS idx_nodes_lane_newest ON nodes (lane, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_nodes_model_newest ON nodes (agent_model, created_at, id);
+DROP INDEX IF EXISTS idx_nodes_model_created;
+
+-- Frontier pick per lane, in the exact frontier order, so it reads one index row even when the
+-- lane has no eligible trial or a long score tie. The expressions and WHERE clauses must match
+-- laneFrontiers() in src/index.ts. They replace idx_nodes_lane_eff (0002), dropped here.
+CREATE INDEX IF NOT EXISTS idx_nodes_frontier_pick ON nodes
+  (lane, soft_min_eff DESC, verified DESC, (coalesce(real_stan_passed, -1)) DESC, created_at DESC, id DESC)
+  WHERE state NOT IN ('retracted', 'disputed') AND (verified = 1 OR decision IN ('keep', 'keep_baseline', 'keep_simpler'));
+CREATE INDEX IF NOT EXISTS idx_nodes_frontier_any ON nodes
+  (lane, soft_min_eff DESC, verified DESC, (coalesce(real_stan_passed, -1)) DESC, created_at DESC, id DESC)
+  WHERE state NOT IN ('retracted', 'disputed');
+DROP INDEX IF EXISTS idx_nodes_lane_eff;
