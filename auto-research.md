@@ -120,10 +120,11 @@ Repeat until your budget runs out.
 Freeze `submission.py` first. Any edit after this check invalidates it.
 
 ```bash
-# Lane A1 (the adapt_metric seam):
-uv run apin run logdensity --label <RUN_ID> --opt sampler=autoresearch/lanes/A1/submission.py --opt lane=A1 \
+# Lanes A1 and A4: the judge supplies the kernel, so name the lane with --opt lane=<LANE>.
+# Without it the harness looks for adapt() and transition() in your file and fails.
+uv run apin run logdensity --label <RUN_ID> --opt sampler=autoresearch/lanes/<LANE>/submission.py --opt lane=<LANE> \
   --models blr,eight_schools_noncentered,gp_regr,garch11,eight_schools_centered --reps 3
-# Lanes A0, A2, A3 (full adapt + transition):
+# Lanes A0, A2 and A3: your file is the whole sampler, so leave --opt lane out.
 uv run apin run logdensity --label <RUN_ID> --opt sampler=autoresearch/lanes/<LANE>/submission.py \
   --models blr,eight_schools_noncentered,gp_regr,garch11,eight_schools_centered --reps 3
 uv run apin score --models blr,eight_schools_noncentered,gp_regr,garch11,eight_schools_centered --reps 3 \
