@@ -10,7 +10,7 @@
     "uv tool install harbor==0.27.0\nuv run python scripts/build_harbor_base.py --tasks\nharbor run -p harbor/tasks -a claude-code -m anthropic/claude-sonnet-4-5 \\\n  --job-name bench-v0.2.0-claude-sonnet-4-5"
   );
   $("#cmd-verify").innerHTML = cmd(
-    "uv run python harbor/verify.py optimize --lane A1 \\\n  --submission path/to/submission.py \\\n  --baseline harbor/tasks/a1-preconditioning/tests/baseline.py \\\n  --dims 6,20 --repeats 2"
+    "uv run python harbor/verify.py optimize --lane A1 \\\n  --submission path/to/submission.py"
   );
   $("#cmd-collect").innerHTML = cmd(
     "uv run python scripts/collect_harbor_results.py --jobs jobs/"
@@ -237,8 +237,15 @@
         html += `<tr class="group"><td colspan="${list.length + 1}">${group === "rewind" ? "Fix a bug: solved or not" : `Make it faster: efficiency relative to ${bench.against(rel)}`}</td></tr>`;
       }
       const facts = [meta.lane ? `lane ${meta.lane}` : "", meta.difficulty ? `rated ${meta.difficulty}` : ""].filter(Boolean).join(", ");
+      /* How the three yardsticks compare on this task, so a ratio can be read for what it is. */
+      const den = rel.scoring === "reference" ? meta.denominators : null;
+      const yard =
+        den && isNum(den.start) && den.start > 0
+          ? `<span class="yard">Reference ${isNum(den.reference) ? fmt.times(den.reference / den.start) : "not scored"} the starting code` +
+            `${isNum(den.frontier) ? `, lane frontier ${fmt.times(den.frontier / den.start)}` : ""}</span>`
+          : "";
       html +=
-        `<tr><td class="task"><code>${esc(id)}</code><span>${esc(meta.title)}</span>` +
+        `<tr><td class="task"><code>${esc(id)}</code><span>${esc(meta.title)}</span>${yard}` +
         `<a href="${apin.REPO}/tree/main/harbor/tasks/${esc(id)}">${esc(facts || "task files")}</a></td>`;
       for (const r of list) {
         const cell = bench.cell(r, id);
@@ -287,7 +294,11 @@
         pair("Efficiency", fmt.eff(t.soft_min_eff)),
         pair("Starting code", fmt.eff(t.start_soft_min))
       );
-      if (rel.scoring === "reference") facts.push(pair("Reference", fmt.eff(t.reference_soft_min)));
+      if (rel.scoring === "reference") {
+        facts.push(pair("Reference", fmt.eff(t.reference_soft_min)));
+        if (isNum(t.frontier_speedup)) facts.push(pair("Against the lane's frontier", fmt.times(t.frontier_speedup)));
+        if (isNum(t.gap_closed)) facts.push(pair("Gap to the frontier closed", fmt.pct(t.gap_closed)));
+      }
       facts.push(pair("Short budget", fmt.eff(t.short_horizon_soft_min)), pair("Long budget", fmt.eff(t.long_horizon_soft_min)), pair("Overhead", isNum(t.overhead_ratio) ? fmt.times(t.overhead_ratio, 1) : "—"));
     }
     facts.push(

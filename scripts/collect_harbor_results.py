@@ -405,6 +405,15 @@ def load_task_meta(task_ids: list[str], tasks_dir: Path = TASKS_DIR) -> dict[str
                 "difficulty": md.get("difficulty"),
                 "agent_timeout_s": (cfg.get("agent") or {}).get("timeout_sec"),
             })
+        # What the verifier divides by, frozen with the task: lets the page say how strong the
+        # reference is next to the starting code and the lane's frontier.
+        frozen_path = tasks_dir / task_id / "tests" / "frozen_scores.json"
+        if frozen_path.is_file():
+            scores = (json.loads(frozen_path.read_text(encoding="utf-8")).get("scores") or {})
+            info["denominators"] = {
+                role: (float(entry["soft_min_eff"]) if entry.get("valid") and entry.get("soft_min_eff") else None)
+                for role, entry in scores.items()
+            }
         meta[task_id] = info
     return meta
 

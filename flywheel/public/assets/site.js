@@ -603,6 +603,7 @@
         title: m.title || taskId,
         lane: m.lane || null,
         difficulty: m.difficulty || null,
+        denominators: m.denominators || null,
       };
     },
     trials(rel, configKey, taskId) {

@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-11-23T01:11:22Z",
+  "generated_at": "2026-11-23T03:43:19Z",
   "current_release": "bench-v0.1.1",
   "invalid_floor": 0.1,
   "releases": [
@@ -24,35 +24,60 @@
           "title": "Build an adjusted posterior sampler from a 43-LOC isotropic RWM stub",
           "lane": "A0",
           "difficulty": "hard",
-          "agent_timeout_s": 86400.0
+          "agent_timeout_s": 86400.0,
+          "denominators": {
+            "start": 0.0003503255595069159,
+            "frontier": 0.0010944022933310163,
+            "reference": 0.00038403591215293713
+          }
         },
         "a1-preconditioning": {
           "category": "optimize",
           "title": "Optimize adapt_metric() preconditioning under fixed HMC judge",
           "lane": "A1",
           "difficulty": "medium",
-          "agent_timeout_s": 86400.0
+          "agent_timeout_s": 86400.0,
+          "denominators": {
+            "frontier": null,
+            "start": 0.00046226111322168664,
+            "reference": 0.00031748552302321843
+          }
         },
         "a2-funnel-dynamics": {
           "category": "optimize",
           "title": "Optimize multiscale and funnel-surviving transition dynamics",
           "lane": "A2",
           "difficulty": "hard",
-          "agent_timeout_s": 86400.0
+          "agent_timeout_s": 86400.0,
+          "denominators": {
+            "start": 0.00029127487559440195,
+            "frontier": 0.0002747804795222752,
+            "reference": 0.00038403591215293713
+          }
         },
         "a3-integrator-trajectory": {
           "category": "optimize",
           "title": "Optimize symplectic/isokinetic integrators, momentum, trajectories, or PDMPs",
           "lane": "A3",
           "difficulty": "hard",
-          "agent_timeout_s": 86400.0
+          "agent_timeout_s": 86400.0,
+          "denominators": {
+            "start": 0.00029127487559440195,
+            "frontier": 0.0011298629399194584,
+            "reference": 0.00038403591215293713
+          }
         },
         "a4-nonlinear-transport": {
           "category": "optimize",
           "title": "Optimize warm-start & diffeomorphic nonlinear transport under fixed latent HMC judge",
           "lane": "A4",
           "difficulty": "hard",
-          "agent_timeout_s": 86400.0
+          "agent_timeout_s": 86400.0,
+          "denominators": {
+            "start": 0.0004665754680805938,
+            "reference": 0.00031748545686222026,
+            "frontier": null
+          }
         },
         "s3-missing-jacobian-a4": {
           "category": "rewind",
@@ -3233,35 +3258,60 @@
           "title": "Build an adjusted posterior sampler from a 43-LOC isotropic RWM stub",
           "lane": "A0",
           "difficulty": "hard",
-          "agent_timeout_s": 86400.0
+          "agent_timeout_s": 86400.0,
+          "denominators": {
+            "start": 0.0003503255595069159,
+            "frontier": 0.0010944022933310163,
+            "reference": 0.00038403591215293713
+          }
         },
         "a1-preconditioning": {
           "category": "optimize",
           "title": "Optimize adapt_metric() preconditioning under fixed HMC judge",
           "lane": "A1",
           "difficulty": "medium",
-          "agent_timeout_s": 86400.0
+          "agent_timeout_s": 86400.0,
+          "denominators": {
+            "frontier": null,
+            "start": 0.00046226111322168664,
+            "reference": 0.00031748552302321843
+          }
         },
         "a2-funnel-dynamics": {
           "category": "optimize",
           "title": "Optimize multiscale and funnel-surviving transition dynamics",
           "lane": "A2",
           "difficulty": "hard",
-          "agent_timeout_s": 86400.0
+          "agent_timeout_s": 86400.0,
+          "denominators": {
+            "start": 0.00029127487559440195,
+            "frontier": 0.0002747804795222752,
+            "reference": 0.00038403591215293713
+          }
         },
         "a3-integrator-trajectory": {
           "category": "optimize",
           "title": "Optimize symplectic/isokinetic integrators, momentum, trajectories, or PDMPs",
           "lane": "A3",
           "difficulty": "hard",
-          "agent_timeout_s": 86400.0
+          "agent_timeout_s": 86400.0,
+          "denominators": {
+            "start": 0.00029127487559440195,
+            "frontier": 0.0011298629399194584,
+            "reference": 0.00038403591215293713
+          }
         },
         "a4-nonlinear-transport": {
           "category": "optimize",
           "title": "Optimize warm-start & diffeomorphic nonlinear transport under fixed latent HMC judge",
           "lane": "A4",
           "difficulty": "hard",
-          "agent_timeout_s": 86400.0
+          "agent_timeout_s": 86400.0,
+          "denominators": {
+            "start": 0.0004665754680805938,
+            "reference": 0.00031748545686222026,
+            "frontier": null
+          }
         },
         "s3-missing-jacobian-a4": {
           "category": "rewind",
