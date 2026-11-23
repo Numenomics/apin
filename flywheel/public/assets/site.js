@@ -383,6 +383,9 @@
   const outcomeOf = (n) => (KEPT.has(n.decision) ? "kept" : n.decision === "archive_only" ? "archived" : "discarded");
   /* Rows written before trials had a state or stored source lack those fields. */
   const fullNode = (n) => ({ ...n, state: n.state || (n.verified === 1 ? "verified" : "unverified"), has_source: Boolean(n.has_source), author_tier: n.author_tier || null });
+  /* Quote a value for a POSIX shell. Trial ids are written by contributors and end up in
+     commands that readers copy, so anything beyond plain id characters is single-quoted. */
+  const shq = (value) => (/^[A-Za-z0-9_.:\/@-]+$/.test(String(value)) ? String(value) : "'" + String(value).replace(/'/g, "'\\''") + "'");
   const query = (params) => {
     const q = Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== "" && v !== false);
     return q.length ? "?" + q.map(([k, v]) => `${k}=${encodeURIComponent(v === true ? 1 : v)}`).join("&") : "";
@@ -790,6 +793,7 @@
     cmd,
     getJSON,
     openStore,
+    shq,
     laneRows,
     outcomeOf,
     loadNotes,

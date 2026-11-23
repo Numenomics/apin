@@ -45,6 +45,8 @@ export interface Env {
   ASSETS?: AssetsBindingLike;
   FLYWHEEL_API_KEY?: string;
   FLYWHEEL_INVITE_CODE?: string;
+  /** Local development only: "1" makes token-less requests maintainer when FLYWHEEL_API_KEY is unset. */
+  FLYWHEEL_DEV_OPEN_ADMIN?: string;
   CACHE?: CacheLike;
   /** Salt for hashing client IPs in the registration cap. Optional. */
   FLYWHEEL_IP_SALT?: string;
@@ -106,6 +108,11 @@ export const LIMITS = {
   claimsList: 200,
   nodeChildren: 200,
   nodeNotes: 20,
+  // D1 rows read per request (the free plan's daily read quota).
+  runStepsWindow: 500,
+  laneStanWindow: 200,
+  countCap: 1000,
+  searchWindow: 2000,
   searchOffsetMax: 500,
   provisionalTrialsPerDay: 100,
   provisionalTrialsPerDayGlobal: 1000,
@@ -331,7 +338,24 @@ const RESERVED_HANDLES = new Set([
   "undefined",
 ]);
 const HANDLE_RULE = "2-40 chars matching ^[a-zA-Z0-9][a-zA-Z0-9_.-]+$";
-const LANE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$/;
+/** Identifiers reach shells and file paths on clients: letters, digits and `_.:-` only. */
+const ID_RE = /^[A-Za-z0-9_.:-]{1,200}$/;
+const LANE_RE = /^[A-Za-z0-9]{1,8}$/;
+const ID_RULE = "letters, digits and _.:- only, at most 200 characters";
+const LANE_RULE = "letters and digits only, at most 8 characters";
+
+/** 400 for the first present field that is not a safe identifier (lane fields use the lane rule). */
+function badIdentifier(args: Args, idFields: string[], laneFields: string[] = []): Outcome | null {
+  for (const f of laneFields) {
+    const v = toNullableString(args[f]);
+    if (v !== null && !LANE_RE.test(v)) return out(400, { error: "invalid_identifier", field: f, rule: LANE_RULE });
+  }
+  for (const f of idFields) {
+    const v = toNullableString(args[f]);
+    if (v !== null && !ID_RE.test(v)) return out(400, { error: "invalid_identifier", field: f, rule: ID_RULE });
+  }
+  return null;
+}
 
 const PUBLIC_READ_CACHE_SECONDS = 30;
 
@@ -378,35 +402,44 @@ function getEdgeCache(env: Env): CacheLike | null {
   return globalCaches?.default ?? null;
 }
 
-function canonicalQuery(url: URL, allowed: readonly string[]): string {
+/**
+ * The effective query arguments: one value per name, the last occurrence winning. The
+ * router and the cache key both use this, so a repeated parameter cannot make them disagree.
+ */
+function queryArgs(url: URL): Record<string, string> {
+  return Object.fromEntries(url.searchParams.entries());
+}
+
+function canonicalQuery(query: Record<string, string>, allowed: readonly string[]): string {
   const params = new URLSearchParams();
   for (const key of allowed) {
-    const val = url.searchParams.get(key);
-    if (val !== null && val !== "") params.set(key, val);
+    const val = query[key];
+    if (val !== undefined && val !== "") params.set(key, val);
   }
   const qs = params.toString();
   return qs ? `?${qs}` : "";
 }
 
-function canonicalPublicCacheKey(url: URL): Request | null {
+function canonicalPublicCacheKey(url: URL, query: Record<string, string>): Request | null {
   const { origin, pathname } = url;
   const key = (qs: string) => new Request(`${origin}${pathname}${qs}`, { method: "GET" });
-  if (pathname === "/api/health" || pathname === "/api/frontier") return key("");
-  if (pathname === "/api/dag") return key(canonicalQuery(url, ["lane"]));
-  if (pathname === "/api/claims") return key(canonicalQuery(url, ["lane"]));
+  if (pathname === "/api/health") return key("");
+  if (pathname === "/api/frontier") return key(canonicalQuery(query, ["lane"]));
+  if (pathname === "/api/dag") return key(canonicalQuery(query, ["lane"]));
+  if (pathname === "/api/claims") return key(canonicalQuery(query, ["lane"]));
   if (pathname === "/api/overview") return key("");
-  if (pathname === "/api/runs") return key(canonicalQuery(url, ["lane", "limit", "offset"]));
+  if (pathname === "/api/runs") return key(canonicalQuery(query, ["lane", "limit", "offset"]));
   if (pathname === "/api/nodes") {
-    return key(canonicalQuery(url, [
+    return key(canonicalQuery(query, [
       "lane", "run_id", "decision", "verified", "state", "model", "outcome", "stan", "q", "limit", "offset",
     ]));
   }
   if (pathname.startsWith("/api/nodes/") && pathname.length > "/api/nodes/".length) return key("");
   if (pathname === "/api/search") {
-    return key(canonicalQuery(url, ["q", "lane", "kind", "limit", "offset"]));
+    return key(canonicalQuery(query, ["q", "lane", "kind", "limit", "offset"]));
   }
   if (pathname === "/api/notes") {
-    return key(canonicalQuery(url, ["lane", "kind", "state", "author", "limit", "offset"]));
+    return key(canonicalQuery(query, ["lane", "kind", "state", "author", "limit", "offset"]));
   }
   if (pathname.startsWith("/api/notes/") && pathname.length > "/api/notes/".length) return key("");
   return null;
@@ -499,9 +532,18 @@ function clampLimit(raw: unknown, fallback: number, max: number): number {
   return Math.min(parsed, max);
 }
 
+const OFFSET_MAX = 10_000;
+
 function clampOffset(raw: unknown): number {
   const parsed = Math.trunc(Number(raw));
-  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 10_000) : 0;
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, OFFSET_MAX) : 0;
+}
+
+/** The next page's offset, or null when this is the last page or the next one is past the cap. */
+function nextOffset(offset: number, limit: number, returned: number, total: number | null, cap = OFFSET_MAX): number | null {
+  const next = offset + limit;
+  if (returned < limit || next > cap) return null;
+  return total !== null && next >= total ? null : next;
 }
 
 /** Returns the first field whose string value exceeds its cap, or null. */
@@ -561,7 +603,9 @@ async function authenticate(request: Request, env: Env): Promise<AuthPrincipal |
     }
   }
 
-  if (!configuredKey) {
+  // Fail closed: without FLYWHEEL_API_KEY nobody is maintainer, unless local development
+  // opts in explicitly with FLYWHEEL_DEV_OPEN_ADMIN=1 (never set it on a deployed Worker).
+  if (!configuredKey && toBool(String(env.FLYWHEEL_DEV_OPEN_ADMIN ?? "").trim().toLowerCase())) {
     return { role: "admin", keyId: "local-dev", handle: "admin", hourlyLimit: Number.POSITIVE_INFINITY };
   }
   return null;
@@ -758,13 +802,12 @@ interface LaneStat {
   latest_at: string | null;
 }
 
-/** Lanes that have trials, from run_stats (at most LIMITS.overviewLanes, busiest first, then sorted by name). */
+/** Lanes that have trials, from lane_stats (at most LIMITS.overviewLanes, busiest first, then sorted by name). */
 async function laneStats(db: D1DatabaseLike, lane?: string | null): Promise<LaneStat[]> {
   const res = await db
     .prepare(
-      `SELECT lane, SUM(trials) AS trials, SUM(kept) AS kept, COUNT(*) AS runs, MAX(last_at) AS latest_at
-       FROM run_stats ${lane ? "WHERE lane = ?" : ""} GROUP BY lane HAVING SUM(trials) > 0
-       ORDER BY SUM(trials) DESC, lane LIMIT ?`
+      `SELECT lane, trials, kept, runs, latest_at FROM lane_stats
+       WHERE trials > 0${lane ? " AND lane = ?" : ""} ORDER BY trials DESC, lane LIMIT ?`
     )
     .bind(...(lane ? [lane] : []), LIMITS.overviewLanes)
     .all<LaneStat>();
@@ -799,36 +842,57 @@ async function laneFrontiers(db: D1DatabaseLike, lanes: string[]): Promise<Recor
   return sorted;
 }
 
-/**
- * Running best kept efficiency over one run, starting at its first kept scored trial.
- * The window functions run in D1; the Worker receives at most LIMITS.runSteps rows: every
- * point when the run is short enough, otherwise the points where the value changes plus
- * the last one (and, if even those are too many, the first plus the most recent ones).
- */
+/** The run's latest LIMITS.runStepsWindow trials, oldest first after reversal: decision and score only. */
 function runStepsStmt(db: D1DatabaseLike, lane: string, runId: string): D1PreparedStatement {
   return db
     .prepare(
-      `WITH r AS (
-         SELECT created_at, id,
-           MAX(CASE WHEN decision IN (${SQL_OUTCOME_KEPT}) AND soft_min_eff > 0 THEN soft_min_eff END)
-             OVER (ORDER BY created_at, id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS best
-         FROM nodes WHERE lane = ? AND run_id = ?
-       ), s AS (
-         SELECT best, ROW_NUMBER() OVER (ORDER BY created_at, id) AS rn,
-           LAG(best) OVER (ORDER BY created_at, id) AS prev, COUNT(*) OVER () AS n
-         FROM r WHERE best IS NOT NULL
-       )
-       SELECT best, rn, n FROM s WHERE n <= ? OR rn = 1 OR rn = n OR best <> prev
-       ORDER BY rn = 1 DESC, rn DESC LIMIT ?`
+      `SELECT decision, soft_min_eff FROM nodes WHERE lane = ? AND run_id = ?
+       ORDER BY created_at DESC, id DESC LIMIT ?`
     )
-    .bind(lane, runId, LIMITS.runSteps, LIMITS.runSteps);
+    .bind(lane, runId, LIMITS.runStepsWindow);
 }
 
-function runSummary(runId: string, frontierEff: number | null, rows: { best: number; rn: number }[]) {
-  const steps = [...rows].sort((a, b) => Number(a.rn) - Number(b.rn)).map((r) => Number(r.best));
-  const firstEff = steps.length > 0 ? steps[0] : null;
+const OUTCOME_KEPT_SET = new Set(OUTCOME_KEPT);
+
+/**
+ * Running best kept efficiency, from the first kept scored trial on. At most LIMITS.runSteps
+ * points: every point when there are few enough, otherwise the points where the value
+ * changes plus the last one (and, if still too many, the first plus the most recent ones).
+ */
+function runningSteps(rowsNewestFirst: { decision: string; soft_min_eff: number | null }[]): number[] {
+  const points: number[] = [];
+  let best: number | null = null;
+  for (let i = rowsNewestFirst.length - 1; i >= 0; i -= 1) {
+    const r = rowsNewestFirst[i];
+    const eff = toFiniteNumber(r.soft_min_eff);
+    if (OUTCOME_KEPT_SET.has(r.decision) && eff !== null && eff > 0 && (best === null || eff > best)) best = eff;
+    if (best !== null) points.push(best);
+  }
+  if (points.length <= LIMITS.runSteps) return points;
+  const kept = points.filter((v, i) => i === 0 || i === points.length - 1 || v !== points[i - 1]);
+  return kept.length <= LIMITS.runSteps ? kept : [kept[0], ...kept.slice(kept.length - (LIMITS.runSteps - 1))];
+}
+
+/**
+ * first_eff is the run's first kept scored efficiency over the whole run (run_stats.base_eff);
+ * steps cover at most the run's latest LIMITS.runStepsWindow trials (steps_truncated says so).
+ */
+function runSummary(
+  runId: string,
+  frontierEff: number | null,
+  rows: { decision: string; soft_min_eff: number | null }[],
+  stat: { trials: number; base_eff: number | null } | undefined
+) {
+  const steps = runningSteps(rows);
+  const firstEff = toFiniteNumber(stat?.base_eff) ?? (steps.length > 0 ? steps[0] : null);
   const gain = firstEff && frontierEff !== null ? frontierEff / firstEff : null;
-  return { run_id: runId, first_eff: firstEff, gain, steps };
+  return {
+    run_id: runId,
+    first_eff: firstEff,
+    gain,
+    steps,
+    steps_truncated: Number(stat?.trials ?? 0) > LIMITS.runStepsWindow,
+  };
 }
 
 interface StanRow {
@@ -842,11 +906,12 @@ interface StanRow {
 function laneStanStmt(db: D1DatabaseLike, lane: string): D1PreparedStatement {
   return db
     .prepare(
-      `SELECT id, run_id, trial_id, real_stan_passed, real_stan_total FROM nodes INDEXED BY idx_nodes_stan_lane
-       WHERE lane = ? AND real_stan_total > 0
-       ORDER BY CAST(coalesce(real_stan_passed, 0) AS REAL) / real_stan_total DESC, created_at DESC, id DESC LIMIT 1`
+      `SELECT * FROM (
+         SELECT id, run_id, trial_id, real_stan_passed, real_stan_total, created_at FROM nodes INDEXED BY idx_nodes_stan_lane
+         WHERE lane = ? AND real_stan_total > 0 ORDER BY created_at DESC, id DESC LIMIT ?
+       ) ORDER BY CAST(coalesce(real_stan_passed, 0) AS REAL) / real_stan_total DESC, created_at DESC, id DESC LIMIT 1`
     )
-    .bind(lane);
+    .bind(lane, LIMITS.laneStanWindow);
 }
 
 const ALIGNMENT_COLUMNS =
@@ -926,7 +991,7 @@ async function countActiveClaims(db: D1DatabaseLike): Promise<number> {
 
 async function totalTrials(db: D1DatabaseLike, lane?: string | null): Promise<number> {
   const row = await db
-    .prepare(`SELECT COALESCE(SUM(trials), 0) AS n FROM run_stats${lane ? " WHERE lane = ?" : ""}`)
+    .prepare(`SELECT COALESCE(SUM(trials), 0) AS n FROM lane_stats${lane ? " WHERE lane = ?" : ""}`)
     .bind(...(lane ? [lane] : []))
     .first<{ n: number }>();
   return Number(row?.n ?? 0);
@@ -1038,7 +1103,7 @@ function parseParents(payload: Args, childId: string): { edges: ParentEdge[]; gi
   const add = (parentRaw: unknown, relationRaw: unknown): Outcome | null => {
     const parent = toNullableString(parentRaw);
     if (!parent) return out(400, { error: "invalid_parent", detail: "parent id must be a non-empty string" });
-    if (parent.length > LIMITS.shortFieldChars) return out(400, { error: "field_too_long", field: "parent_ids" });
+    if (!ID_RE.test(parent)) return out(400, { error: "invalid_identifier", field: "parent_ids", rule: ID_RULE });
     const relation = toNullableString(relationRaw) ?? "incumbent";
     if (!PARENT_RELATIONS.has(relation)) {
       return out(400, { error: "invalid_relation", allowed: [...PARENT_RELATIONS] });
@@ -1080,11 +1145,17 @@ const NODE_DATA_COLUMNS = [
 ] as const;
 const NODE_ADMIN_COLUMNS = ["real_stan_passed", "real_stan_total", "real_ess_per_cost"] as const;
 
-async function frontierBest(db: D1DatabaseLike, lane: string, excludeId: string): Promise<number | null> {
+/**
+ * The bar for the verification queue: the best replicated or verified trial with source in
+ * the lane. Unreviewed or sourceless scores never set it, so nobody can block the queue by
+ * posting an inflated claim. One row from a partial index.
+ */
+async function reviewedBest(db: D1DatabaseLike, lane: string, excludeId: string): Promise<number | null> {
   const row = await db
     .prepare(
-      `SELECT soft_min_eff AS best FROM nodes INDEXED BY idx_nodes_lane_eff
-       WHERE lane = ? AND id <> ? AND soft_min_eff IS NOT NULL AND ${SQL_FRONTIER_OK} AND ${SQL_FRONTIER_ELIGIBLE}
+      `SELECT soft_min_eff AS best FROM nodes INDEXED BY idx_nodes_reviewed_eff
+       WHERE lane = ? AND state IN ('replicated', 'verified') AND source_sha IS NOT NULL
+         AND soft_min_eff IS NOT NULL AND id <> ?
        ORDER BY soft_min_eff DESC LIMIT 1`
     )
     .bind(lane, excludeId)
@@ -1092,11 +1163,11 @@ async function frontierBest(db: D1DatabaseLike, lane: string, excludeId: string)
   return toFiniteNumber(row?.best);
 }
 
-/** A kept trial with source that beats its lane's frontier enters the verification queue. */
+/** A kept trial with source that beats its lane's best reviewed trial (or the lane has none) is queued. */
 async function maybeEnqueue(db: D1DatabaseLike, node: NodeRecord): Promise<boolean> {
   if (!KEPT_DECISIONS.has(node.decision) || node.soft_min_eff === null || !node.has_source) return false;
   if (LOCKED_STATES.has(node.state) || FRONTIER_EXCLUDED_STATES.includes(node.state)) return false;
-  const best = await frontierBest(db, node.lane, node.id);
+  const best = await reviewedBest(db, node.lane, node.id);
   if (best !== null && node.soft_min_eff <= best) return false;
   const now = nowIso();
   const res = await db
@@ -1107,6 +1178,37 @@ async function maybeEnqueue(db: D1DatabaseLike, node: NodeRecord): Promise<boole
     .bind(node.id, node.lane, now, now)
     .run();
   return changesOf(res) > 0;
+}
+
+/** Fields whose change would alter what a reviewer scored. */
+const SCORED_COLUMNS = [
+  "lane", "decision", "soft_min_eff", "ratio_vs_incumbent", "short_horizon_eff", "long_horizon_eff",
+  "overhead_ratio", "b2_max", "code_sha",
+] as const;
+const SCORED_JSON_COLUMNS = ["dims", "metrics_json"] as const;
+
+/** JSON text compared by value (key order and spacing ignored). */
+function canonicalJson(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null;
+  const sortKeys = (v: unknown): unknown =>
+    Array.isArray(v)
+      ? v.map(sortKeys)
+      : v && typeof v === "object"
+        ? Object.fromEntries(Object.keys(v as Args).sort().map((k) => [k, sortKeys((v as Args)[k])]))
+        : v;
+  try {
+    return JSON.stringify(sortKeys(JSON.parse(String(raw))));
+  } catch {
+    return String(raw);
+  }
+}
+
+function scoredFieldsChanged(existing: NodeRow, values: Record<string, unknown>, sourceSha: string | null): string[] {
+  const row = existing as unknown as Record<string, unknown>;
+  const changed: string[] = SCORED_COLUMNS.filter((c) => (row[c] ?? null) !== (values[c] ?? null));
+  for (const c of SCORED_JSON_COLUMNS) if (canonicalJson(row[c]) !== canonicalJson(values[c])) changed.push(c);
+  if (sourceSha && sourceSha !== existing.source_sha) changed.push("source");
+  return changed;
 }
 
 const opPostNode: Op = async (ctx, payload) => {
@@ -1142,6 +1244,8 @@ const opPostNode: Op = async (ctx, payload) => {
     hypothesis: LIMITS.hypothesisChars,
   });
   if (long) return out(400, { error: "field_too_long", ...long });
+  const badId = badIdentifier(payload, ["id", "run_id", "trial_id", "author"], ["lane"]);
+  if (badId) return badId;
 
   const id = toNullableString(payload.id) ?? crypto.randomUUID();
   const parents = parseParents(payload, id);
@@ -1161,10 +1265,7 @@ const opPostNode: Op = async (ctx, payload) => {
     }
   }
 
-  const existing = await db
-    .prepare("SELECT id, author FROM nodes WHERE id = ?")
-    .bind(id)
-    .first<{ id: string; author: string | null }>();
+  const existing = await getNodeRow(db, id);
   if (existing && !isAdmin && existing.author !== principal.handle) {
     return out(403, { error: "forbidden_node_owner", id, owner: existing.author });
   }
@@ -1174,12 +1275,6 @@ const opPostNode: Op = async (ctx, payload) => {
   }
 
   const now = nowIso();
-  if (sourceSha && sourceBytes) {
-    await db
-      .prepare("INSERT OR IGNORE INTO sources (sha256, body, size, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?)")
-      .bind(sourceSha, source, sourceBytes.length, principal.handle, now)
-      .run();
-  }
 
   const incumbent = parents.edges.find((e) => e.relation === "incumbent")?.parent ?? null;
   const explicitVerified = isAdmin && payload.verified !== undefined;
@@ -1221,6 +1316,26 @@ const opPostNode: Op = async (ctx, payload) => {
     updated_at: now,
   };
 
+  // A reviewed or leased trial is frozen: a re-post that changes what was scored (source,
+  // lane, decision, scores) is refused unless the trial is still unverified and unleased.
+  // An identical re-post stays a no-op success. Maintainers are exempt.
+  const changed = existing && !isAdmin ? scoredFieldsChanged(existing, values, sourceSha) : [];
+  if (changed.length > 0) {
+    const lease = await db
+      .prepare("SELECT 1 AS leased FROM verify_queue WHERE node_id = ? AND status = 'leased' AND lease_expires_at > ?")
+      .bind(id, now)
+      .first<{ leased: number }>();
+    if ((existing?.state ?? "unverified") !== "unverified" || lease) {
+      return out(409, {
+        error: "trial_locked",
+        detail: "a reviewed or leased trial's source, lane, decision and scores cannot change; post a new trial",
+        state: existing?.state ?? null,
+        leased: Boolean(lease),
+        fields: changed,
+      });
+    }
+  }
+
   // Idempotent upsert. A re-post by the same author updates the trial's data but never
   // its research state, author or created_at; another author's row is never touched.
   const columns = Object.keys(values);
@@ -1238,16 +1353,28 @@ const opPostNode: Op = async (ctx, payload) => {
       );
     }
   }
-  const guard = isAdmin ? "" : " WHERE nodes.author IS excluded.author";
+  // The same freeze, inside the statement, so a lease taken between the check and the write still wins.
+  const freeze = changed.length > 0
+    ? " AND nodes.state = 'unverified' AND NOT EXISTS (SELECT 1 FROM verify_queue q WHERE q.node_id = nodes.id AND q.status = 'leased' AND q.lease_expires_at > ?)"
+    : "";
+  const guard = isAdmin ? "" : ` WHERE nodes.author IS excluded.author${freeze}`;
   const res = await db
     .prepare(
       `INSERT INTO nodes (${columns.join(", ")}) VALUES (${placeholders(columns.length)})
        ON CONFLICT(id) DO UPDATE SET ${updates.join(", ")}${guard}`
     )
-    .bind(...columns.map((c) => values[c]))
+    .bind(...columns.map((c) => values[c]), ...(freeze ? [now] : []))
     .run();
   if (changesOf(res) === 0) {
-    return out(403, { error: "forbidden_node_owner", id });
+    return changed.length > 0
+      ? out(409, { error: "trial_locked", detail: "the trial was leased or reviewed meanwhile", fields: changed })
+      : out(403, { error: "forbidden_node_owner", id });
+  }
+  if (sourceSha && sourceBytes) {
+    await db
+      .prepare("INSERT OR IGNORE INTO sources (sha256, body, size, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?)")
+      .bind(sourceSha, source, sourceBytes.length, principal.handle, now)
+      .run();
   }
 
   if (parents.given) {
@@ -1278,35 +1405,52 @@ const opListNodes: Op = async (ctx, args) => {
   if ("status" in filters) return filters;
   const limit = clampLimit(args.limit, LIMITS.nodesLimitDefault, LIMITS.nodesLimitMax);
   const offset = clampOffset(args.offset);
+  const lane = toNullableString(args.lane);
+  const runId = toNullableString(args.run_id);
+  // `q` matches only within the newest LIMITS.searchWindow trials (of the lane, when given).
+  const q = toNullableString(args.q);
+  const from = q
+    ? `(SELECT * FROM nodes${lane ? " WHERE lane = ?" : ""} ORDER BY created_at DESC, id DESC LIMIT ?) AS nodes`
+    : "nodes";
+  const fromParams = q ? [...(lane ? [lane] : []), LIMITS.searchWindow] : [];
   const res = await db
-    .prepare(`SELECT * FROM nodes ${filters.where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
-    .bind(...filters.params, limit, offset)
+    .prepare(`SELECT * FROM ${from} ${filters.where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
+    .bind(...fromParams, ...filters.params, limit, offset)
     .all<NodeRow>();
   const nodes = (res.results ?? []).map((r) => stripRaw(deserializeNode(r)));
+
+  // Exact counts come from the counter tables; any other filter is counted up to LIMITS.countCap.
   let count: number;
+  let capped = false;
   if (filters.statCount) {
-    const lane = toNullableString(args.lane);
-    const runId = toNullableString(args.run_id);
     const where = [lane ? "lane = ?" : "", runId ? "run_id = ?" : ""].filter(Boolean).join(" AND ");
+    const table = runId ? "run_stats" : "lane_stats";
     const row = await db
-      .prepare(`SELECT COALESCE(SUM(${filters.statCount}), 0) AS n FROM run_stats${where ? ` WHERE ${where}` : ""}`)
+      .prepare(`SELECT COALESCE(SUM(${filters.statCount}), 0) AS n FROM ${table}${where ? ` WHERE ${where}` : ""}`)
       .bind(...[lane, runId].filter((x): x is string => Boolean(x)))
       .first<{ n: number }>();
     count = Number(row?.n ?? 0);
   } else {
     const row = await db
-      .prepare(`SELECT COUNT(*) AS n FROM nodes ${filters.where}`)
-      .bind(...filters.params)
+      .prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM ${from} ${filters.where} LIMIT ?)`)
+      .bind(...fromParams, ...filters.params, LIMITS.countCap + 1)
       .first<{ n: number }>();
-    count = Number(row?.n ?? 0);
+    count = Math.min(Number(row?.n ?? 0), LIMITS.countCap);
+    capped = Number(row?.n ?? 0) > LIMITS.countCap;
   }
-  return out(200, {
+  const body: Record<string, unknown> = {
     nodes,
     count,
+    count_capped: capped,
     limit,
     offset,
-    next_offset: offset + nodes.length < count && nodes.length === limit ? offset + limit : null,
-  });
+    next_offset: nextOffset(offset, limit, nodes.length, capped ? null : count),
+  };
+  if (q) {
+    body.search_window = LIMITS.searchWindow;
+    body.window_truncated = (await totalTrials(db, lane)) > LIMITS.searchWindow;
+  }
+  return out(200, body);
 };
 
 const opFrontier: Op = async (ctx, args) => {
@@ -1386,18 +1530,13 @@ const opOverview: Op = async (ctx) => {
   const frontier = await laneFrontiers(db, lanes.map((l) => l.lane));
   const runLanes = lanes.filter((l) => frontier[l.lane]);
   const [totalsRows, modelRows, ...perLane] = await batchAll<Record<string, unknown>>(db, [
-    // Distinct authors and models by skip scan: one index seek per distinct value, so the
-    // cost follows the number of contributors and models, not the number of trials.
+    // One row per lane plus a counter row; distinct models by skip scan (one index seek per
+    // model, at most LIMITS.overviewModels).
     db.prepare(
-      `WITH RECURSIVE a(v) AS (
-         SELECT MIN(lower(author)) FROM nodes WHERE lower(author) IS NOT NULL
-         UNION ALL SELECT (SELECT MIN(lower(author)) FROM nodes WHERE lower(author) > a.v) FROM a WHERE a.v IS NOT NULL
-       )
-       SELECT (SELECT COALESCE(SUM(trials), 0) FROM run_stats) AS trials,
-              (SELECT COALESCE(SUM(kept), 0) FROM run_stats) AS kept,
-              (SELECT COUNT(*) FROM run_stats) AS runs,
-              (SELECT MAX(last_at) FROM run_stats) AS latest_at,
-              (SELECT COUNT(*) FROM a WHERE v IS NOT NULL) AS contributors`
+      `SELECT COALESCE(SUM(trials), 0) AS trials, COALESCE(SUM(kept), 0) AS kept, COALESCE(SUM(runs), 0) AS runs,
+              MAX(latest_at) AS latest_at,
+              (SELECT value FROM flywheel_counters WHERE name = 'contributors') AS contributors
+       FROM lane_stats`
     ),
     db
       .prepare(
@@ -1409,10 +1548,17 @@ const opOverview: Op = async (ctx) => {
       )
       .bind(LIMITS.overviewModels),
     ...runLanes.map((l) => runStepsStmt(db, l.lane, frontier[l.lane].run_id)),
+    ...runLanes.map((l) =>
+      db.prepare("SELECT trials, base_eff FROM run_stats WHERE lane = ? AND run_id = ?").bind(l.lane, frontier[l.lane].run_id)
+    ),
     ...lanes.map((l) => laneStanStmt(db, l.lane)),
   ]);
-  const stepsByLane = new Map(runLanes.map((l, i) => [l.lane, perLane[i] as unknown as { best: number; rn: number }[]]));
-  const stanByLane = new Map(lanes.map((l, i) => [l.lane, perLane[runLanes.length + i]?.[0] as unknown as StanRow | undefined]));
+  const k = runLanes.length;
+  const stepsByLane = new Map(runLanes.map((l, i) => [l.lane, perLane[i] as unknown as { decision: string; soft_min_eff: number | null }[]]));
+  const runStatByLane = new Map(
+    runLanes.map((l, i) => [l.lane, perLane[k + i]?.[0] as unknown as { trials: number; base_eff: number | null } | undefined])
+  );
+  const stanByLane = new Map(lanes.map((l, i) => [l.lane, perLane[2 * k + i]?.[0] as unknown as StanRow | undefined]));
   const t = totalsRows[0] ?? {};
   return out(200, {
     totals: {
@@ -1429,7 +1575,7 @@ const opOverview: Op = async (ctx) => {
       return {
         ...l,
         frontier: f,
-        run: f ? runSummary(f.run_id, f.soft_min_eff, stepsByLane.get(l.lane) ?? []) : null,
+        run: f ? runSummary(f.run_id, f.soft_min_eff, stepsByLane.get(l.lane) ?? [], runStatByLane.get(l.lane)) : null,
         stan: stan
           ? {
               id: stan.id,
@@ -1472,7 +1618,7 @@ const opRuns: Op = async (ctx, args) => {
     db
       .prepare(`SELECT * FROM run_stats ${laneWhere} ORDER BY last_at DESC, lane DESC, run_id DESC LIMIT ? OFFSET ?`)
       .bind(...laneParams, limit, offset),
-    db.prepare(`SELECT COUNT(*) AS n FROM run_stats ${laneWhere}`).bind(...laneParams),
+    db.prepare(`SELECT COALESCE(SUM(runs), 0) AS n FROM lane_stats ${laneWhere}`).bind(...laneParams),
   ]);
   const runs = runRows as unknown as RunStatRow[];
   const slices = await batchAll<Record<string, unknown>>(
@@ -1513,7 +1659,7 @@ const opRuns: Op = async (ctx, args) => {
     count,
     limit,
     offset,
-    next_offset: offset + runs.length < count && runs.length === limit ? offset + limit : null,
+    next_offset: nextOffset(offset, limit, runs.length, count),
   });
 };
 
@@ -1613,6 +1759,13 @@ function claimOwnedBy(agentField: string, handle: string): boolean {
   return agentField === handle || agentField.startsWith(`${handle}:`);
 }
 
+/** SQL condition: the claim row belongs to the principal (always true for maintainers). */
+function claimOwnerSql(principal: AuthPrincipal): { sql: string; params: unknown[] } {
+  if (principal.role === "admin") return { sql: "1 = 1", params: [] };
+  const prefix = `${principal.handle}:`;
+  return { sql: "(agent = ? OR substr(agent, 1, ?) = ?)", params: [principal.handle, prefix.length, prefix] };
+}
+
 const opCreateClaim: Op = async (ctx, payload) => {
   const db = ctx.env.DB;
   const principal = ctx.principal as AuthPrincipal;
@@ -1623,6 +1776,8 @@ const opCreateClaim: Op = async (ctx, payload) => {
   if (!task_id || !lane || !rawAgent) {
     return out(400, { error: "missing_required_fields", required: ["task_id", "lane", "agent"] });
   }
+  const badId = badIdentifier(payload, ["task_id"], ["lane"]);
+  if (badId) return badId;
 
   const agent =
     principal.role === "admin"
@@ -1640,24 +1795,12 @@ const opCreateClaim: Op = async (ctx, payload) => {
   const ttlMinutes = Math.min(ttlRaw, principal.role === "admin" ? 1440 : 240);
   const force = payload.force === true;
 
-  const existing = await db
-    .prepare(
-      "SELECT * FROM claims WHERE task_id = ? AND status = 'active' AND expires_at > ? ORDER BY created_at DESC LIMIT 1"
-    )
-    .bind(task_id, now)
-    .first<ClaimRow>();
-
-  if (existing && !force) {
-    return out(409, { error: "already_claimed", existing_claim: existing });
-  }
-
-  if (existing && force) {
-    if (principal.role !== "admin" && !claimOwnedBy(existing.agent, principal.handle)) {
-      return out(403, { error: "forbidden_force_claim", existing_claim: existing });
-    }
+  // A forced renewal releases only the caller's own active claims (maintainers: all of them).
+  if (force) {
+    const own = claimOwnerSql(principal);
     await db
-      .prepare("UPDATE claims SET status = 'abandoned' WHERE task_id = ? AND status = 'active' AND expires_at > ?")
-      .bind(task_id, now)
+      .prepare(`UPDATE claims SET status = 'abandoned' WHERE task_id = ? AND status = 'active' AND expires_at > ? AND ${own.sql}`)
+      .bind(task_id, now, ...own.params)
       .run();
   }
 
@@ -1665,13 +1808,27 @@ const opCreateClaim: Op = async (ctx, payload) => {
   const expiresAt = new Date(nowMs + ttlMinutes * 60_000).toISOString();
   const summary = toNullableString(payload.summary);
 
-  await db
+  // One statement: the lease is taken only if no active claim exists, so two agents
+  // racing for the same task cannot both get it.
+  const res = await db
     .prepare(
       `INSERT INTO claims (id, task_id, lane, agent, summary, status, expires_at, created_at)
-       VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`
+       SELECT ?, ?, ?, ?, ?, 'active', ?, ?
+       WHERE NOT EXISTS (SELECT 1 FROM claims WHERE task_id = ? AND status = 'active' AND expires_at > ?)`
     )
-    .bind(id, task_id, lane, agent, summary, expiresAt, now)
+    .bind(id, task_id, lane, agent, summary, expiresAt, now, task_id, now)
     .run();
+  if (changesOf(res) === 0) {
+    const existing = await db
+      .prepare(
+        "SELECT * FROM claims WHERE task_id = ? AND status = 'active' AND expires_at > ? ORDER BY created_at DESC LIMIT 1"
+      )
+      .bind(task_id, now)
+      .first<ClaimRow>();
+    return force
+      ? out(403, { error: "forbidden_force_claim", existing_claim: existing })
+      : out(409, { error: "already_claimed", existing_claim: existing });
+  }
 
   const claim = await db.prepare("SELECT * FROM claims WHERE id = ?").bind(id).first<ClaimRow>();
   return out(201, { ok: true, claim });
@@ -1686,15 +1843,18 @@ const opPatchClaim: Op = async (ctx, payload) => {
     return out(400, { error: "invalid_status", allowed: ["done", "abandoned"] });
   }
 
-  const existing = await db.prepare("SELECT * FROM claims WHERE id = ?").bind(claimId).first<ClaimRow>();
-  if (!existing) return out(404, { error: "not_found" });
-
-  if (principal.role !== "admin" && !claimOwnedBy(existing.agent, principal.handle)) {
+  // Guarded by owner in the statement itself.
+  const own = claimOwnerSql(principal);
+  const hasSummary = payload.summary !== undefined;
+  const res = await db
+    .prepare(`UPDATE claims SET status = ?, summary = CASE WHEN ? THEN ? ELSE summary END WHERE id = ? AND ${own.sql}`)
+    .bind(statusVal, hasSummary ? 1 : 0, hasSummary ? toNullableString(payload.summary) : null, claimId, ...own.params)
+    .run();
+  if (changesOf(res) === 0) {
+    const existing = await db.prepare("SELECT agent FROM claims WHERE id = ?").bind(claimId).first<{ agent: string }>();
+    if (!existing) return out(404, { error: "not_found" });
     return out(403, { error: "forbidden_claim_owner", owner: existing.agent });
   }
-
-  const summary = payload.summary !== undefined ? toNullableString(payload.summary) : existing.summary;
-  await db.prepare("UPDATE claims SET status = ?, summary = ? WHERE id = ?").bind(statusVal, summary, claimId).run();
 
   const updated = await db.prepare("SELECT * FROM claims WHERE id = ?").bind(claimId).first<ClaimRow>();
   return out(200, { ok: true, claim: updated });
@@ -1734,7 +1894,7 @@ function parseNodeIds(raw: unknown): string[] | Outcome {
   const ids: string[] = [];
   for (const item of raw) {
     const s = toNullableString(item);
-    if (!s || s.length > LIMITS.shortFieldChars) return out(400, { error: "invalid_node_ids" });
+    if (!s || !ID_RE.test(s)) return out(400, { error: "invalid_identifier", field: "node_ids", rule: ID_RULE });
     if (!ids.includes(s)) ids.push(s);
   }
   return ids;
@@ -1759,7 +1919,7 @@ const opCreateNote: Op = async (ctx, args) => {
   const tooLong = validateNoteText(args);
   if (tooLong) return tooLong;
   const lane = toNullableString(args.lane);
-  if (lane && !LANE_RE.test(lane)) return out(400, { error: "invalid_lane" });
+  if (lane && !LANE_RE.test(lane)) return out(400, { error: "invalid_identifier", field: "lane", rule: LANE_RULE });
   const state = toNullableString(args.state) ?? "open";
   if (!states.includes(state)) return out(400, { error: "invalid_state", allowed: states });
   const nodeIds = parseNodeIds(args.node_ids);
@@ -1801,7 +1961,7 @@ const opListNotes: Op = async (ctx, args) => {
     count: notes.length,
     limit,
     offset,
-    next_offset: notes.length === limit ? offset + limit : null,
+    next_offset: nextOffset(offset, limit, notes.length, null),
   });
 };
 
@@ -1909,6 +2069,17 @@ function makeSnippet(text: string, terms: string[], width = 80): string {
   return `${start > 0 ? "…" : ""}${text.slice(start, at)}[${hit}]${text.slice(at + term.length, end)}${end < text.length ? "…" : ""}`;
 }
 
+/** True when older trials or notes exist beyond the search window. */
+async function searchWindowTruncated(db: D1DatabaseLike, lane: string | null, kind: string | null): Promise<boolean> {
+  if (kind !== "note" && (await totalTrials(db, lane)) > LIMITS.searchWindow) return true;
+  if (kind === "node") return false;
+  const older = await db
+    .prepare(`SELECT 1 AS x FROM notes${lane ? " WHERE lane = ?" : ""} ORDER BY updated_at DESC, id DESC LIMIT 1 OFFSET ?`)
+    .bind(...(lane ? [lane] : []), LIMITS.searchWindow)
+    .first<{ x: number }>();
+  return Boolean(older);
+}
+
 const opSearch: Op = async (ctx, args) => {
   const q = toNullableString(args.q);
   if (!q) return out(400, { error: "missing_required_fields", required: ["q"] });
@@ -1922,19 +2093,18 @@ const opSearch: Op = async (ctx, args) => {
   const offset = Math.min(clampOffset(args.offset), LIMITS.searchOffsetMax);
   const patterns = terms.map(likePattern);
 
+  // Each arm scans only the newest LIMITS.searchWindow trials / notes (of the lane, when given).
   const arm = (table: "nodes" | "notes"): { sql: string; params: unknown[] } => {
     const text = table === "nodes" ? NODE_SEARCH_TEXT : NOTE_SEARCH_TEXT;
     const where = patterns.map(() => `${text} LIKE ? ESCAPE '\\'`);
-    const params: unknown[] = [patterns[0], ...patterns];
-    if (lane) {
-      where.push("lane = ?");
-      params.push(lane);
-    }
+    const newest = table === "nodes" ? "created_at DESC, id DESC" : "updated_at DESC, id DESC";
+    const windowed = `(SELECT * FROM ${table}${lane ? " WHERE lane = ?" : ""} ORDER BY ${newest} LIMIT ?) AS ${table}`;
+    const params: unknown[] = [patterns[0], ...(lane ? [lane] : []), LIMITS.searchWindow, ...patterns];
     const cols = table === "nodes"
       ? "'node' AS kind, id, lane, title, author, decision, state, verified, soft_min_eff, source_sha, NULL AS note_kind, created_at, created_at AS updated_at, coalesce(hypothesis, '') AS text"
       : "'note' AS kind, id, lane, title, author, NULL AS decision, state, 0 AS verified, NULL AS soft_min_eff, NULL AS source_sha, kind AS note_kind, created_at, updated_at, coalesce(body, '') AS text";
     return {
-      sql: `SELECT ${cols}, (coalesce(title, '') LIKE ? ESCAPE '\\') AS title_hit FROM ${table} WHERE ${where.join(" AND ")}`,
+      sql: `SELECT ${cols}, (coalesce(title, '') LIKE ? ESCAPE '\\') AS title_hit FROM ${windowed} WHERE ${where.join(" AND ")}`,
       params,
     };
   };
@@ -1981,7 +2151,9 @@ const opSearch: Op = async (ctx, args) => {
     count: results.length,
     limit,
     offset,
-    next_offset: rows.length === limit && offset + limit <= LIMITS.searchOffsetMax ? offset + limit : null,
+    next_offset: nextOffset(offset, limit, rows.length, null, LIMITS.searchOffsetMax),
+    search_window: LIMITS.searchWindow,
+    window_truncated: await searchWindowTruncated(ctx.env.DB, lane, kind),
   });
 };
 
@@ -2057,9 +2229,18 @@ const opVerifyQueue: Op = async (ctx, args) => {
   return out(200, { items, count: items.length });
 };
 
+/** Verification needs a contributor (invited or promoted) or maintainer token. */
+function verifierTierRefusal(principal: AuthPrincipal): Outcome | null {
+  return principal.role === "provisional"
+    ? out(403, { error: "forbidden_tier", detail: "verification needs a contributor token (invite code or maintainer promotion)" })
+    : null;
+}
+
 const opVerifyClaim: Op = async (ctx, args) => {
   const db = ctx.env.DB;
   const principal = ctx.principal as AuthPrincipal;
+  const refused = verifierTierRefusal(principal);
+  if (refused) return refused;
   const lane = toNullableString(args.lane);
   const nodeId = toNullableString(args.node_id);
   const ttlRaw = args.ttl_minutes === undefined ? LIMITS.leaseMinutesDefault : Number(args.ttl_minutes);
@@ -2134,6 +2315,8 @@ const opVerifyClaim: Op = async (ctx, args) => {
 const opVerifyResult: Op = async (ctx, args) => {
   const db = ctx.env.DB;
   const principal = ctx.principal as AuthPrincipal;
+  const refused = verifierTierRefusal(principal);
+  if (refused) return refused;
   const nodeId = toNullableString(args.node_id);
   const leaseToken = toNullableString(args.lease_token);
   if (!nodeId || !leaseToken || typeof args.passed !== "boolean") {
@@ -2424,8 +2607,8 @@ const opAdminDeleteNode: Op = async (ctx, args) => {
 const opHealth: Op = async (ctx) => {
   const db = ctx.env.DB;
   const [totals, lanes] = await batchAll<Record<string, unknown>>(db, [
-    db.prepare("SELECT COALESCE(SUM(trials), 0) AS n FROM run_stats"),
-    db.prepare("SELECT lane FROM run_stats GROUP BY lane HAVING SUM(trials) > 0 ORDER BY lane LIMIT ?").bind(LIMITS.overviewLanes),
+    db.prepare("SELECT COALESCE(SUM(trials), 0) AS n FROM lane_stats"),
+    db.prepare("SELECT lane FROM lane_stats WHERE trials > 0 ORDER BY lane LIMIT ?").bind(LIMITS.overviewLanes),
   ]);
   return out(200, {
     ok: true,
@@ -2901,7 +3084,13 @@ function safeDecode(raw: string): string | null {
   }
 }
 
-async function dispatch(request: Request, env: Env, url: URL, method: string): Promise<Response | null> {
+async function dispatch(
+  request: Request,
+  env: Env,
+  url: URL,
+  method: string,
+  query: Record<string, string>
+): Promise<Response | null> {
   for (const route of ROUTES) {
     if (route.method !== method) continue;
     const m = route.pattern.exec(url.pathname);
@@ -2940,7 +3129,7 @@ async function dispatch(request: Request, env: Env, url: URL, method: string): P
       if (!parsed.ok) return jsonResponse(parsed.outcome.body, parsed.outcome.status);
       args = parsed.value;
     } else {
-      args = Object.fromEntries(url.searchParams.entries());
+      args = query;
     }
     const outcome = await route.op({ env, request, principal }, { ...args, ...pathArgs });
     return jsonResponse(outcome.body, outcome.status);
@@ -2965,7 +3154,8 @@ export async function handleRequest(
     return new Response(null, { status: 204, headers: CORS_HEADERS });
   }
 
-  const cacheKey = method === "GET" ? canonicalPublicCacheKey(url) : null;
+  const query = queryArgs(url);
+  const cacheKey = method === "GET" ? canonicalPublicCacheKey(url, query) : null;
   const edgeCache = cacheKey ? getEdgeCache(env) : null;
   if (cacheKey && edgeCache) {
     const cached = await edgeCache.match(cacheKey);
@@ -2995,7 +3185,7 @@ export async function handleRequest(
     if (pathname === "/api/mcp" && method === "POST") {
       return await handleMcp(request, env);
     }
-    const resp = await dispatch(request, env, url, method);
+    const resp = await dispatch(request, env, url, method, query);
     if (resp) return finalizePublicRead(resp);
     return jsonResponse({ error: "not_found", path: pathname }, 404);
   } catch (err) {

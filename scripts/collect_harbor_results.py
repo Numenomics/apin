@@ -308,7 +308,8 @@ def parse_trial_dir(trial_dir: Path, pricing: dict[str, Any], *, release_tag: st
         or ("usage limit reached" in oc_low)
         or ("rate limit" in oc_low and exc_type in ("NonZeroAgentExitCodeError", "ApiRateLimitError"))
     )
-    termination = classify_termination(exc_type, rate_limited=rate_limited, tool_calls=tool_calls)
+    graded = bool(reward_data) or "reward" in rewards_map
+    termination = classify_termination(exc_type, rate_limited=rate_limited, tool_calls=tool_calls, graded=graded)
 
     m_rel = re.match(r"^(bench-v\d+\.\d+\.\d+)\b", trial_dir.parent.name)
     trial_release = m_rel.group(1) if m_rel else release_tag
@@ -422,10 +423,16 @@ def load_task_meta(task_ids: list[str], tasks_dir: Path = TASKS_DIR) -> dict[str
 # attempts count as interrupted is decided from how the run ended, never from its score:
 # keeping the interrupted runs that happened to score well would bias every average.
 INTERRUPTED = frozenset({"provider_limit", "infrastructure", "agent_crash"})
+# Harbor exception types that mean the agent never got a fair run, or that grading itself broke.
 _INFRA_EXCEPTIONS = frozenset({
-    "EnvironmentStartTimeoutError", "VerifierOutputParseError", "VerifierTimeoutError",
-    "RewardFileNotFoundError", "RewardFileEmptyError",
+    "CancelledError", "EnvironmentStartTimeoutError", "EnvironmentBuildTimeoutError", "AgentSetupTimeoutError",
+    "VerifierOutputParseError", "VerifierTimeoutError", "RewardFileNotFoundError", "RewardFileEmptyError",
+    "RegradeError", "ServiceOperationsUnsupportedError",
 })
+# The model provider refused or dropped the run. Matched on the type name because providers and
+# Harbor releases word these differently.
+_PROVIDER_MARKERS = ("RateLimit", "Overloaded", "ServiceUnavailable", "APIConnection", "APITimeout",
+                     "InternalServerError", "BudgetExceeded", "AuthenticationError", "PermissionDenied")
 IMPROVED_MARGIN = 0.05  # same margin as harbor/verify.py; used only for trials graded before it reported an outcome
 INVALID_FLOOR = 0.1  # a task with no valid attempt enters the geometric mean at this ratio
 OUTCOMES = ("solved", "improved", "no_gain", "invalid")
@@ -440,15 +447,18 @@ SCORING_NOTES = {
 }
 
 
-def classify_termination(exc_type: str | None, *, rate_limited: bool, tool_calls: int) -> str:
-    """How the agent phase ended: finished, time_limit, agent_error, or one of INTERRUPTED."""
+def classify_termination(exc_type: str | None, *, rate_limited: bool, tool_calls: int, graded: bool = True) -> str:
+    """How the run ended: finished, time_limit, agent_error, or one of INTERRUPTED.
+
+    `graded` is whether the verifier left a reward. A run that raised and was never graded is an
+    infrastructure failure whatever the exception was called: there is no result to count."""
     if exc_type is None:
         return "finished"
     if exc_type == "AgentTimeoutError":
         return "time_limit"
-    if rate_limited or exc_type == "ApiRateLimitError":
+    if rate_limited or any(marker in exc_type for marker in _PROVIDER_MARKERS):
         return "provider_limit"
-    if exc_type in _INFRA_EXCEPTIONS:
+    if exc_type in _INFRA_EXCEPTIONS or not graded:
         return "infrastructure"
     if exc_type == "NonZeroAgentExitCodeError" and tool_calls == 0:
         return "agent_crash"

@@ -336,15 +336,16 @@ def test_tier0_failure_gets_no_tier1_and_no_confirmation(verify, judge_stub, tmp
     assert not verify.score_file(tmp_path / "missing.py", "A2", _cfg(verify), tmp_path / "w")["valid"]
 
 
-def test_unpaired_fallback_when_the_first_run_has_no_usable_numbers(verify, judge_stub, tmp_path):
+def test_no_ratio_when_the_first_run_has_no_usable_numbers(verify, judge_stub, tmp_path):
     script, _calls = judge_stub
     cfg = _cfg(verify)
     script[cfg["seed"]] = ([[1e-3, 0.0, 3e-3], [1e-3, 2e-3, 3e-3]], [["", REJECT, ""], ["", "", ""]])
     script[cfg["confirmation_seed"]] = ([[4e-3, 4e-3, 4e-3]] * 2, GOOD[1])
     tmp_path.joinpath("s.py").write_text("x = 1\n")
     r = verify.score_file(tmp_path / "s.py", "A2", cfg, tmp_path / "w")
-    assert r["valid"] and r["confirmation"]["efficiency_source"] == "confirmation_run_unpaired"
-    assert r["soft_min_eff"] == pytest.approx(4e-3)
+    # A score from the confirmation seed is never divided by primary-seed denominators.
+    assert r["valid"] and r["unpaired"] and r["confirmation"]["efficiency_source"] == "none"
+    assert r["soft_min_eff"] != pytest.approx(4e-3)
 
 
 def test_confirmed_pass_in_the_verifier_output(verify, judge_stub, tmp_path, monkeypatch):

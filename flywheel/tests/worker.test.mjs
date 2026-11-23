@@ -87,6 +87,8 @@ function makeEnv(options = {}) {
       DB: db,
       ASSETS: assets,
       FLYWHEEL_API_KEY: options.apiKey,
+      // Tests without an API key act as the local maintainer, which needs the explicit opt-in.
+      FLYWHEEL_DEV_OPEN_ADMIN: options.apiKey || options.closed ? undefined : "1",
     },
   };
 }
@@ -1234,26 +1236,32 @@ describe("verification queue", () => {
   async function setup() {
     const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
     env.FLYWHEEL_INVITE_CODE = "inv";
-    const author = await registerToken(env, "q-author");
-    const v1 = await registerToken(env, "q-verifier-1");
+    // Verifying needs the contributor tier, so every party here registers with the invite.
+    const author = (await register(env, "q-author", { invite_code: "inv" }, "192.0.2.81")).json.token;
+    const v1 = (await register(env, "q-verifier-1", { invite_code: "inv" }, "192.0.2.82")).json.token;
     const v2 = (await register(env, "q-verifier-2", { invite_code: "inv" }, "192.0.2.80")).json.token;
     const post = (id, extra) => reqJson(env, "POST", "/api/nodes", trial(id, { source: `# ${id}\n`, ...extra }), bearer(author));
     return { env, sqlite, author, v1, v2, post };
   }
 
-  it("queues kept trials with source that beat the lane frontier, and only those", async () => {
-    const { env, post } = await setup();
+  it("queues kept trials with source that beat the lane's best reviewed trial, and only those", async () => {
+    const { env, sqlite, post } = await setup();
+    // No reviewed trial yet: every kept trial with source is queued.
     assert.equal((await post("A1:q:T0001", { decision: "keep_baseline", soft_min_eff: 0.001 })).json.verify_queued, true);
-    assert.equal((await post("A1:q:T0002", { decision: "keep", soft_min_eff: 0.0005 })).json.verify_queued, false); // below frontier
+    assert.equal((await post("A1:q:T0002", { decision: "keep", soft_min_eff: 0.0005 })).json.verify_queued, true);
     assert.equal((await post("A1:q:T0003", { decision: "discard_no_gain", soft_min_eff: 0.5 })).json.verify_queued, false); // not kept
     assert.equal((await post("A1:q:T0004", { decision: "keep", soft_min_eff: 0.002, source: null })).json.verify_queued, false); // no source
     assert.equal((await post("A1:q:T0005", { decision: "keep", soft_min_eff: 0.003 })).json.verify_queued, true);
     // Idempotent: a re-post does not queue twice.
     assert.equal((await post("A1:q:T0005", { decision: "keep", soft_min_eff: 0.003 })).json.verify_queued, false);
+    // Once T0005 is replicated, only trials beating it are queued.
+    sqlite.prepare("UPDATE nodes SET state = 'replicated' WHERE id = 'A1:q:T0005'").run();
+    assert.equal((await post("A1:q:T0006", { decision: "keep", soft_min_eff: 0.0029 })).json.verify_queued, false);
+    assert.equal((await post("A1:q:T0007", { decision: "keep", soft_min_eff: 0.004 })).json.verify_queued, true);
 
     const queue = await reqJson(env, "GET", "/api/verify/queue?lane=A1");
-    assert.deepEqual(queue.json.items.map((i) => i.node_id), ["A1:q:T0001", "A1:q:T0005"]);
-    const item = queue.json.items[1];
+    assert.deepEqual(queue.json.items.map((i) => i.node_id), ["A1:q:T0001", "A1:q:T0002", "A1:q:T0005", "A1:q:T0007"]);
+    const item = queue.json.items[2];
     assert.equal(item.status, "queued");
     assert.equal(item.available, true);
     assert.equal(item.reason, "beats_frontier");
@@ -1262,12 +1270,39 @@ describe("verification queue", () => {
     assert.ok(!("lease_token_hash" in item));
   });
 
+  it("a kept trial without source cannot block the queue with an inflated score", async () => {
+    const { env, post } = await setup();
+    // Sourceless (and even maintainer-verified sourceless) claims never set the bar.
+    assert.equal((await post("A2:p:T0001", { decision: "keep", soft_min_eff: 999, source: null })).json.verify_queued, false);
+    await reqJson(env, "POST", `/api/admin/nodes/${encodeURIComponent("A2:p:T0001")}/verify`, {}, ADMIN);
+    assert.equal((await post("A2:p:T0002", { decision: "keep", soft_min_eff: 0.002 })).json.verify_queued, true);
+  });
+
+  it("only contributors and maintainers may lease or post verification results (REST and MCP)", async () => {
+    const { env, post } = await setup();
+    const prov = await registerToken(env, "q-provisional");
+    await post("A1:q:T0001", { decision: "keep_baseline", soft_min_eff: 0.001 });
+    const lease = await reqJson(env, "POST", "/api/verify/claim", { lane: "A1" }, bearer(prov));
+    assert.equal(lease.status, 403);
+    assert.equal(lease.json.error, "forbidden_tier");
+    const result = await reqJson(env, "POST", `/api/verify/${encodeURIComponent("A1:q:T0001")}/result`, { lease_token: "vlease_x", passed: false }, bearer(prov));
+    assert.equal(result.status, 403);
+    assert.equal(result.json.error, "forbidden_tier");
+    const mcp = await reqJson(env, "POST", "/api/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "flywheel_verify_claim", arguments: {} } }, bearer(prov));
+    assert.equal(mcp.json.result.structuredContent.error, "forbidden_tier");
+    const flag = await reqJson(env, "POST", `/api/nodes/${encodeURIComponent("A1:q:T0001")}/state`, { state: "disputed", reason: "x" }, bearer(prov));
+    assert.equal(flag.json.error, "forbidden_tier");
+    // Provisional accounts still retract their own trials.
+    await reqJson(env, "POST", "/api/nodes", trial("A1:own:T0001"), bearer(prov));
+    assert.equal((await reqJson(env, "POST", `/api/nodes/${encodeURIComponent("A1:own:T0001")}/state`, { state: "retracted" }, bearer(prov))).status, 200);
+  });
+
   it("leases atomically, refuses self-verification and stale or expired leases, and sets replicated/disputed", async () => {
     const { env, sqlite, author, v1, v2, post } = await setup();
     await post("A1:q:T0001", { decision: "keep_baseline", soft_min_eff: 0.001 });
     await post("A1:q:T0002", { decision: "keep", soft_min_eff: 0.002 });
 
-    // A provisional author cannot lease or verify its own trial.
+    // An author cannot lease or verify its own trial.
     const self = await reqJson(env, "POST", "/api/verify/claim", { lane: "A1" }, bearer(author));
     assert.equal(self.status, 404);
     assert.equal(self.json.error, "queue_empty");
@@ -1395,13 +1430,13 @@ describe("bounded reads", () => {
     assert.deepEqual(a1.frontier, frontier.json.frontier.A1); // same row as /api/frontier
     assert.equal(a1.frontier.id, "A1:r1:T7");
     // Running best kept efficiency from T2 on: T5 is archive_only (not kept), T6 keep_incumbent_failed counts.
-    assert.deepEqual(a1.run, { run_id: "r1", first_eff: 0.1, gain: 4, steps: [0.1, 0.1, 0.2, 0.2, 0.3, 0.4] });
+    assert.deepEqual(a1.run, { run_id: "r1", first_eff: 0.1, gain: 4, steps: [0.1, 0.1, 0.2, 0.2, 0.3, 0.4], steps_truncated: false });
     // Highest pass share wins, newest on ties (T7 and r2:T2 both 4/5; r2:T2 is newer).
     assert.deepEqual(a1.stan, { id: "A1:r2:T2", run_id: "r2", trial_id: "T2", real_stan_passed: 4, real_stan_total: 5 });
 
     const a3 = o.lanes[1];
     assert.equal(a3.frontier.id, "A3:z:T1");
-    assert.deepEqual(a3.run, { run_id: "z", first_eff: null, gain: null, steps: [] });
+    assert.deepEqual(a3.run, { run_id: "z", first_eff: null, gain: null, steps: [], steps_truncated: false });
     assert.equal(a3.stan, null);
 
     assert.equal(o.claims.length, 1);
@@ -1634,5 +1669,206 @@ describe("bounded reads", () => {
     await reqJson(env, "POST", "/api/admin/handles/counter/purge", undefined, ADMIN);
     assert.deepEqual(stats(), []);
     assert.deepEqual((await reqJson(env, "GET", "/api/overview")).json.lanes, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review fixes: one focused test per finding.
+// ---------------------------------------------------------------------------
+
+describe("review fixes", () => {
+  it("freezes a reviewed or leased trial: re-posts that change what was scored get 409, identical ones succeed", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    env.FLYWHEEL_INVITE_CODE = "inv";
+    const author = await registerToken(env, "freeze-author");
+    const verifier = (await register(env, "freeze-verifier", { invite_code: "inv" }, "192.0.2.90")).json.token;
+    const base = trial("A1:f:T0001", { soft_min_eff: 0.002, source: "print('v1')\n", metrics_json: '{"a": 1, "b": 2}', dims: [6, 20] });
+    const post = (extra = {}) => reqJson(env, "POST", "/api/nodes", { ...base, ...extra }, bearer(author));
+    assert.equal((await post()).status, 201);
+
+    // Unverified and unleased: the author may still change it.
+    assert.equal((await post({ soft_min_eff: 0.003 })).status, 200);
+    assert.equal((await post({ soft_min_eff: 0.002 })).status, 200);
+
+    // Leased: changes are refused, identical re-posts (even with reordered JSON) are fine.
+    const lease = await reqJson(env, "POST", "/api/verify/claim", { node_id: "A1:f:T0001" }, bearer(verifier));
+    assert.equal(lease.status, 200);
+    const leased = await post({ soft_min_eff: 0.9 });
+    assert.equal(leased.status, 409);
+    assert.equal(leased.json.error, "trial_locked");
+    assert.equal(leased.json.leased, true);
+    assert.deepEqual(leased.json.fields, ["soft_min_eff"]);
+    assert.equal((await post({ metrics_json: '{"b":2,"a":1}', hypothesis: "reworded" })).status, 200);
+
+    // Replicated: source, lane and decision are frozen too; Stan results stay.
+    await reqJson(env, "POST", `/api/verify/${encodeURIComponent("A1:f:T0001")}/result`, { lease_token: lease.json.lease.lease_token, passed: true }, bearer(verifier));
+    sqlite.prepare("UPDATE nodes SET real_stan_passed = 4, real_stan_total = 5 WHERE id = 'A1:f:T0001'").run();
+    for (const change of [{ source: "print('v2')\n" }, { lane: "A2" }, { decision: "archive_only" }, { b2_max: 0.5 }]) {
+      const res = await post(change);
+      assert.equal(res.status, 409, JSON.stringify(change));
+      assert.equal(res.json.state, "replicated");
+    }
+    const same = await post();
+    assert.equal(same.status, 200);
+    assert.equal(same.json.node.state, "replicated");
+    assert.equal(same.json.node.soft_min_eff, 0.002);
+    assert.equal(same.json.node.real_stan_passed, 4);
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS c FROM sources").get().c, 1); // the refused source was not stored
+  });
+
+  it("fails closed: no FLYWHEEL_API_KEY means no maintainer, unless FLYWHEEL_DEV_OPEN_ADMIN opts in", async () => {
+    for (const blank of [undefined, "", "   "]) {
+      const { env } = makeEnv({ closed: true });
+      env.FLYWHEEL_API_KEY = blank;
+      assert.equal((await reqJson(env, "GET", "/api/admin/keys")).status, 401);
+      assert.equal((await reqJson(env, "POST", "/api/admin/keys", { handle: "evil", role: "admin" })).status, 401);
+      assert.equal((await reqJson(env, "POST", "/api/admin/handles/someone/purge")).status, 401);
+      assert.equal((await reqJson(env, "POST", "/api/nodes", trial("A1:x:T0001"))).status, 401);
+      // Registered tokens still work.
+      const token = await registerToken(env, "closed-user");
+      assert.equal((await reqJson(env, "POST", "/api/nodes", trial("A1:x:T0001"), bearer(token))).status, 201);
+      assert.equal((await reqJson(env, "GET", "/api/admin/keys", undefined, bearer(token))).status, 403);
+    }
+    const { env } = makeEnv({ closed: true });
+    env.FLYWHEEL_DEV_OPEN_ADMIN = "1";
+    assert.equal((await reqJson(env, "GET", "/api/admin/keys")).status, 200);
+  });
+
+  it("uses one parse of the query for dispatch and the cache key", async () => {
+    const { env, sqlite } = makeEnv();
+    seedTrials(sqlite, [
+      { id: "A1:r:T1", decision: "keep", soft_min_eff: 0.1, created_at: ts(1) },
+      { id: "A2:r:T1", decision: "keep", soft_min_eff: 0.2, created_at: ts(2) },
+    ]);
+    const store = new Map();
+    env.CACHE = {
+      async match(req) {
+        const hit = store.get(typeof req === "string" ? req : req.url);
+        return hit ? hit.clone() : undefined;
+      },
+      async put(req, resp) {
+        store.set(typeof req === "string" ? req : req.url, resp.clone());
+      },
+    };
+    const repeated = await reqJson(env, "GET", "/api/nodes?lane=A1&lane=A2");
+    assert.deepEqual(repeated.json.nodes.map((n) => n.lane), ["A2"]); // last occurrence wins
+    assert.deepEqual((await reqJson(env, "GET", "/api/nodes?lane=A1")).json.nodes.map((n) => n.lane), ["A1"]);
+    assert.deepEqual((await reqJson(env, "GET", "/api/nodes?lane=A2")).json.nodes.map((n) => n.lane), ["A2"]);
+    // /api/frontier keeps `lane` in its key.
+    assert.deepEqual(Object.keys((await reqJson(env, "GET", "/api/frontier?lane=A1")).json.frontier), ["A1"]);
+    assert.deepEqual(Object.keys((await reqJson(env, "GET", "/api/frontier")).json.frontier), ["A1", "A2"]);
+  });
+
+  it("returns next_offset null at the 10,000 offset cap (trials, runs, notes)", async () => {
+    const { env, sqlite } = makeEnv();
+    seedTrials(sqlite, Array.from({ length: 10_100 }, (_, i) => ({ id: `A1:r${i}:T1`, created_at: ts(i) })));
+    const ins = sqlite.prepare("INSERT INTO notes (id, kind, title, state, author, node_ids, created_at, updated_at) VALUES (?, 'insight', 't', 'open', 'a', '[]', ?, ?)");
+    sqlite.exec("BEGIN");
+    for (let i = 0; i < 10_100; i += 1) ins.run(`note_${i}`, ts(i), ts(i));
+    sqlite.exec("COMMIT");
+    for (const path of ["/api/nodes", "/api/runs", "/api/notes"]) {
+      const before = (await reqJson(env, "GET", `${path}?limit=50&offset=9900`)).json;
+      assert.equal(before.next_offset, 9950, path);
+      const atCap = (await reqJson(env, "GET", `${path}?limit=50&offset=9960`)).json;
+      assert.equal(atCap.next_offset, null, path);
+      assert.equal(atCap.offset, 9960, path);
+    }
+  });
+
+  it("takes task claims in one statement and renews only the caller's own claims", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    const a = await registerToken(env, "claim-a");
+    const b = await registerToken(env, "claim-b");
+    // Two agents racing for one task: exactly one gets it.
+    const race = await Promise.all([
+      reqJson(env, "POST", "/api/claims", { task_id: "race", lane: "A1", agent: "x" }, bearer(a)),
+      reqJson(env, "POST", "/api/claims", { task_id: "race", lane: "A1", agent: "y" }, bearer(b)),
+    ]);
+    assert.deepEqual(race.map((r) => r.status).sort(), [201, 409]);
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS c FROM claims WHERE task_id = 'race' AND status = 'active'").get().c, 1);
+
+    // Two active claims (left by the old race): b's forced renewal must not abandon a's.
+    const later = new Date(Date.now() + 3_600_000).toISOString();
+    sqlite.prepare("INSERT INTO claims (id, task_id, lane, agent, status, expires_at, created_at) VALUES ('ca', 'dup', 'A1', 'claim-a:x', 'active', ?, '2026-01-01T00:00:00Z')").run(later);
+    sqlite.prepare("INSERT INTO claims (id, task_id, lane, agent, status, expires_at, created_at) VALUES ('cb', 'dup', 'A1', 'claim-b:y', 'active', ?, '2026-01-02T00:00:00Z')").run(later);
+    const forced = await reqJson(env, "POST", "/api/claims", { task_id: "dup", lane: "A1", agent: "y", force: true }, bearer(b));
+    assert.equal(forced.status, 403);
+    assert.equal(sqlite.prepare("SELECT status FROM claims WHERE id = 'ca'").get().status, "active");
+    // A handle that is a prefix of another does not own its claims.
+    const c = await registerToken(env, "claim");
+    assert.equal((await reqJson(env, "PATCH", "/api/claims/ca", { status: "done" }, bearer(c))).status, 403);
+    assert.equal((await reqJson(env, "PATCH", "/api/claims/ca", { status: "done" }, bearer(a))).status, 200);
+  });
+
+  it("keeps run_stats.author on the earliest surviving trial, and lane and contributor counts exact", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    const first = await registerToken(env, "first-author");
+    const second = await registerToken(env, "second-author");
+    await reqJson(env, "POST", "/api/nodes", trial("A1:shared:T1", { created_at: ts(1) }), bearer(first));
+    await reqJson(env, "POST", "/api/nodes", trial("A1:shared:T2", { created_at: ts(2) }), bearer(second));
+    const runAuthor = () => sqlite.prepare("SELECT author, author_tier FROM run_stats WHERE run_id = 'shared'").get();
+    assert.equal(runAuthor().author, "first-author");
+    await reqJson(env, "POST", "/api/admin/handles/first-author/purge", undefined, ADMIN);
+    assert.deepEqual({ ...runAuthor() }, { author: "second-author", author_tier: "provisional" });
+    await reqJson(env, "POST", "/api/admin/handles/second-author/promote", undefined, ADMIN);
+    assert.equal(runAuthor().author_tier, "contributor");
+
+    const lanes = () => sqlite.prepare("SELECT lane, trials, kept, archived, stan, runs FROM lane_stats ORDER BY lane").all().map((r) => ({ ...r }));
+    const recount = () =>
+      sqlite
+        .prepare(
+          `SELECT lane, SUM(trials) AS trials, SUM(kept) AS kept, SUM(archived) AS archived, SUM(stan) AS stan, COUNT(*) AS runs
+           FROM run_stats GROUP BY lane ORDER BY lane`
+        )
+        .all()
+        .map((r) => ({ ...r }));
+    assert.deepEqual(lanes(), recount());
+    assert.equal((await reqJson(env, "GET", "/api/overview")).json.totals.contributors, 1);
+  });
+
+  it("bounds D1 reads: capped filtered counts and a windowed q= and search, both labelled", async () => {
+    const { env, sqlite } = makeEnv();
+    seedTrials(sqlite, Array.from({ length: 2600 }, (_, i) => ({
+      id: `A1:r${i % 40}:T${i}`, decision: "discard_tier0", hypothesis: i < 100 ? "ancient zigzag" : "plain", created_at: ts(i),
+    })));
+    const counted = (await reqJson(env, "GET", "/api/nodes?decision=discard_tier0")).json;
+    assert.deepEqual({ count: counted.count, capped: counted.count_capped, next: counted.next_offset }, { count: 1000, capped: true, next: 50 });
+    const exact = (await reqJson(env, "GET", "/api/nodes?lane=A1")).json;
+    assert.deepEqual({ count: exact.count, capped: exact.count_capped }, { count: 2600, capped: false });
+    // The 100 oldest trials are outside the 2,000-trial window, so q= and search do not see them.
+    const q = (await reqJson(env, "GET", "/api/nodes?q=zigzag")).json;
+    assert.deepEqual({ count: q.count, window: q.search_window, truncated: q.window_truncated }, { count: 0, window: 2000, truncated: true });
+    const search = (await reqJson(env, "GET", "/api/search?q=zigzag")).json;
+    assert.deepEqual({ count: search.count, window: search.search_window, truncated: search.window_truncated }, { count: 0, window: 2000, truncated: true });
+    assert.equal((await reqJson(env, "GET", "/api/search?q=plain&kind=node")).json.count, 20);
+  });
+
+  it("rejects unsafe identifiers on write", async () => {
+    const { env } = makeEnv({ apiKey: "root-admin-secret" });
+    const token = await registerToken(env, "safe-ids");
+    // Real run ids use underscores (glm53_a1_dual_1h); the rule must not shut them out.
+    const ok = await reqJson(env, "POST", "/api/nodes", { ...trial("A1:glm53_a1_dual_1h:T0001"), run_id: "glm53_a1_dual_1h" }, bearer(token));
+    assert.equal(ok.status, 201, JSON.stringify(ok.body));
+    const bad = [
+      { id: "A1:r:T1;rm -rf ~" },
+      { id: "../../etc/passwd" },
+      { run_id: "run$(whoami)" },
+      { trial_id: "T 1" },
+      { lane: "A1-x" },
+      { lane: "LONGLANE9" },
+      { parent_ids: [{ id: "A1:r:`id`", relation: "combines" }] },
+    ];
+    for (const extra of bad) {
+      const res = await reqJson(env, "POST", "/api/nodes", { ...trial("A1:r:T1"), ...extra }, bearer(token));
+      assert.equal(res.status, 400, JSON.stringify(extra));
+      assert.equal(res.json.error, "invalid_identifier");
+    }
+    assert.equal((await reqJson(env, "POST", "/api/nodes", trial("A1:r_1.x-y:T0001"), bearer(token))).status, 201);
+    assert.equal((await reqJson(env, "POST", "/api/claims", { task_id: "t/../x", lane: "A1", agent: "a" }, bearer(token))).status, 400);
+    assert.equal((await reqJson(env, "POST", "/api/claims", { task_id: "t", lane: "A 1", agent: "a" }, bearer(token))).status, 400);
+    assert.equal((await reqJson(env, "POST", "/api/notes", { kind: "insight", title: "t", node_ids: ["a b"] }, bearer(token))).status, 400);
+    assert.equal((await reqJson(env, "POST", "/api/notes", { kind: "insight", title: "t", lane: "A_1" }, bearer(token))).status, 400);
+    assert.equal((await register(env, "bad:handle")).status, 400);
+    assert.equal((await register(env, "bad/handle")).status, 400);
   });
 });

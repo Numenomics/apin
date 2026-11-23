@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from pathlib import Path
 
@@ -108,6 +109,18 @@ def _safe_name(node_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", node_id)
 
 
+def _local_lane(lane: object) -> str:
+    """A lane name from the Flywheel, checked before it is used as a directory name.
+
+    The server is not trusted with paths: only a lane that exists in this checkout is accepted,
+    so a crafted value such as `../..` or an absolute path cannot move a write elsewhere."""
+    name = str(lane or "")
+    lanes_dir = ROOT / "autoresearch" / "lanes"
+    if not name.isalnum() or not (lanes_dir / name).is_dir():
+        raise ValueError(f"the Flywheel named lane {name!r}, which this checkout does not have")
+    return name
+
+
 def _split_ids(values: list[str] | None) -> list[str]:
     return [x.strip() for v in (values or []) for x in v.split(",") if x.strip()]
 
@@ -156,9 +169,12 @@ def _ar_fetch(a: argparse.Namespace) -> int:
         res, source = _fetch_source(a.node)
         lane = None
         if a.out is None:
-            lane = ((flywheel.get_node(a.node) or {}).get("node") or {}).get("lane")
+            lane = _local_lane(((flywheel.get_node(a.node) or {}).get("node") or {}).get("lane"))
     except flywheel.FlywheelError as exc:
         print(f"Could not fetch {a.node}: {_refusal(exc)}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"Could not place {a.node}: {exc}. Pass --out to choose the file yourself.", file=sys.stderr)
         return 1
     out = a.out or (ROOT / "autoresearch" / "lanes" / str(lane) / "runs" / a.run_id / "candidates"
                     / f"{_safe_name(a.node)}.py")
@@ -169,8 +185,9 @@ def _ar_fetch(a: argparse.Namespace) -> int:
     out.write_text(source, encoding="utf-8")
     print(f"Wrote {res.get('size')} bytes of {a.node} (sha256 {str(res.get('sha256'))[:16]}) to {out}")
     if lane:
+        # The id comes from another contributor, so it is quoted before anyone pastes it into a shell.
         print(f"To build on it: copy it over autoresearch/lanes/{lane}/submission.py, then "
-              f"`uv run apin autoresearch eval --lane {lane} --fork-of {a.node} --hypothesis \"...\"`.")
+              f"`uv run apin autoresearch eval --lane {lane} --fork-of {shlex.quote(a.node)} --hypothesis \"...\"`.")
     return 0
 
 
@@ -265,7 +282,12 @@ def _ar_verify_next(a: argparse.Namespace) -> int:
         print(f"Could not lease a trial: {_refusal(exc)}", file=sys.stderr)
         return 1
     lease, node = res.get("lease") or {}, res.get("node") or {}
-    node_id, lane = str(lease.get("node_id")), str(lease.get("lane") or node.get("lane"))
+    node_id = str(lease.get("node_id"))
+    try:
+        lane = _local_lane(lease.get("lane") or node.get("lane"))
+    except ValueError as exc:
+        print(f"Cannot rerun {node_id}: {exc}. The lease expires on its own.", file=sys.stderr)
+        return 1
     print(f"Leased {node_id} (lane {lane}, claimed soft_min={node.get('soft_min_eff')}) until {lease.get('lease_expires_at')}.")
     try:
         _, source = _fetch_source(node_id)

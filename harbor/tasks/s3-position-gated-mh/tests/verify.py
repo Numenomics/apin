@@ -370,11 +370,11 @@ def score_file(path: Path, lane: str, cfg: dict, work_dir: Path, *, confirm: boo
             if res2["passed"]:
                 if first["complete"] and first["soft_min_eff"] > 0.0 and math.isfinite(first["soft_min_eff"]):
                     conf["efficiency_source"] = "first_run_paired"
-                else:  # the judge left no usable first-run numbers: fall back, and say so
-                    second = scores_from_targets(res2, suites2)
-                    _check_rebuild(res2, second)
-                    out.update(**{k: v for k, v in second.items() if k != "complete"})
-                    conf["efficiency_source"] = "confirmation_run_unpaired"
+                else:
+                    # The first run left no usable efficiency. A score from the confirmation seed
+                    # is not paired with the frozen denominators, so no ratio is reported.
+                    conf["efficiency_source"] = "none"
+                    out["unpaired"] = True
                 out.update(valid=True, tier1_ok=True, failed_targets=[])
             else:
                 out["failed_targets"] = conf["failed_targets"]
@@ -563,8 +563,14 @@ def verify_optimize(lane: str, submission: Path, out_dir: Path, *, tests_dir: Pa
 
     ref_name = reference_name(files["reference"]) if files["reference"].is_file() else None
     dens["reference"]["name"] = ref_name
-    cls = classify(cand["valid"], cand.get("soft_min_eff", 0.0), dens["start"], dens["reference"],
-                   dens["frontier"], margin=margin)
+    if cand.get("unpaired"):
+        cls = {"outcome": "unscorable", "reward": 0.0, "start_speedup": None, "ref_speedup": None,
+               "frontier_speedup": None, "gap_closed": None,
+               "unscorable_reason": "the candidate passed its confirmation run, but its first run left no "
+                                    "usable efficiency to compare with the frozen denominators"}
+    else:
+        cls = classify(cand["valid"], cand.get("soft_min_eff", 0.0), dens["start"], dens["reference"],
+                       dens["frontier"], margin=margin)
     outcome = cls["outcome"]
     payload = {
         **base_payload,

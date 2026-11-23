@@ -89,7 +89,7 @@
     if (!state.runs.length) {
       el.setAttribute("width", width);
       el.setAttribute("height", 120);
-      el.appendChild(svg("text", { x: 16, y: 64 }, "No trials yet. The first one will appear here."));
+      el.appendChild(svg("text", { x: 16, y: 64 }, state.runsFailed ? "Could not load the runs. Use Reload to try again." : "No trials yet. The first one will appear here."));
       return;
     }
     /* Runs arrive newest first; the chart groups them by lane and reads each lane oldest first. */
@@ -434,6 +434,8 @@
       state.ledger.nodes = more ? state.ledger.nodes.concat(page.nodes) : page.nodes;
       state.ledger.next = page.next_offset;
       state.ledger.count = page.count;
+      state.ledger.capped = Boolean(page.count_capped);
+      state.ledger.window = page.window_truncated ? page.search_window : 0;
     } catch {
       if (seq !== state.ledger.seq) return;
       state.ledger.nodes = [];
@@ -449,7 +451,11 @@
   function renderLedger(filtered) {
     const list = state.ledger.nodes;
     const total = state.ledger.count;
-    $("#ledger-count").textContent = `${filtered ? fmt.int(total) + " matching" : "All " + fmt.int(total)} trials, newest first${list.length < total ? `; showing ${fmt.int(list.length)}` : ""}.`;
+    /* A filtered count is exact up to a cap; a search covers the newest trials only. The page says so. */
+    const many = state.ledger.capped ? fmt.int(total) + " or more" : fmt.int(total);
+    $("#ledger-count").textContent =
+      `${filtered ? many + " matching" : "All " + many} trials, newest first${list.length < total || state.ledger.capped ? `; showing ${fmt.int(list.length)}` : ""}.` +
+      (state.ledger.window ? ` The search covers the newest ${fmt.int(state.ledger.window)} trials.` : "");
     $("#ledger-more").hidden = state.ledger.next === null;
     if (!list.length) {
       $("#ledger").innerHTML = '<tbody><tr><td class="empty">No trial matches these filters. Clear the search or pick another lane.</td></tr></tbody>';
@@ -477,7 +483,8 @@
     try {
       detail = await state.store.node(id);
     } catch {
-      return; // an id the store does not know, for example a stale link
+      apin.drawer.open({ title: "Could not load this trial", sub: id, body: '<p class="caption">The Flywheel did not return it. It may have been removed, or the request failed. Close this and try again.</p>' });
+      return;
     }
     const n = detail.node;
     state.selected = id;
@@ -512,7 +519,7 @@
     const linked = detail.notes.length ? detail.notes : (state.notes || []).filter((note) => (note.node_ids || []).includes(n.id));
     const source = n.has_source
       ? `<div><h4>Source</h4><div class="chips"><button type="button" data-source="${esc(n.id)}">Show the submitted file</button></div>` +
-        `<div id="source-box"></div>${cmd(`uv run apin autoresearch fetch --node ${n.id}`)}</div>`
+        `<div id="source-box"></div>${cmd(`uv run apin autoresearch fetch --node ${apin.shq(n.id)}`)}</div>`
       : '<div><h4>Source</h4><p class="caption">No source file was stored for this older trial; only its hash is available.</p></div>';
 
     apin.drawer.open({
@@ -580,10 +587,19 @@
       state.store = await apin.openStore();
       state.overview = await state.store.overview();
       state.rows = apin.laneRows(state.overview);
-      const runs = await state.store.runs({ offset: 0 });
-      state.runs = runs.runs;
-      state.runsNext = runs.next_offset;
-      state.runsTotal = runs.count;
+      /* The chart is one section of the page: if its request fails, the rest still renders. */
+      state.runsFailed = false;
+      try {
+        const runs = await state.store.runs({ offset: 0 });
+        state.runs = runs.runs;
+        state.runsNext = runs.next_offset;
+        state.runsTotal = runs.count;
+      } catch {
+        state.runs = [];
+        state.runsNext = null;
+        state.runsTotal = 0;
+        state.runsFailed = true;
+      }
       [state.notes, state.queue] = state.store.source === "live" ? await extras : [null, null];
       renderMeta();
       renderLaneTable();

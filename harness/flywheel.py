@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -725,5 +726,9 @@ def post_trial_row(
     )
     try:
         return post_node(payload, url=url, token=resolved_token, timeout=timeout)
-    except FlywheelError:
+    except FlywheelError as exc:
+        # An outage is not the contributor's problem and stays quiet. A refusal is: the trial ran
+        # but is missing from the shared record, so say why (bad id, locked trial, daily cap).
+        if exc.status is not None and 400 <= exc.status < 500:
+            print(f"Flywheel did not accept trial {payload.get('id')}: {exc}", file=sys.stderr)
         return None

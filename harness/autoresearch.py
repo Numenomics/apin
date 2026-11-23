@@ -26,6 +26,8 @@ import hashlib
 import json
 import math
 import shutil
+import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,6 +105,30 @@ def _append_row(ledger_path: Path, tsv_path: Path, row: dict, *, run_id: str | N
     return row
 
 
+_LOAD_CHECK = (
+    "import sys; from pathlib import Path; from harness import judge, sandbox; "
+    "p = Path(sys.argv[1]); sandbox.confine_worker(p); judge.resolve_lane_submission(p, sys.argv[2] or None)"
+)
+
+
+def _load_check(sub_path: Path, lane: str | None) -> None:
+    """Check that a submission imports and exposes its lane's seam, in a confined child process.
+
+    A submission is untrusted code: a benchmark candidate, or another contributor's trial being
+    rerun. It must never be imported in this process, which computes the statistics and writes
+    the verdict, so the import happens in a child confined like the sampling workers."""
+    try:
+        res = subprocess.run(
+            [sys.executable, "-c", _LOAD_CHECK, str(Path(sub_path).resolve()), lane or ""],
+            capture_output=True, text=True, timeout=120, cwd=str(ROOT),
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError("submission did not finish importing within 120 s") from e
+    if res.returncode != 0:
+        lines = [ln for ln in res.stderr.strip().splitlines() if ln.strip()]
+        raise RuntimeError(lines[-1] if lines else f"submission failed to load (exit {res.returncode})")
+
+
 def _eval_tier0(
     sub_path: Path,
     seed: int,
@@ -114,7 +140,7 @@ def _eval_tier0(
     """Tier 0 fast reject: AST lint, lane seam, isolated ABI + replay, calibrated invariance smoke."""
     try:
         logdensity.check_imports(sub_path.read_text())
-        judge.resolve_lane_submission(sub_path, lane)
+        _load_check(sub_path, lane)
     except Exception as e:
         return False, {"stage": "load_lint", "error": str(e)}
 
@@ -455,7 +481,7 @@ def evaluate_lane_trial(
         lint_error = None
         try:
             logdensity.check_imports(raw_text)
-            judge.resolve_lane_submission(snap_path, lane)
+            _load_check(snap_path, lane)
         except Exception as e:
             lint_error = str(e)
         return {

@@ -248,6 +248,7 @@ def test_cli_fetch_writes_a_candidate_never_over_submission(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(cli, "ROOT", tmp_path)
+    (tmp_path / "autoresearch" / "lanes" / "A1").mkdir(parents=True, exist_ok=True)  # the lane must exist locally
     fake = FakeFlywheel(monkeypatch)
     node_id = "A1:run:T0004"
     fake.on("GET", f"/api/nodes/{node_id}/source", _source_payload(node_id, "def adapt(): pass\n"))
@@ -337,6 +338,7 @@ def test_cli_verify_next_leases_reruns_and_posts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(cli, "ROOT", tmp_path)
+    (tmp_path / "autoresearch" / "lanes" / "A1").mkdir(parents=True, exist_ok=True)  # the lane must exist locally
     flywheel.save_token("apfw_verifier")
     fake = FakeFlywheel(monkeypatch)
     node_id = "A1:run:T0004"
@@ -423,3 +425,19 @@ def test_non_finite_numbers_are_sent_as_null() -> None:
     # and the Worker would reject the whole trial.
     body = flywheel.strict_json({"ratio_vs_incumbent": float("inf"), "b2_max": float("nan"), "by_class": [1.0, float("-inf")]})
     assert json.loads(body, parse_constant=lambda name: pytest.fail(name)) == {"b2_max": None, "by_class": [1.0, None], "ratio_vs_incumbent": None}
+
+
+def test_cli_refuses_a_lane_name_that_would_move_a_write(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    # The lane comes from the server. `../..` or an absolute path must never become a directory.
+    from harness import cli
+
+    for bad in ("../../../tmp/x", "/tmp/x", "A1/../../x", "", "ZZ"):
+        with pytest.raises(ValueError):
+            cli._local_lane(bad)
+    assert cli._local_lane("A1") == "A1"
+
+    monkeypatch.setattr(flywheel, "get_source", lambda node_id, **kw: {"source": "x = 1\n", "sha256": __import__("hashlib").sha256(b"x = 1\n").hexdigest(), "size": 6})
+    monkeypatch.setattr(flywheel, "get_node", lambda node_id, **kw: {"node": {"id": node_id, "lane": "../../../../tmp/apin_escape"}})
+    rc = cli.main(["autoresearch", "fetch", "--node", "A1:run:T0001"])
+    assert rc == 1 and "does not have" in capsys.readouterr().err
+    assert not Path("/tmp/apin_escape").exists()

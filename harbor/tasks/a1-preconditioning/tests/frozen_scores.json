@@ -2,7 +2,7 @@
   "schema": 1,
   "lane": "A1",
   "task": "a1-preconditioning",
-  "judge_digest": "720a17a2cc4a7e74",
+  "judge_digest": "ab1554254c661879",
   "config": {
     "seed": 39389868,
     "dims": [
@@ -16,7 +16,7 @@
     "horizon_steps": 500,
     "confirmation_seed": 78210474
   },
-  "frozen_at": "2026-11-23T04:32:07+00:00",
+  "frozen_at": "2026-11-23T05:42:14+00:00",
   "reference_name": "stan-windowed-diag-metric-2.37",
   "scores": {
     "start": {
@@ -24,7 +24,7 @@
       "role": "start",
       "file": "baseline.py",
       "sha256": "55a02b88bbba03fbe80dd9e688570d3e91e578a6693d504809dab0ca8e90d497",
-      "judge_digest": "720a17a2cc4a7e74",
+      "judge_digest": "ab1554254c661879",
       "config": {
         "seed": 39389868,
         "dims": [
@@ -45,7 +45,7 @@
       "short_horizon_soft_min": 0.0003618302354080983,
       "long_horizon_soft_min": 0.0005903954799408597,
       "b2_max": 0.2815896919171979,
-      "overhead_ratio": 6.398165754638322,
+      "overhead_ratio": 4.948103556286304,
       "by_class": {
         "banana": 0.0008339314679778915,
         "funnel": 0.0020112523656283885,
@@ -134,14 +134,14 @@
       "confirmation": {
         "ran": false
       },
-      "wall_s": 476.3
+      "wall_s": 360.8
     },
     "reference": {
       "lane": "A1",
       "role": "reference",
       "file": "reference.py",
       "sha256": "1b24abff1a1b0a70f5673fdeffa101d57d0823ff0ec4f193b49f6a1b0be8a252",
-      "judge_digest": "720a17a2cc4a7e74",
+      "judge_digest": "ab1554254c661879",
       "config": {
         "seed": 39389868,
         "dims": [
@@ -162,7 +162,7 @@
       "short_horizon_soft_min": 0.00022725837503421767,
       "long_horizon_soft_min": 0.0004434861913113088,
       "b2_max": 0.2815896919171979,
-      "overhead_ratio": 5.98290986463834,
+      "overhead_ratio": 4.454151013389893,
       "by_class": {
         "banana": 0.0010328694632320524,
         "funnel": 0.0017064555988351448,
@@ -251,7 +251,7 @@
       "confirmation": {
         "ran": false
       },
-      "wall_s": 650.2,
+      "wall_s": 488.0,
       "name": "stan-windowed-diag-metric-2.37"
     },
     "frontier": {
@@ -259,7 +259,7 @@
       "role": "frontier",
       "file": "frontier.py",
       "sha256": "cbc54bbbd03d85110c0c3a68a7cb9257213fddd463d890c82e9cb849b30a0879",
-      "judge_digest": "720a17a2cc4a7e74",
+      "judge_digest": "ab1554254c661879",
       "config": {
         "seed": 39389868,
         "dims": [
@@ -280,7 +280,7 @@
       "short_horizon_soft_min": 0.000826968943183802,
       "long_horizon_soft_min": 0.0009234788459443002,
       "b2_max": 0.3236251524166098,
-      "overhead_ratio": 7.832441953414638,
+      "overhead_ratio": 7.079314579135513,
       "by_class": {
         "banana": 0.001148813860545537,
         "funnel": 0.004868851858879833,
@@ -374,13 +374,13 @@
           "banana(d=20, rot=True): invariance rejected on r1_sq: |z|=3.94 > 3.82 (b2_max=0.3236)"
         ],
         "failed_targets": [],
-        "wall_s": 419.7,
+        "wall_s": 286.1,
         "efficiency_source": "first_run_paired"
       },
-      "wall_s": 725.7,
+      "wall_s": 540.7,
       "source": "autoresearch/lanes/A1/submission.py",
       "git_commit": "b85c6e71898c1036023102c5b5969396475ef48c",
-      "copied_from_source": true
+      "copied_from_source": false
     }
   }
 }

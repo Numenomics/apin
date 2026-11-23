@@ -59,7 +59,7 @@ uv run apin autoresearch release --claim <claim id>
 uv run apin autoresearch search "low-rank metric"                 # trials and notes
 uv run apin autoresearch fetch --node <node id>                   # another contributor's source
 uv run apin autoresearch note add --kind hypothesis --lane A1 --title "..." --body "..."
-uv run apin autoresearch verify-next --lane A1                    # rerun the next queued trial on fresh seeds
+uv run apin autoresearch verify-next --lane A1                    # rerun the next queued trial on fresh seeds (not for provisional handles)
 uv run apin autoresearch set-state --node <node id> --state needs-replication --reason "..."
 ```
 

@@ -276,3 +276,19 @@ def test_collector_writes_json_a_browser_can_parse(tmp_path):
     assert "Infinity" not in text and "NaN" not in text
     saved = json.loads(text, parse_constant=lambda name: pytest.fail(f"non-standard JSON constant {name}"))["releases"][0]["trials"][0]
     assert saved["b2_max"] is None and saved["by_class"]["funnel"] is None
+
+
+def test_collector_termination_rule_does_not_score_runs_that_never_had_a_fair_chance():
+    mod = _load_collector()
+    kind = mod.classify_termination
+    assert kind(None, rate_limited=False, tool_calls=9) == "finished"
+    assert kind("AgentTimeoutError", rate_limited=True, tool_calls=9) == "time_limit"
+    # Cancelled runs, setup timeouts and provider outages are not the agent's result.
+    assert kind("CancelledError", rate_limited=False, tool_calls=9) == "infrastructure"
+    assert kind("AgentSetupTimeoutError", rate_limited=False, tool_calls=0) == "infrastructure"
+    assert kind("ApiProviderOverloadedError", rate_limited=False, tool_calls=9) == "provider_limit"
+    assert kind("ApiRateLimitError", rate_limited=False, tool_calls=9) == "provider_limit"
+    # An exception with no verifier result cannot be an invalid attempt: nothing was graded.
+    assert kind("SomeNewHarborError", rate_limited=False, tool_calls=9, graded=False) == "infrastructure"
+    assert kind("NonZeroAgentExitCodeError", rate_limited=False, tool_calls=9) == "agent_error"
+    assert {"provider_limit", "infrastructure", "agent_crash"} == set(mod.INTERRUPTED)
