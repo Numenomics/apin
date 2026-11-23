@@ -16,6 +16,7 @@
     ledger: { nodes: [], next: null, count: 0, seq: 0 },
     notes: null,
     queue: null,
+    breaks: [], // kept trials that clearly beat their incumbent, oldest first
     selected: null,
     redraw: [],
   };
@@ -219,6 +220,88 @@
     $("#field-legend").innerHTML =
       `<span>${glyph("line", c)}version to beat</span><span>${glyph("keep", c)}kept</span><span>${glyph("open", "var(--ink-3)")}scored, not kept</span>` +
       `<span>${glyph("tick", "var(--ink-3)")}failed a check</span><span>${glyph("stan", c)}also run on real Stan</span>`;
+  }
+
+  /* ---------- breakthroughs ----------
+     A breakthrough is a kept trial that beat the version it replaced by a clear margin, measured
+     on the same seeds. That ratio is comparable across lanes and runs, unlike raw efficiency.
+     Every such trial is a dot in time order; the largest gains carry a note saying what was
+     tried and who tried it. */
+
+  const BREAKTHROUGH = 1.1; // paired gain over the incumbent that counts
+  const NOTED = 7; // how many carry a note
+
+  function renderBreak(width) {
+    const el = $("#break");
+    el.innerHTML = "";
+    const W = width;
+    const narrow = W < 640;
+    const H = narrow ? 400 : 420;
+    el.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    el.setAttribute("height", H);
+    const pts = state.breaks;
+    if (!pts.length) {
+      el.appendChild(svg("text", { x: 0, y: H / 2 }, "No kept trial has beaten its incumbent by 10% yet."));
+      return;
+    }
+    const pad = { l: 40, r: 14, t: 166, b: 34 };
+    const top = Math.max(2, ...pts.map((n) => n.ratio_vs_incumbent)) * 1.08;
+    const sx = (i) => (pts.length === 1 ? (pad.l + W - pad.r) / 2 : pad.l + 8 + (i / (pts.length - 1)) * (W - pad.l - pad.r - 16));
+    const sy = (v) => H - pad.b - (Math.log(v) / Math.log(top)) * (H - pad.t - pad.b);
+    for (const v of [1, 1.5, 2, 3, 5, 10, 20, 50].filter((t) => t <= top)) {
+      el.appendChild(svg("line", { class: v === 1 ? "axis" : "grid", x1: pad.l, x2: W - pad.r, y1: sy(v), y2: sy(v) }));
+      el.appendChild(svg("text", { x: pad.l - 8, y: sy(v) + 4, "text-anchor": "end" }, v + "×"));
+    }
+    el.appendChild(svg("text", { class: "axis-title", x: pad.l, y: H - 8 }, `Oldest to newest, ${fmt.day(pts[0].created_at)} to ${fmt.day(pts[pts.length - 1].created_at)}`));
+
+    /* The largest gains get a note. Each note sits above the plot as close to its own dot as the
+       other notes allow: dots are taken left to right and each note goes in the first row that
+       is free at its position, so leaders stay short and seldom cross. */
+    const noted = [...pts.keys()].sort((a, b) => pts[b].ratio_vs_incumbent - pts[a].ratio_vs_incumbent).slice(0, narrow ? 3 : NOTED).sort((a, b) => a - b);
+    const noteW = narrow ? Math.min(210, W - pad.l - pad.r) : 236;
+    const chars = Math.floor(noteW / 6.7);
+    const leaders = svg("g", { fill: "none", stroke: "var(--rule-2)", "stroke-dasharray": "1 3", "stroke-linecap": "round" });
+    const notes = svg("g");
+    /* Three rows, filled in turn. In each row a note starts at its dot unless the note before it
+       is in the way, and a row that runs off the right edge is pushed back from its last note. */
+    const gap = 16;
+    const rowsOf = [[], [], []];
+    noted.forEach((idx, k) => rowsOf[k % 3].push({ idx, tx: Math.max(pad.l, sx(idx) - 24) }));
+    for (const row of rowsOf) {
+      row.forEach((c, i) => (c.tx = i ? Math.max(c.tx, row[i - 1].tx + noteW + gap) : c.tx));
+      for (let i = row.length - 1; i >= 0; i -= 1) pushBack(row, i);
+    }
+    function pushBack(row, i) {
+      const limit = i === row.length - 1 ? W - pad.r - noteW : row[i + 1].tx - noteW - gap;
+      row[i].tx = Math.max(pad.l, Math.min(row[i].tx, limit));
+    }
+    rowsOf.forEach((row, r) => row.forEach(({ idx, tx }) => {
+      const n = pts[idx];
+      const px = sx(idx);
+      const py = sy(n.ratio_vs_incumbent);
+      const ty = 14 + (2 - r) * 48;
+      leaders.appendChild(svg("path", { d: `M${Math.max(tx + 4, Math.min(px, tx + noteW - 4)).toFixed(1)} ${ty + 36}L${px.toFixed(1)} ${(py - 7).toFixed(1)}` }));
+      const g = svg("g", { class: "note-call", "data-node": n.id, tabindex: 0, role: "button", "aria-label": `${n.lane} ${fmt.times(n.ratio_vs_incumbent)} over its incumbent: ${clip(headline(n), 90)}` });
+      const head = svg("text", { class: "call-gain", x: tx, y: ty });
+      head.appendChild(svg("tspan", { fill: apin.laneColor(n.lane) }, n.lane));
+      head.appendChild(svg("tspan", { dx: 6 }, fmt.times(n.ratio_vs_incumbent) + " its incumbent"));
+      g.appendChild(head);
+      g.appendChild(svg("text", { class: "call-what", x: tx, y: ty + 16 }, clip(headline(n), chars)));
+      const who = [...new Set([n.author, n.agent_model].filter(Boolean))].join(" · ") || "unknown";
+      g.appendChild(svg("text", { class: "call-who", x: tx, y: ty + 31 }, clip(`${who}, ${fmt.day(n.created_at)}`, chars)));
+      notes.appendChild(g);
+    }));
+    el.append(leaders);
+
+    pts.forEach((n, i) => {
+      const node = svg("g", { class: "node", transform: `translate(${sx(i).toFixed(1)},${sy(n.ratio_vs_incumbent).toFixed(1)})`, tabindex: 0, role: "button", "data-node": n.id, "aria-label": `${n.lane} ${n.trial_id || ""}: ${fmt.times(n.ratio_vs_incumbent)} over its incumbent` });
+      node.appendChild(svg("circle", { r: 10, fill: "transparent" }));
+      node.appendChild(svg("circle", { r: noted.includes(i) ? 4.2 : 3, fill: apin.laneColor(n.lane), stroke: "var(--paper)", "stroke-width": 1 }));
+      node.appendChild(svg("circle", { class: "pick", r: 7.5 }));
+      tip.bind(node, () => `<b>${esc(n.lane)} ${esc(n.trial_id || "")}</b> · ${fmt.times(n.ratio_vs_incumbent)} its incumbent<br>${esc(clip(headline(n), 150))}<br><span class="k">By</span> ${esc(n.author || n.agent_model || "unknown")} · ${esc(fmt.day(n.created_at))}`);
+      el.appendChild(node);
+    });
+    el.append(notes);
   }
 
   /* ---------- gain chart ---------- */
@@ -601,6 +684,14 @@
         state.runsFailed = true;
       }
       [state.notes, state.queue] = state.store.source === "live" ? await extras : [null, null];
+      /* The newest 200 kept trials are enough to find the recent breakthroughs, and bound the read. */
+      try {
+        const kept = await state.store.trials({ outcome: "kept", limit: 200 });
+        state.breaks = kept.nodes.filter((n) => n.decision === "keep" && isNum(n.ratio_vs_incumbent) && n.ratio_vs_incumbent >= BREAKTHROUGH).reverse();
+      } catch {
+        state.breaks = [];
+      }
+      $("#break-count").textContent = state.breaks.length ? `${state.breaks.length} kept ${state.breaks.length === 1 ? "trial" : "trials"} beat the version before by 10% or more.` : "";
       renderMeta();
       renderLaneTable();
       renderFieldLegend();
@@ -614,6 +705,7 @@
       else {
         state.redraw = [
           apin.watchWidth($(".field-scroll"), renderField),
+          apin.watchWidth($("#break-box"), renderBreak),
           apin.watchWidth($("#gain-box"), renderGain),
           apin.watchWidth($("#align-box"), renderAlign),
         ];
