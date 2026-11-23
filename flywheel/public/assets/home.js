@@ -242,20 +242,21 @@
   /* ---------- frontier summary ---------- */
 
   apin
-    .loadGraph()
-    .then((graph) => {
-      const rows = apin.laneSummaries(graph);
-      const kept = graph.nodes.filter((n) => apin.KEPT.has(n.decision)).length;
+    .openStore()
+    .then(async (store) => {
+      const overview = await store.overview();
+      const rows = apin.laneRows(overview);
+      const t = overview.totals;
       $("#front-note").textContent =
-        `The best kept result in each lane so far: ${graph.nodes.length} trials recorded, ${kept} kept, ` +
-        `${graph.claims.length} ${graph.claims.length === 1 ? "task" : "tasks"} claimed now` +
-        (graph.source === "snapshot" ? " (from the snapshot shipped with this page)." : ".");
+        `The best kept result in each lane so far: ${fmt.int(t.trials)} trials recorded, ${fmt.int(t.kept)} kept, ` +
+        `${t.claims} ${t.claims === 1 ? "task" : "tasks"} claimed now` +
+        (store.source === "snapshot" ? " (from the snapshot shipped with this page)." : ".");
       $("#front-table").innerHTML =
         "<thead><tr><th>Lane</th><th>Focus</th><th class='num'>Best efficiency</th><th class='num'>Gain within its run</th>" +
         "<th>Real Stan posteriors</th><th class='num'>Trials</th><th>Progress</th></tr></thead><tbody>" +
         rows
           .map((r) => {
-            if (!r.nodes.length) {
+            if (!r.trials) {
               return `<tr><td>${apin.laneTag(r.lane.id)}</td><td>${esc(r.lane.name)}</td><td colspan="5" class="sub">No trials recorded yet. <a href="/lanes/#${r.lane.id}">Start this lane</a></td></tr>`;
             }
             const stan = r.stan
@@ -264,7 +265,7 @@
             return (
               `<tr><td>${apin.laneTag(r.lane.id)}</td><td><a href="/lanes/#${r.lane.id}">${esc(r.lane.name)}</a></td>` +
               `<td class="num">${fmt.eff(r.top && r.top.soft_min_eff)}</td><td class="num">${fmt.times(r.gain)}</td>` +
-              `<td>${stan}</td><td class="num">${r.kept} kept of ${r.nodes.length}</td>` +
+              `<td>${stan}</td><td class="num">${fmt.int(r.kept)} kept of ${fmt.int(r.trials)}</td>` +
               `<td>${apin.sparkline(r.steps, apin.laneColor(r.lane.id))}</td></tr>`
             );
           })

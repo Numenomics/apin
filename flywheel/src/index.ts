@@ -22,6 +22,7 @@ export interface D1PreparedStatement {
 
 export interface D1DatabaseLike {
   prepare(query: string): D1PreparedStatement;
+  batch?<T = Record<string, unknown>>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>;
 }
 
 export interface AssetsBindingLike {
@@ -90,6 +91,21 @@ export const LIMITS = {
   notesLimitMax: 100,
   queueLimitMax: 100,
   queryChars: 200,
+  // Bounded reads (see "Bounded reads" below).
+  nodesLimitDefault: 50,
+  nodesLimitMax: 200,
+  runsLimitDefault: 24,
+  runsLimitMax: 60,
+  runNodes: 150,
+  runSteps: 120,
+  dagNodes: 300,
+  alignmentPoints: 300,
+  overviewLanes: 32,
+  overviewModels: 100,
+  overviewClaims: 100,
+  claimsList: 200,
+  nodeChildren: 200,
+  nodeNotes: 20,
   searchOffsetMax: 500,
   provisionalTrialsPerDay: 100,
   provisionalTrialsPerDayGlobal: 1000,
@@ -378,8 +394,12 @@ function canonicalPublicCacheKey(url: URL): Request | null {
   if (pathname === "/api/health" || pathname === "/api/frontier") return key("");
   if (pathname === "/api/dag") return key(canonicalQuery(url, ["lane"]));
   if (pathname === "/api/claims") return key(canonicalQuery(url, ["lane"]));
+  if (pathname === "/api/overview") return key("");
+  if (pathname === "/api/runs") return key(canonicalQuery(url, ["lane", "limit", "offset"]));
   if (pathname === "/api/nodes") {
-    return key(canonicalQuery(url, ["lane", "run_id", "decision", "verified", "state", "limit"]));
+    return key(canonicalQuery(url, [
+      "lane", "run_id", "decision", "verified", "state", "model", "outcome", "stan", "q", "limit", "offset",
+    ]));
   }
   if (pathname.startsWith("/api/nodes/") && pathname.length > "/api/nodes/".length) return key("");
   if (pathname === "/api/search") {
@@ -692,100 +712,240 @@ function deserializeNode(row: NodeRow): NodeRecord {
   };
 }
 
-function isKeptOrVerified(node: NodeRecord): boolean {
-  return node.verified === 1 || KEPT_DECISIONS.has(node.decision);
+// ---------------------------------------------------------------------------
+// Bounded reads
+//
+// Every helper below hands the Worker a bounded number of rows, whatever the number of
+// trials: counts come from run_stats (kept current by triggers, migration 0002) and lists
+// use indexed ORDER BY ... LIMIT. Nothing loads the whole nodes table into JavaScript.
+// ---------------------------------------------------------------------------
+
+/** Decisions counted as "kept" in counts, filters and run charts (run_stats.kept). */
+const OUTCOME_KEPT = ["keep", "keep_baseline", "keep_simpler", "keep_incumbent_failed"];
+const sqlList = (xs: readonly string[]) => xs.map((x) => `'${x}'`).join(", ");
+const SQL_OUTCOME_KEPT = sqlList(OUTCOME_KEPT);
+/** Frontier eligibility: not retracted or disputed, and kept or verified. */
+const SQL_FRONTIER_OK = `state NOT IN (${sqlList(FRONTIER_EXCLUDED_STATES)})`;
+const SQL_FRONTIER_ELIGIBLE = `(verified = 1 OR decision IN (${sqlList([...KEPT_DECISIONS])}))`;
+const SQL_FRONTIER_ORDER =
+  "ORDER BY soft_min_eff DESC, verified DESC, coalesce(real_stan_passed, -1) DESC, created_at DESC, id DESC";
+
+type NodeWithoutRaw = Omit<NodeRecord, "metrics_json">;
+
+function stripRaw(n: NodeRecord): NodeWithoutRaw {
+  const { metrics_json: _raw, ...rest } = n;
+  return rest;
 }
 
-function compareFrontierCandidates(a: NodeRecord, b: NodeRecord): number {
-  const aEff = a.soft_min_eff ?? -Infinity;
-  const bEff = b.soft_min_eff ?? -Infinity;
-  if (aEff !== bEff) return bEff - aEff;
-
-  if (a.verified !== b.verified) return b.verified - a.verified;
-
-  const aStan = a.real_stan_passed ?? -1;
-  const bStan = b.real_stan_passed ?? -1;
-  if (aStan !== bStan) return bStan - aStan;
-
-  if (a.created_at !== b.created_at) return b.created_at.localeCompare(a.created_at);
-  return b.id.localeCompare(a.id);
-}
-
-function computeFrontier(nodes: NodeRecord[]): Record<string, NodeRecord> {
-  const byLane = new Map<string, NodeRecord[]>();
-  for (const node of nodes) {
-    if (FRONTIER_EXCLUDED_STATES.includes(node.state)) continue;
-    const list = byLane.get(node.lane) ?? [];
-    list.push(node);
-    byLane.set(node.lane, list);
-  }
-
-  const frontier: Record<string, NodeRecord> = {};
-  for (const lane of [...byLane.keys()].sort()) {
-    const laneNodes = byLane.get(lane) ?? [];
-    const eligible = laneNodes.filter(isKeptOrVerified);
-    const pool = eligible.length > 0 ? eligible : laneNodes;
-    if (pool.length > 0) {
-      pool.sort(compareFrontierCandidates);
-      frontier[lane] = pool[0];
-    }
-  }
-  return frontier;
-}
-
-function computeAlignment(nodes: NodeRecord[]): AlignmentPoint[] {
-  const points: AlignmentPoint[] = [];
-  for (const node of nodes) {
-    if (
-      node.soft_min_eff !== null &&
-      node.real_stan_passed !== null &&
-      node.real_stan_total !== null &&
-      node.real_stan_total > 0
-    ) {
-      points.push({
-        id: node.id,
-        lane: node.lane,
-        run_id: node.run_id,
-        trial_id: node.trial_id,
-        agent_model: node.agent_model,
-        title: node.title,
-        decision: node.decision,
-        soft_min_eff: node.soft_min_eff,
-        ratio_vs_incumbent: node.ratio_vs_incumbent,
-        real_stan_passed: node.real_stan_passed,
-        real_stan_total: node.real_stan_total,
-        real_stan_pass_rate: node.real_stan_passed / node.real_stan_total,
-        real_ess_per_cost: node.real_ess_per_cost,
-        overhead_ratio: node.overhead_ratio,
-        verified: node.verified,
-      });
-    }
-  }
-  return points;
-}
-
-async function queryAllNodes(db: D1DatabaseLike): Promise<NodeRecord[]> {
-  const res = await db.prepare("SELECT * FROM nodes ORDER BY created_at ASC, id ASC").all<NodeRow>();
-  return (res.results ?? []).map(deserializeNode);
+/** Runs read statements in one D1 round trip when the binding supports batch(). */
+async function batchAll<T>(db: D1DatabaseLike, stmts: D1PreparedStatement[]): Promise<T[][]> {
+  if (stmts.length === 0) return [];
+  if (db.batch) return (await db.batch<T>(stmts)).map((r) => r.results ?? []);
+  const rows: T[][] = [];
+  for (const s of stmts) rows.push((await s.all<T>()).results ?? []);
+  return rows;
 }
 
 async function getNodeRow(db: D1DatabaseLike, id: string): Promise<NodeRow | null> {
   return db.prepare("SELECT * FROM nodes WHERE id = ?").bind(id).first<NodeRow>();
 }
 
-/** Every lineage edge whose endpoints both exist: node_parents plus legacy nodes.parent_id. */
-async function queryAllEdges(db: D1DatabaseLike, nodes: NodeRecord[], lane?: string | null): Promise<DagEdge[]> {
+interface LaneStat {
+  lane: string;
+  trials: number;
+  kept: number;
+  runs: number;
+  latest_at: string | null;
+}
+
+/** Lanes that have trials, from run_stats (at most LIMITS.overviewLanes, busiest first, then sorted by name). */
+async function laneStats(db: D1DatabaseLike, lane?: string | null): Promise<LaneStat[]> {
+  const res = await db
+    .prepare(
+      `SELECT lane, SUM(trials) AS trials, SUM(kept) AS kept, COUNT(*) AS runs, MAX(last_at) AS latest_at
+       FROM run_stats ${lane ? "WHERE lane = ?" : ""} GROUP BY lane HAVING SUM(trials) > 0
+       ORDER BY SUM(trials) DESC, lane LIMIT ?`
+    )
+    .bind(...(lane ? [lane] : []), LIMITS.overviewLanes)
+    .all<LaneStat>();
+  return (res.results ?? [])
+    .map((r) => ({
+      lane: r.lane,
+      trials: Number(r.trials),
+      kept: Number(r.kept),
+      runs: Number(r.runs),
+      latest_at: r.latest_at ?? null,
+    }))
+    .sort((a, b) => a.lane.localeCompare(b.lane));
+}
+
+/** Best kept-or-verified trial per lane (falling back to any non-excluded trial), one indexed LIMIT 1 query per lane. */
+async function laneFrontiers(db: D1DatabaseLike, lanes: string[]): Promise<Record<string, NodeRecord>> {
+  const pick = (eligible: boolean) =>
+    `SELECT * FROM nodes INDEXED BY idx_nodes_lane_eff WHERE lane = ? AND ${SQL_FRONTIER_OK}${eligible ? ` AND ${SQL_FRONTIER_ELIGIBLE}` : ""} ${SQL_FRONTIER_ORDER} LIMIT 1`;
+  const frontier: Record<string, NodeRecord> = {};
+  const first = await batchAll<NodeRow>(db, lanes.map((l) => db.prepare(pick(true)).bind(l)));
+  const missing: string[] = [];
+  lanes.forEach((l, i) => {
+    if (first[i]?.[0]) frontier[l] = deserializeNode(first[i][0]);
+    else missing.push(l);
+  });
+  const second = await batchAll<NodeRow>(db, missing.map((l) => db.prepare(pick(false)).bind(l)));
+  missing.forEach((l, i) => {
+    if (second[i]?.[0]) frontier[l] = deserializeNode(second[i][0]);
+  });
+  const sorted: Record<string, NodeRecord> = {};
+  for (const l of Object.keys(frontier).sort()) sorted[l] = frontier[l];
+  return sorted;
+}
+
+/**
+ * Running best kept efficiency over one run, starting at its first kept scored trial.
+ * The window functions run in D1; the Worker receives at most LIMITS.runSteps rows: every
+ * point when the run is short enough, otherwise the points where the value changes plus
+ * the last one (and, if even those are too many, the first plus the most recent ones).
+ */
+function runStepsStmt(db: D1DatabaseLike, lane: string, runId: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `WITH r AS (
+         SELECT created_at, id,
+           MAX(CASE WHEN decision IN (${SQL_OUTCOME_KEPT}) AND soft_min_eff > 0 THEN soft_min_eff END)
+             OVER (ORDER BY created_at, id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS best
+         FROM nodes WHERE lane = ? AND run_id = ?
+       ), s AS (
+         SELECT best, ROW_NUMBER() OVER (ORDER BY created_at, id) AS rn,
+           LAG(best) OVER (ORDER BY created_at, id) AS prev, COUNT(*) OVER () AS n
+         FROM r WHERE best IS NOT NULL
+       )
+       SELECT best, rn, n FROM s WHERE n <= ? OR rn = 1 OR rn = n OR best <> prev
+       ORDER BY rn = 1 DESC, rn DESC LIMIT ?`
+    )
+    .bind(lane, runId, LIMITS.runSteps, LIMITS.runSteps);
+}
+
+function runSummary(runId: string, frontierEff: number | null, rows: { best: number; rn: number }[]) {
+  const steps = [...rows].sort((a, b) => Number(a.rn) - Number(b.rn)).map((r) => Number(r.best));
+  const firstEff = steps.length > 0 ? steps[0] : null;
+  const gain = firstEff && frontierEff !== null ? frontierEff / firstEff : null;
+  return { run_id: runId, first_eff: firstEff, gain, steps };
+}
+
+interface StanRow {
+  id: string;
+  run_id: string;
+  trial_id: string | null;
+  real_stan_passed: number | null;
+  real_stan_total: number;
+}
+
+function laneStanStmt(db: D1DatabaseLike, lane: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `SELECT id, run_id, trial_id, real_stan_passed, real_stan_total FROM nodes INDEXED BY idx_nodes_stan_lane
+       WHERE lane = ? AND real_stan_total > 0
+       ORDER BY CAST(coalesce(real_stan_passed, 0) AS REAL) / real_stan_total DESC, created_at DESC, id DESC LIMIT 1`
+    )
+    .bind(lane);
+}
+
+const ALIGNMENT_COLUMNS =
+  "id, lane, run_id, trial_id, agent_model, title, decision, soft_min_eff, ratio_vs_incumbent, " +
+  "real_stan_passed, real_stan_total, real_ess_per_cost, overhead_ratio, verified";
+
+/** Newest trials with both a proxy score and a real-Stan score, oldest first. */
+async function recentAlignment(db: D1DatabaseLike, lane?: string | null): Promise<AlignmentPoint[]> {
+  const res = await db
+    .prepare(
+      `SELECT ${ALIGNMENT_COLUMNS} FROM nodes
+       WHERE real_stan_total > 0 AND real_stan_passed IS NOT NULL AND soft_min_eff IS NOT NULL${lane ? " AND lane = ?" : ""}
+       ORDER BY created_at DESC, id DESC LIMIT ?`
+    )
+    .bind(...(lane ? [lane] : []), LIMITS.alignmentPoints)
+    .all<NodeRow>();
+  return (res.results ?? []).reverse().map((n) => ({
+    id: n.id,
+    lane: n.lane,
+    run_id: n.run_id,
+    trial_id: n.trial_id ?? null,
+    agent_model: n.agent_model ?? null,
+    title: n.title ?? null,
+    decision: n.decision,
+    soft_min_eff: Number(n.soft_min_eff),
+    ratio_vs_incumbent: toFiniteNumber(n.ratio_vs_incumbent),
+    real_stan_passed: Number(n.real_stan_passed),
+    real_stan_total: Number(n.real_stan_total),
+    real_stan_pass_rate: Number(n.real_stan_passed) / Number(n.real_stan_total),
+    real_ess_per_cost: toFiniteNumber(n.real_ess_per_cost),
+    overhead_ratio: toFiniteNumber(n.overhead_ratio),
+    verified: n.verified ? 1 : 0,
+  }));
+}
+
+/** Alignment points among already-loaded trials (the DAG's newest trials). */
+function alignmentOf(nodes: NodeRecord[]): AlignmentPoint[] {
+  return nodes
+    .filter((n) => n.soft_min_eff !== null && n.real_stan_passed !== null && (n.real_stan_total ?? 0) > 0)
+    .map((n) => ({
+      id: n.id,
+      lane: n.lane,
+      run_id: n.run_id,
+      trial_id: n.trial_id,
+      agent_model: n.agent_model,
+      title: n.title,
+      decision: n.decision,
+      soft_min_eff: n.soft_min_eff as number,
+      ratio_vs_incumbent: n.ratio_vs_incumbent,
+      real_stan_passed: n.real_stan_passed as number,
+      real_stan_total: n.real_stan_total as number,
+      real_stan_pass_rate: (n.real_stan_passed as number) / (n.real_stan_total as number),
+      real_ess_per_cost: n.real_ess_per_cost,
+      overhead_ratio: n.overhead_ratio,
+      verified: n.verified,
+    }));
+}
+
+async function queryActiveClaims(db: D1DatabaseLike, lane?: string | null, limit: number = LIMITS.claimsList): Promise<ClaimRow[]> {
+  const res = await db
+    .prepare(
+      `SELECT * FROM claims WHERE status = 'active' AND expires_at > ?${lane ? " AND lane = ?" : ""}
+       ORDER BY created_at DESC LIMIT ?`
+    )
+    .bind(nowIso(), ...(lane ? [lane] : []), limit)
+    .all<ClaimRow>();
+  return res.results ?? [];
+}
+
+async function countActiveClaims(db: D1DatabaseLike): Promise<number> {
+  const row = await db
+    .prepare("SELECT COUNT(*) AS count FROM claims WHERE status = 'active' AND expires_at > ?")
+    .bind(nowIso())
+    .first<{ count: number }>();
+  return Number(row?.count ?? 0);
+}
+
+async function totalTrials(db: D1DatabaseLike, lane?: string | null): Promise<number> {
+  const row = await db
+    .prepare(`SELECT COALESCE(SUM(trials), 0) AS n FROM run_stats${lane ? " WHERE lane = ?" : ""}`)
+    .bind(...(lane ? [lane] : []))
+    .first<{ n: number }>();
+  return Number(row?.n ?? 0);
+}
+
+/** Lineage edges among a set of trials: node_parents rows plus legacy nodes.parent_id. */
+async function edgesAmong(db: D1DatabaseLike, nodes: NodeRecord[]): Promise<DagEdge[]> {
   const byId = new Map(nodes.map((n) => [n.id, n]));
-  const res = lane
-    ? await db
-        .prepare(
-          "SELECT p.child, p.parent, p.relation FROM node_parents p JOIN nodes n ON n.id = p.child WHERE n.lane = ? ORDER BY p.child, p.parent, p.relation"
-        )
-        .bind(lane)
-        .all<{ child: string; parent: string; relation: string }>()
-    : await db
-        .prepare("SELECT child, parent, relation FROM node_parents ORDER BY child, parent, relation")
-        .all<{ child: string; parent: string; relation: string }>();
+  const ids = [...byId.keys()];
+  const rows: { child: string; parent: string; relation: string }[] = [];
+  // D1 allows 100 bound parameters per statement.
+  const stmts: D1PreparedStatement[] = [];
+  for (let i = 0; i < ids.length; i += 90) {
+    const chunk = ids.slice(i, i + 90);
+    stmts.push(
+      db.prepare(`SELECT child, parent, relation FROM node_parents WHERE child IN (${placeholders(chunk.length)})`).bind(...chunk)
+    );
+  }
+  for (const part of await batchAll<{ child: string; parent: string; relation: string }>(db, stmts)) rows.push(...part);
   const seen = new Set<string>();
   const edges: DagEdge[] = [];
   const push = (parent: string, child: string, relation: string) => {
@@ -796,54 +956,74 @@ async function queryAllEdges(db: D1DatabaseLike, nodes: NodeRecord[], lane?: str
     seen.add(key);
     edges.push({ source: parent, target: child, lane: target.lane, decision: target.decision, relation });
   };
-  for (const n of nodes) {
-    if (n.parent_id) push(n.parent_id, n.id, "incumbent");
-  }
-  for (const r of res.results ?? []) push(r.parent, r.child, r.relation);
+  for (const n of nodes) if (n.parent_id) push(n.parent_id, n.id, "incumbent");
+  rows.sort((a, b) => (a.child + a.parent + a.relation).localeCompare(b.child + b.parent + b.relation));
+  for (const r of rows) push(r.parent, r.child, r.relation);
   return edges;
 }
 
-async function queryActiveClaims(db: D1DatabaseLike, lane?: string | null): Promise<ClaimRow[]> {
-  const now = nowIso();
-  if (lane) {
-    const res = await db
-      .prepare(
-        "SELECT * FROM claims WHERE status = 'active' AND expires_at > ? AND lane = ? ORDER BY created_at DESC"
-      )
-      .bind(now, lane)
-      .all<ClaimRow>();
-    return res.results ?? [];
-  }
-  const res = await db
-    .prepare("SELECT * FROM claims WHERE status = 'active' AND expires_at > ? ORDER BY created_at DESC")
-    .bind(now)
-    .all<ClaimRow>();
-  return res.results ?? [];
-}
+const NODE_OUTCOMES = new Set(["kept", "archived", "discarded"]);
 
-async function queryFilteredNodes(db: D1DatabaseLike, filters: Args): Promise<NodeRecord[]> {
+/** WHERE clause for /api/nodes filters, plus a run_stats column when the count can come from there. */
+function nodeFilters(args: Args): { where: string; params: unknown[]; statCount: string | null } | Outcome {
   const clauses: string[] = [];
   const params: unknown[] = [];
-  for (const col of ["lane", "run_id", "decision", "state"]) {
-    const val = toNullableString(filters[col]);
+  const used = new Set<string>();
+  const eq = (key: string, col: string) => {
+    const val = toNullableString(args[key]);
     if (val) {
       clauses.push(`${col} = ?`);
       params.push(val);
+      used.add(key);
     }
-  }
-  const verified = filters.verified;
+  };
+  eq("lane", "lane");
+  eq("run_id", "run_id");
+  eq("decision", "decision");
+  eq("state", "state");
+  eq("model", "agent_model");
+  const verified = args.verified;
   if (verified !== undefined && verified !== null && verified !== "") {
     clauses.push("verified = ?");
     params.push(toBool(String(verified).toLowerCase()) ? 1 : 0);
+    used.add("verified");
   }
-  const limit = clampLimit(filters.limit, 200, 1000);
-  const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
-  params.push(limit);
-  const res = await db
-    .prepare(`SELECT * FROM nodes ${where} ORDER BY created_at DESC, id DESC LIMIT ?`)
-    .bind(...params)
-    .all<NodeRow>();
-  return (res.results ?? []).map(deserializeNode);
+  const outcome = toNullableString(args.outcome);
+  if (outcome) {
+    if (!NODE_OUTCOMES.has(outcome)) return out(400, { error: "invalid_outcome", allowed: [...NODE_OUTCOMES] });
+    clauses.push(
+      outcome === "kept"
+        ? `decision IN (${SQL_OUTCOME_KEPT})`
+        : outcome === "archived"
+          ? "decision = 'archive_only'"
+          : `decision NOT IN (${SQL_OUTCOME_KEPT}, 'archive_only')`
+    );
+    used.add("outcome");
+  }
+  if (toBool(args.stan)) {
+    clauses.push("real_stan_total > 0");
+    used.add("stan");
+  }
+  const q = toNullableString(args.q);
+  if (q) {
+    if (q.length > LIMITS.queryChars) return out(400, { error: "field_too_long", field: "q", max: LIMITS.queryChars });
+    const terms = searchTerms(q);
+    if (terms.length === 0) return out(400, { error: "empty_query" });
+    for (const t of terms) {
+      clauses.push(`${NODE_SEARCH_TEXT} LIKE ? ESCAPE '\\'`);
+      params.push(likePattern(t));
+    }
+    used.add("q");
+  }
+  // Counts restricted to lane / run_id and at most one of outcome / stan come from run_stats.
+  let statCount: string | null = null;
+  const rest = [...used].filter((k) => k !== "lane" && k !== "run_id");
+  if (rest.length === 0) statCount = "trials";
+  else if (rest.length === 1 && rest[0] === "stan") statCount = "stan";
+  else if (rest.length === 1 && rest[0] === "outcome") {
+    statCount = outcome === "kept" ? "kept" : outcome === "archived" ? "archived" : "trials - kept - archived";
+  }
+  return { where: clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "", params, statCount };
 }
 
 interface ParentEdge {
@@ -903,9 +1083,9 @@ const NODE_ADMIN_COLUMNS = ["real_stan_passed", "real_stan_total", "real_ess_per
 async function frontierBest(db: D1DatabaseLike, lane: string, excludeId: string): Promise<number | null> {
   const row = await db
     .prepare(
-      `SELECT MAX(soft_min_eff) AS best FROM nodes
-       WHERE lane = ? AND id <> ? AND state NOT IN ('retracted', 'disputed')
-         AND (verified = 1 OR decision IN ('keep', 'keep_baseline', 'keep_simpler'))`
+      `SELECT soft_min_eff AS best FROM nodes INDEXED BY idx_nodes_lane_eff
+       WHERE lane = ? AND id <> ? AND soft_min_eff IS NOT NULL AND ${SQL_FRONTIER_OK} AND ${SQL_FRONTIER_ELIGIBLE}
+       ORDER BY soft_min_eff DESC LIMIT 1`
     )
     .bind(lane, excludeId)
     .first<{ best: number | null }>();
@@ -1093,14 +1273,47 @@ const opPostNode: Op = async (ctx, payload) => {
 };
 
 const opListNodes: Op = async (ctx, args) => {
-  const nodes = await queryFilteredNodes(ctx.env.DB, args);
-  return out(200, { nodes, count: nodes.length });
+  const db = ctx.env.DB;
+  const filters = nodeFilters(args);
+  if ("status" in filters) return filters;
+  const limit = clampLimit(args.limit, LIMITS.nodesLimitDefault, LIMITS.nodesLimitMax);
+  const offset = clampOffset(args.offset);
+  const res = await db
+    .prepare(`SELECT * FROM nodes ${filters.where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
+    .bind(...filters.params, limit, offset)
+    .all<NodeRow>();
+  const nodes = (res.results ?? []).map((r) => stripRaw(deserializeNode(r)));
+  let count: number;
+  if (filters.statCount) {
+    const lane = toNullableString(args.lane);
+    const runId = toNullableString(args.run_id);
+    const where = [lane ? "lane = ?" : "", runId ? "run_id = ?" : ""].filter(Boolean).join(" AND ");
+    const row = await db
+      .prepare(`SELECT COALESCE(SUM(${filters.statCount}), 0) AS n FROM run_stats${where ? ` WHERE ${where}` : ""}`)
+      .bind(...[lane, runId].filter((x): x is string => Boolean(x)))
+      .first<{ n: number }>();
+    count = Number(row?.n ?? 0);
+  } else {
+    const row = await db
+      .prepare(`SELECT COUNT(*) AS n FROM nodes ${filters.where}`)
+      .bind(...filters.params)
+      .first<{ n: number }>();
+    count = Number(row?.n ?? 0);
+  }
+  return out(200, {
+    nodes,
+    count,
+    limit,
+    offset,
+    next_offset: offset + nodes.length < count && nodes.length === limit ? offset + limit : null,
+  });
 };
 
 const opFrontier: Op = async (ctx, args) => {
-  const frontier = computeFrontier(await queryAllNodes(ctx.env.DB));
   const lane = toNullableString(args.lane);
-  if (lane) return out(200, { frontier: frontier[lane] ? { [lane]: frontier[lane] } : {} });
+  const lanes = lane ? [lane] : (await laneStats(ctx.env.DB)).map((l) => l.lane);
+  const frontier = await laneFrontiers(ctx.env.DB, lanes);
+  if (lane) return out(200, { frontier });
   return out(200, { frontier, count: Object.keys(frontier).length });
 };
 
@@ -1112,49 +1325,195 @@ const opGetNode: Op = async (ctx, args) => {
   if (!row) return out(404, { error: "not_found" });
   const node = deserializeNode(row);
 
-  const parentRes = await db
-    .prepare("SELECT parent AS id, relation FROM node_parents WHERE child = ? ORDER BY relation, parent")
-    .bind(id)
-    .all<{ id: string; relation: string }>();
-  const parents = parentRes.results ?? [];
+  type Link = { id: string; relation: string; lane: string | null; trial_id: string | null; decision: string | null };
+  const [parentRows, childRows, noteRows, queueRows, legacyParent] = await batchAll<Record<string, unknown>>(db, [
+    db
+      .prepare(
+        `SELECT p.parent AS id, p.relation, n.lane, n.trial_id, n.decision
+         FROM node_parents p LEFT JOIN nodes n ON n.id = p.parent WHERE p.child = ? ORDER BY p.relation, p.parent`
+      )
+      .bind(id),
+    db
+      .prepare(
+        `SELECT c.id, c.relation, n.lane, n.trial_id, n.decision, n.created_at FROM (
+           SELECT child AS id, relation FROM node_parents WHERE parent = ?
+           UNION SELECT id, 'incumbent' AS relation FROM nodes WHERE parent_id = ?
+         ) c JOIN nodes n ON n.id = c.id ORDER BY n.created_at DESC, n.id DESC LIMIT ?`
+      )
+      .bind(id, id, LIMITS.nodeChildren),
+    db
+      .prepare(
+        `SELECT n.id, n.kind, n.title, n.state FROM note_links l JOIN notes n ON n.id = l.note_id
+         WHERE l.node_id = ? ORDER BY n.updated_at DESC, n.id DESC LIMIT ?`
+      )
+      .bind(id, LIMITS.nodeNotes),
+    db.prepare("SELECT * FROM verify_queue WHERE node_id = ?").bind(id),
+    db.prepare("SELECT * FROM nodes WHERE id = ?").bind(node.parent_id ?? ""),
+  ]);
+  const link = (r: Record<string, unknown>): Link => ({
+    id: String(r.id),
+    relation: String(r.relation),
+    lane: (r.lane as string | null) ?? null,
+    trial_id: (r.trial_id as string | null) ?? null,
+    decision: (r.decision as string | null) ?? null,
+  });
+  const parents = parentRows.map(link);
+  const parentNode = legacyParent[0] ? deserializeNode(legacyParent[0] as unknown as NodeRow) : null;
   if (node.parent_id && !parents.some((p) => p.id === node.parent_id && p.relation === "incumbent")) {
-    parents.unshift({ id: node.parent_id, relation: "incumbent" });
+    parents.unshift({
+      id: node.parent_id,
+      relation: "incumbent",
+      lane: parentNode?.lane ?? null,
+      trial_id: parentNode?.trial_id ?? null,
+      decision: parentNode?.decision ?? null,
+    });
   }
-  const childEdgeRes = await db
-    .prepare("SELECT child AS id, relation FROM node_parents WHERE parent = ?")
-    .bind(id)
-    .all<{ id: string; relation: string }>();
-  const childrenRes = await db
-    .prepare(
-      "SELECT * FROM nodes WHERE parent_id = ? OR id IN (SELECT child FROM node_parents WHERE parent = ?) ORDER BY created_at ASC, id ASC"
-    )
-    .bind(id, id)
-    .all<NodeRow>();
-  const children = (childrenRes.results ?? []).map(deserializeNode);
-  const edges = parents.map((p) => ({ source: p.id, target: id, relation: p.relation }));
-  const childEdgeKeys = new Set<string>();
-  for (const e of childEdgeRes.results ?? []) {
-    childEdgeKeys.add(`${e.id}\u0000${e.relation}`);
-    edges.push({ source: id, target: e.id, relation: e.relation });
-  }
-  for (const c of children) {
-    if (c.parent_id === id && !childEdgeKeys.has(`${c.id}\u0000incumbent`)) {
-      edges.push({ source: id, target: c.id, relation: "incumbent" });
-    }
-  }
-  const parentRow = node.parent_id ? await getNodeRow(db, node.parent_id) : null;
-  const queue = await db
-    .prepare("SELECT * FROM verify_queue WHERE node_id = ?")
-    .bind(id)
-    .first<QueueRow>();
-
+  const queue = queueRows[0] as unknown as QueueRow | undefined;
   return out(200, {
     node,
-    parent: parentRow ? deserializeNode(parentRow) : null,
+    parent: parentNode,
     parents,
-    children,
-    edges,
+    children: childRows.reverse().map(link),
+    notes: noteRows.map((r) => ({ id: r.id, kind: r.kind, title: r.title, state: r.state })),
     verification: queue ? publicQueueFields(queue) : null,
+  });
+};
+
+/** Home page and frontier header: totals, per-lane frontier/run/Stan, claims, alignment, models. */
+const opOverview: Op = async (ctx) => {
+  const db = ctx.env.DB;
+  const lanes = await laneStats(db);
+  const frontier = await laneFrontiers(db, lanes.map((l) => l.lane));
+  const runLanes = lanes.filter((l) => frontier[l.lane]);
+  const [totalsRows, modelRows, ...perLane] = await batchAll<Record<string, unknown>>(db, [
+    // Distinct authors and models by skip scan: one index seek per distinct value, so the
+    // cost follows the number of contributors and models, not the number of trials.
+    db.prepare(
+      `WITH RECURSIVE a(v) AS (
+         SELECT MIN(lower(author)) FROM nodes WHERE lower(author) IS NOT NULL
+         UNION ALL SELECT (SELECT MIN(lower(author)) FROM nodes WHERE lower(author) > a.v) FROM a WHERE a.v IS NOT NULL
+       )
+       SELECT (SELECT COALESCE(SUM(trials), 0) FROM run_stats) AS trials,
+              (SELECT COALESCE(SUM(kept), 0) FROM run_stats) AS kept,
+              (SELECT COUNT(*) FROM run_stats) AS runs,
+              (SELECT MAX(last_at) FROM run_stats) AS latest_at,
+              (SELECT COUNT(*) FROM a WHERE v IS NOT NULL) AS contributors`
+    ),
+    db
+      .prepare(
+        `WITH RECURSIVE m(v) AS (
+           SELECT MIN(agent_model) FROM nodes WHERE agent_model IS NOT NULL
+           UNION ALL SELECT (SELECT MIN(agent_model) FROM nodes WHERE agent_model > m.v) FROM m WHERE m.v IS NOT NULL
+         )
+         SELECT v AS agent_model FROM m WHERE v IS NOT NULL LIMIT ?`
+      )
+      .bind(LIMITS.overviewModels),
+    ...runLanes.map((l) => runStepsStmt(db, l.lane, frontier[l.lane].run_id)),
+    ...lanes.map((l) => laneStanStmt(db, l.lane)),
+  ]);
+  const stepsByLane = new Map(runLanes.map((l, i) => [l.lane, perLane[i] as unknown as { best: number; rn: number }[]]));
+  const stanByLane = new Map(lanes.map((l, i) => [l.lane, perLane[runLanes.length + i]?.[0] as unknown as StanRow | undefined]));
+  const t = totalsRows[0] ?? {};
+  return out(200, {
+    totals: {
+      trials: Number(t.trials ?? 0),
+      kept: Number(t.kept ?? 0),
+      runs: Number(t.runs ?? 0),
+      contributors: Number(t.contributors ?? 0),
+      claims: await countActiveClaims(db),
+      latest_at: (t.latest_at as string | null) ?? null,
+    },
+    lanes: lanes.map((l) => {
+      const f = frontier[l.lane] ?? null;
+      const stan = stanByLane.get(l.lane);
+      return {
+        ...l,
+        frontier: f,
+        run: f ? runSummary(f.run_id, f.soft_min_eff, stepsByLane.get(l.lane) ?? []) : null,
+        stan: stan
+          ? {
+              id: stan.id,
+              run_id: stan.run_id,
+              trial_id: stan.trial_id ?? null,
+              real_stan_passed: toFiniteInt(stan.real_stan_passed),
+              real_stan_total: Number(stan.real_stan_total),
+            }
+          : null,
+      };
+    }),
+    claims: await queryActiveClaims(db, null, LIMITS.overviewClaims),
+    alignment: await recentAlignment(db),
+    models: modelRows.map((r) => String(r.agent_model)),
+  });
+};
+
+interface RunStatRow {
+  lane: string;
+  run_id: string;
+  trials: number;
+  kept: number;
+  first_at: string | null;
+  last_at: string | null;
+  author: string | null;
+  author_tier: string | null;
+  agent_model: string | null;
+  base_eff: number | null;
+}
+
+/** Runs by latest activity, each with its newest LIMITS.runNodes trials as slim rows. */
+const opRuns: Op = async (ctx, args) => {
+  const db = ctx.env.DB;
+  const lane = toNullableString(args.lane);
+  const limit = clampLimit(args.limit, LIMITS.runsLimitDefault, LIMITS.runsLimitMax);
+  const offset = clampOffset(args.offset);
+  const laneWhere = lane ? "WHERE lane = ?" : "";
+  const laneParams = lane ? [lane] : [];
+  const [runRows, countRows] = await batchAll<Record<string, unknown>>(db, [
+    db
+      .prepare(`SELECT * FROM run_stats ${laneWhere} ORDER BY last_at DESC, lane DESC, run_id DESC LIMIT ? OFFSET ?`)
+      .bind(...laneParams, limit, offset),
+    db.prepare(`SELECT COUNT(*) AS n FROM run_stats ${laneWhere}`).bind(...laneParams),
+  ]);
+  const runs = runRows as unknown as RunStatRow[];
+  const slices = await batchAll<Record<string, unknown>>(
+    db,
+    runs.map((r) =>
+      db
+        .prepare(
+          `SELECT id, trial_id, decision, soft_min_eff, state, verified, real_stan_total, created_at FROM nodes
+           WHERE lane = ? AND run_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`
+        )
+        .bind(r.lane, r.run_id, LIMITS.runNodes)
+    )
+  );
+  const count = Number(countRows[0]?.n ?? 0);
+  return out(200, {
+    runs: runs.map((r, i) => ({
+      lane: r.lane,
+      run_id: r.run_id,
+      author: r.author ?? null,
+      author_tier: r.author_tier ?? null,
+      agent_model: r.agent_model ?? null,
+      trials: Number(r.trials),
+      kept: Number(r.kept),
+      first_at: r.first_at ?? null,
+      last_at: r.last_at ?? null,
+      base_eff: toFiniteNumber(r.base_eff),
+      truncated: Number(r.trials) > LIMITS.runNodes,
+      nodes: (slices[i] ?? []).reverse().map((n) => ({
+        id: n.id as string,
+        trial_id: (n.trial_id as string | null) ?? null,
+        decision: n.decision as string,
+        soft_min_eff: toFiniteNumber(n.soft_min_eff),
+        state: (n.state as string | null) ?? (n.verified ? "verified" : "unverified"),
+        stan: Number(n.real_stan_total ?? 0) > 0,
+        created_at: n.created_at as string,
+      })),
+    })),
+    count,
+    limit,
+    offset,
+    next_offset: offset + runs.length < count && runs.length === limit ? offset + limit : null,
   });
 };
 
@@ -2064,44 +2423,43 @@ const opAdminDeleteNode: Op = async (ctx, args) => {
 
 const opHealth: Op = async (ctx) => {
   const db = ctx.env.DB;
-  const nodeCountRow = await db.prepare("SELECT COUNT(*) AS count FROM nodes").first<{ count: number }>();
-  const claimCountRow = await db
-    .prepare("SELECT COUNT(*) AS count FROM claims WHERE status = 'active' AND expires_at > ?")
-    .bind(nowIso())
-    .first<{ count: number }>();
-  const lanesRes = await db.prepare("SELECT DISTINCT lane FROM nodes ORDER BY lane ASC").all<{ lane: string }>();
+  const [totals, lanes] = await batchAll<Record<string, unknown>>(db, [
+    db.prepare("SELECT COALESCE(SUM(trials), 0) AS n FROM run_stats"),
+    db.prepare("SELECT lane FROM run_stats GROUP BY lane HAVING SUM(trials) > 0 ORDER BY lane LIMIT ?").bind(LIMITS.overviewLanes),
+  ]);
   return out(200, {
     ok: true,
-    nodes: Number(nodeCountRow?.count ?? 0),
-    active_claims: Number(claimCountRow?.count ?? 0),
-    lanes: (lanesRes.results ?? []).map((r) => r.lane),
+    nodes: Number(totals[0]?.n ?? 0),
+    active_claims: await countActiveClaims(db),
+    lanes: lanes.map((r) => String(r.lane)),
   });
 };
 
 /**
- * The whole research graph, or one lane of it (`?lane=A1`). This is the most expensive
- * read: every node is deserialized and serialized under the 10 ms CPU cap, so DAG nodes
- * carry the parsed `metrics` but not the duplicate raw `metrics_json` string (node detail,
- * /api/nodes and /api/frontier still have it).
+ * Kept for old clients, bounded: the newest LIMITS.dagNodes trials (oldest first) with the
+ * edges among them, the frontier, active claims and the alignment points among those trials. `total` is
+ * the number of trials (in the lane, with ?lane=) and `truncated` says whether some were left out.
+ * Nodes carry the parsed `metrics` but not the raw `metrics_json`.
  */
 const opDag: Op = async (ctx, args) => {
+  const db = ctx.env.DB;
   const lane = toNullableString(args.lane);
-  const all = lane
-    ? ((await ctx.env.DB
-        .prepare("SELECT * FROM nodes WHERE lane = ? ORDER BY created_at ASC, id ASC")
-        .bind(lane)
-        .all<NodeRow>()).results ?? []).map(deserializeNode)
-    : await queryAllNodes(ctx.env.DB);
-  const edges = await queryAllEdges(ctx.env.DB, all, lane);
-  const frontier = computeFrontier(all);
-  const alignment = computeAlignment(all);
-  const nodes = all.map(({ metrics_json: _raw, ...rest }) => rest);
+  const res = await db
+    .prepare(`SELECT * FROM nodes${lane ? " WHERE lane = ?" : ""} ORDER BY created_at DESC, id DESC LIMIT ?`)
+    .bind(...(lane ? [lane] : []), LIMITS.dagNodes)
+    .all<NodeRow>();
+  const recent = (res.results ?? []).reverse().map(deserializeNode);
+  const edges = await edgesAmong(db, recent);
+  const lanes = lane ? [lane] : (await laneStats(db)).map((l) => l.lane);
+  const total = await totalTrials(db, lane);
   return out(200, {
-    nodes,
+    nodes: recent.map(stripRaw),
     edges,
-    frontier,
-    claims: await queryActiveClaims(ctx.env.DB, lane),
-    alignment,
+    frontier: await laneFrontiers(db, lanes),
+    claims: await queryActiveClaims(db, lane),
+    alignment: alignmentOf(recent),
+    total,
+    truncated: total > recent.length,
   });
 };
 
@@ -2134,7 +2492,8 @@ const MCP_TOOLS: McpTool[] = [
   },
   {
     name: "flywheel_list_nodes",
-    description: "List apin research DAG nodes with optional lane, run_id, decision, state, verified, and limit filters.",
+    description:
+      "List trials, newest first, with filters (lane, run_id, decision, state, verified, model, outcome kept|archived|discarded, stan, q) and paging (limit, offset).",
     inputSchema: {
       type: "object",
       properties: {
@@ -2143,7 +2502,12 @@ const MCP_TOOLS: McpTool[] = [
         decision: str,
         state: str,
         verified: { type: "boolean" },
-        limit: { type: "integer", minimum: 1, maximum: 1000 },
+        model: str,
+        outcome: { type: "string", enum: ["kept", "archived", "discarded"] },
+        stan: { type: "boolean" },
+        q: str,
+        limit: { type: "integer", minimum: 1, maximum: LIMITS.nodesLimitMax },
+        offset: { type: "integer", minimum: 0 },
       },
       additionalProperties: false,
     },
@@ -2449,6 +2813,8 @@ const ROUTES: Route[] = [
   { method: "GET", pattern: /^\/api\/health$/, access: "public", op: opHealth },
   { method: "GET", pattern: /^\/api\/dag$/, access: "public", op: opDag },
   { method: "GET", pattern: /^\/api\/frontier$/, access: "public", op: opFrontier },
+  { method: "GET", pattern: /^\/api\/overview$/, access: "public", op: opOverview },
+  { method: "GET", pattern: /^\/api\/runs$/, access: "public", op: opRuns },
   { method: "GET", pattern: /^\/api\/nodes$/, access: "public", op: opListNodes },
   { method: "GET", pattern: /^\/api\/nodes\/([^/]+)\/source$/, params: ["node_id"], access: "public", op: opGetSource },
   { method: "GET", pattern: /^\/api\/nodes\/([^/]+)$/, params: ["id"], access: "public", op: opGetNode },

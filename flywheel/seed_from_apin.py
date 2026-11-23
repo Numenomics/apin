@@ -134,6 +134,17 @@ def load_real_stan_scores(repo_root: Path) -> dict[str, dict[str, Any]]:
     return aggregated
 
 
+def _finite(value: Any) -> Any:
+    """Copy of `value` with NaN and infinities replaced by None."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _finite(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite(v) for v in value]
+    return value
+
+
 def collect_nodes(repo_root: Path) -> list[dict[str, Any]]:
     """Parse all local autoresearch ledgers into normalized Flywheel node dicts
     and merge real-Stan scores where available.
@@ -512,7 +523,8 @@ def generate_seed_artifacts(repo_root: Path, flywheel_dir: Path | None = None) -
     sql_path = target_dir / "seed.sql"
     snapshot_path = public_dir / "snapshot.json"
     sql_path.write_text(seed_sql, encoding="utf-8")
-    snapshot_path.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
+    # Browsers reject the bare NaN / Infinity that json.dumps writes for non-finite floats.
+    snapshot_path.write_text(json.dumps(_finite(snapshot), indent=2, allow_nan=False) + "\n", encoding="utf-8")
 
     return {
         "nodes": len(nodes),

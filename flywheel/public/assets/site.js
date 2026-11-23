@@ -368,57 +368,181 @@
   };
   const RELATIONS = { incumbent: "scored against", combines: "combines", fork: "forked from" };
 
-  /* The trial graph. The live API is tried whole, then lane by lane (each lane fits the Worker's
-     CPU limit long after the whole graph stops fitting), then the snapshot shipped with the site. */
-  async function loadGraph() {
-    let data = null;
-    let source = "live";
-    try {
-      data = await getJSON("/api/dag");
-    } catch {
-      try {
-        const parts = await Promise.all(LANES.map((l) => getJSON("/api/dag?lane=" + encodeURIComponent(l.id))));
-        data = { nodes: [], edges: [], frontier: {}, claims: [], alignment: [] };
-        for (const part of parts) {
-          for (const key of ["nodes", "edges", "claims", "alignment"]) data[key].push(...(part[key] || []));
-          Object.assign(data.frontier, part.frontier || {});
-        }
-      } catch {
-        source = "snapshot";
-        data = await getJSON("/snapshot.json");
-      }
-    }
-    /* Rows written before trials had a state or stored source lack those fields. */
-    const nodes = (Array.isArray(data.nodes) ? data.nodes : []).map((n) => ({
-      ...n,
-      state: n.state || (n.verified === 1 ? "verified" : "unverified"),
-      has_source: Boolean(n.has_source),
-      author_tier: n.author_tier || null,
-    }));
-    const edges = (Array.isArray(data.edges) ? data.edges : []).map((e) => ({ ...e, relation: e.relation || "incumbent" }));
-    const graph = {
-      source,
-      nodes,
-      edges,
-      frontier: data.frontier || {},
-      claims: Array.isArray(data.claims) ? data.claims : [],
-      alignment: Array.isArray(data.alignment) ? data.alignment : [],
-      byId: new Map(nodes.map((n) => [n.id, n])),
-      parents: new Map(),
-      children: new Map(),
+  /* ---------- where the pages get trials from ----------
+     The record can hold far more trials than a page should load, so no page asks for all of
+     them. A store answers four bounded questions, always in the same shapes:
+       overview()            totals, one summary per lane, claims, alignment points, model names
+       runs({lane, offset})  a page of runs, newest first, each with slim trials for its chart
+       trials(filters)       a page of full trials, newest first
+       node(id)              one trial with its parents, children and the notes that cite it
+     The live store asks the Flywheel API. The snapshot store answers the same questions from
+     the file shipped with the site, and is used when the API does not answer. */
+
+  const byTime = (a, b) => String(a.created_at).localeCompare(String(b.created_at)) || String(a.id).localeCompare(String(b.id));
+  const keptScored = (n) => KEPT.has(n.decision) && isNum(n.soft_min_eff) && n.soft_min_eff > 0;
+  const outcomeOf = (n) => (KEPT.has(n.decision) ? "kept" : n.decision === "archive_only" ? "archived" : "discarded");
+  /* Rows written before trials had a state or stored source lack those fields. */
+  const fullNode = (n) => ({ ...n, state: n.state || (n.verified === 1 ? "verified" : "unverified"), has_source: Boolean(n.has_source), author_tier: n.author_tier || null });
+  const query = (params) => {
+    const q = Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== "" && v !== false);
+    return q.length ? "?" + q.map(([k, v]) => `${k}=${encodeURIComponent(v === true ? 1 : v)}`).join("&") : "";
+  };
+
+  function liveStore(overview) {
+    return {
+      source: "live",
+      overview: async () => overview,
+      runs: ({ lane, offset = 0, limit = 24 } = {}) => getJSON("/api/runs" + query({ lane, limit, offset })),
+      trials: async ({ lane, model, outcome, state, stan, q, offset = 0, limit = 50 } = {}) => {
+        const res = await getJSON("/api/nodes" + query({ lane, model, outcome, state, stan, q, limit, offset }));
+        return { ...res, nodes: (res.nodes || []).map(fullNode) };
+      },
+      node: async (id) => {
+        const res = await getJSON("/api/nodes/" + encodeURIComponent(id));
+        return { node: fullNode(res.node), parents: res.parents || [], children: res.children || [], notes: res.notes || [] };
+      },
     };
-    const link = (map, key, value) => (map.has(key) ? map.get(key).push(value) : map.set(key, [value]));
-    for (const e of edges) {
-      link(graph.parents, e.target, { id: e.source, relation: e.relation });
-      link(graph.children, e.source, { id: e.target, relation: e.relation });
-    }
+  }
+
+  function snapshotStore(data) {
+    const nodes = (Array.isArray(data.nodes) ? data.nodes : []).map(fullNode).sort(byTime);
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const edges = (Array.isArray(data.edges) ? data.edges : []).map((e) => ({ ...e, relation: e.relation || "incumbent" }));
     for (const n of nodes) {
-      if (n.parent_id && !(graph.parents.get(n.id) || []).some((p) => p.id === n.parent_id)) {
-        link(graph.parents, n.id, { id: n.parent_id, relation: "incumbent" });
-        link(graph.children, n.parent_id, { id: n.id, relation: "incumbent" });
-      }
+      if (n.parent_id && !edges.some((e) => e.source === n.parent_id && e.target === n.id)) edges.push({ source: n.parent_id, target: n.id, relation: "incumbent" });
     }
-    return graph;
+    const brief = (id, relation) => {
+      const n = byId.get(id) || {};
+      return { id, relation, lane: n.lane || null, trial_id: n.trial_id || null, decision: n.decision || null };
+    };
+    const page = (list, offset, limit) => ({ count: list.length, limit, offset, next_offset: offset + limit < list.length ? offset + limit : null });
+
+    function overview() {
+      const lanes = [...new Set(nodes.map((n) => n.lane))].sort().map((lane) => {
+        const mine = nodes.filter((n) => n.lane === lane);
+        const frontier = (data.frontier || {})[lane] ? fullNode(data.frontier[lane]) : mine.filter(keptScored).sort((x, y) => y.soft_min_eff - x.soft_min_eff)[0] || null;
+        const run = frontier ? mine.filter((n) => n.run_id === frontier.run_id) : [];
+        const first = run.find(keptScored) || null;
+        const steps = [];
+        let best = null;
+        for (const n of run) {
+          if (keptScored(n) && (best === null || n.soft_min_eff > best)) best = n.soft_min_eff;
+          if (best !== null) steps.push(best);
+        }
+        const stan = mine.filter((n) => n.real_stan_total > 0).sort((x, y) => y.real_stan_passed / y.real_stan_total - x.real_stan_passed / x.real_stan_total || byTime(y, x))[0] || null;
+        return {
+          lane,
+          trials: mine.length,
+          kept: mine.filter((n) => KEPT.has(n.decision)).length,
+          runs: new Set(mine.map((n) => n.run_id)).size,
+          latest_at: mine[mine.length - 1].created_at,
+          frontier,
+          run: frontier ? { run_id: frontier.run_id, first_eff: first ? first.soft_min_eff : null, gain: first && first.soft_min_eff > 0 ? frontier.soft_min_eff / first.soft_min_eff : null, steps } : null,
+          stan,
+        };
+      });
+      return {
+        totals: {
+          trials: nodes.length,
+          kept: nodes.filter((n) => KEPT.has(n.decision)).length,
+          runs: new Set(nodes.map((n) => n.lane + "/" + n.run_id)).size,
+          contributors: new Set(nodes.map((n) => n.author || n.agent_model).filter(Boolean)).size,
+          claims: (data.claims || []).length,
+          latest_at: nodes.length ? nodes[nodes.length - 1].created_at : null,
+        },
+        lanes,
+        claims: Array.isArray(data.claims) ? data.claims : [],
+        alignment: Array.isArray(data.alignment) ? data.alignment : [],
+        models: [...new Set(nodes.map((n) => n.agent_model).filter(Boolean))].sort(),
+      };
+    }
+
+    function runs({ lane, offset = 0, limit = 24 } = {}) {
+      const map = new Map();
+      for (const n of nodes) {
+        if (lane && n.lane !== lane) continue;
+        const key = n.lane + "/" + n.run_id;
+        if (map.has(key)) map.get(key).push(n);
+        else map.set(key, [n]);
+      }
+      const all = [...map.values()]
+        .map((list) => {
+          const base = list.find(keptScored);
+          return {
+            lane: list[0].lane,
+            run_id: list[0].run_id,
+            author: list[0].author || null,
+            author_tier: list[0].author_tier,
+            agent_model: list[0].agent_model || null,
+            trials: list.length,
+            kept: list.filter((n) => KEPT.has(n.decision)).length,
+            first_at: list[0].created_at,
+            last_at: list[list.length - 1].created_at,
+            base_eff: base ? base.soft_min_eff : null,
+            truncated: list.length > 150,
+            nodes: list.slice(-150).map((n) => ({ id: n.id, trial_id: n.trial_id, decision: n.decision, soft_min_eff: n.soft_min_eff, state: n.state, stan: n.real_stan_total > 0, created_at: n.created_at })),
+          };
+        })
+        .sort((x, y) => String(y.last_at).localeCompare(String(x.last_at)));
+      return { runs: all.slice(offset, offset + limit), ...page(all, offset, limit) };
+    }
+
+    function trials({ lane, model, outcome, state, stan, q, offset = 0, limit = 50 } = {}) {
+      const terms = String(q || "").toLowerCase().split(/\s+/).filter(Boolean);
+      const list = nodes
+        .filter((n) => {
+          if (lane && n.lane !== lane) return false;
+          if (model && n.agent_model !== model) return false;
+          if (outcome && outcomeOf(n) !== outcome) return false;
+          if (state && n.state !== state) return false;
+          if (stan && !(n.real_stan_total > 0)) return false;
+          if (!terms.length) return true;
+          const hay = `${n.id} ${n.title || ""} ${n.hypothesis || ""} ${n.code_sha || ""} ${(n.codex_refs || []).join(" ")} ${n.author || ""} ${n.agent_model || ""}`.toLowerCase();
+          return terms.every((t) => hay.includes(t));
+        })
+        .reverse();
+      return { nodes: list.slice(offset, offset + limit), ...page(list, offset, limit) };
+    }
+
+    function node(id) {
+      if (!byId.has(id)) throw new Error("unknown trial " + id);
+      return {
+        node: byId.get(id),
+        parents: edges.filter((e) => e.target === id).map((e) => brief(e.source, e.relation)),
+        children: edges.filter((e) => e.source === id).map((e) => brief(e.target, e.relation)),
+        notes: [],
+      };
+    }
+
+    return { source: "snapshot", overview: async () => overview(), runs: async (a) => runs(a), trials: async (a) => trials(a), node: async (id) => node(id) };
+  }
+
+  async function openStore() {
+    try {
+      return liveStore(await getJSON("/api/overview"));
+    } catch {
+      return snapshotStore(await getJSON("/snapshot.json"));
+    }
+  }
+
+  /* One row per lane of the guide, joined with what the overview knows about it. */
+  function laneRows(overview) {
+    const known = new Map((overview.lanes || []).map((l) => [l.lane, l]));
+    return LANES.map((lane) => {
+      const o = known.get(lane.id);
+      const run = (o && o.run) || {};
+      return {
+        lane,
+        trials: o ? o.trials : 0,
+        kept: o ? o.kept : 0,
+        runs: o ? o.runs : 0,
+        top: o && o.frontier ? fullNode(o.frontier) : null,
+        gain: isNum(run.gain) ? run.gain : null,
+        first: isNum(run.first_eff) ? run.first_eff : null,
+        steps: Array.isArray(run.steps) ? run.steps : [],
+        stan: (o && o.stan) || null,
+      };
+    });
   }
 
   /* Hypotheses, insights and the rerun queue exist only on the live Flywheel. */
@@ -438,42 +562,6 @@
   }
 
   /* Per-lane summary used by the home, frontier and lanes pages. */
-  function laneSummaries(graph) {
-    const present = new Set(graph.nodes.map((n) => n.lane));
-    return LANES.map((lane) => {
-      const nodes = graph.nodes
-        .filter((n) => n.lane === lane.id)
-        .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)) || String(a.id).localeCompare(String(b.id)));
-      const kept = nodes.filter((n) => KEPT.has(n.decision));
-      const scored = (n) => KEPT.has(n.decision) && isNum(n.soft_min_eff) && n.soft_min_eff > 0;
-      const top = graph.frontier[lane.id] || kept.filter(scored).sort((a, b) => b.soft_min_eff - a.soft_min_eff)[0] || null;
-      /* Efficiencies are only comparable inside one run (same judge, same dimensions),
-         so gain and progress are measured within the run that holds the frontier. */
-      const run = top ? nodes.filter((n) => n.run_id === top.run_id) : [];
-      const first = run.find(scored) || null;
-      const steps = [];
-      let best = null;
-      for (const n of run) {
-        if (scored(n) && (best === null || n.soft_min_eff > best)) best = n.soft_min_eff;
-        if (best !== null) steps.push(best);
-      }
-      const stan = nodes.filter((n) => n.real_stan_total > 0).sort((a, b) => b.real_stan_passed / b.real_stan_total - a.real_stan_passed / a.real_stan_total)[0] || null;
-      return {
-        lane,
-        active: present.has(lane.id),
-        nodes,
-        kept: kept.length,
-        runs: new Set(nodes.map((n) => n.run_id)).size,
-        top,
-        first,
-        gain: top && first && first.soft_min_eff > 0 ? top.soft_min_eff / first.soft_min_eff : null,
-        steps,
-        stan,
-        last: nodes.length ? nodes[nodes.length - 1].created_at : null,
-        claims: graph.claims.filter((c) => c.lane === lane.id),
-      };
-    });
-  }
 
   function sparkline(values, color) {
     if (!values || values.length < 2) return "";
@@ -700,12 +788,13 @@
     drawer,
     cmd,
     getJSON,
-    loadGraph,
+    openStore,
+    laneRows,
+    outcomeOf,
     loadNotes,
     loadQueue,
     STATES,
     RELATIONS,
-    laneSummaries,
     sparkline,
     watchWidth,
     placeLabels,

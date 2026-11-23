@@ -11,6 +11,7 @@ autoresearch runs work identically offline.
 from __future__ import annotations
 
 import json
+import math
 import os
 import urllib.error
 import urllib.parse
@@ -46,6 +47,26 @@ class FlywheelError(RuntimeError):
 # ---------------------------------------------------------------------------
 # Configuration: URL and token
 # ---------------------------------------------------------------------------
+
+
+def strict_json(value: Any) -> str:
+    """Serialise for the Flywheel: NaN and infinities become null.
+
+    Python writes them as bare `NaN` / `Infinity`, which is not JSON. The Worker and every
+    browser reject such a body, so a trial with an infinite ratio (candidate passed, incumbent
+    failed) or an infinite bias would never be posted.
+    """
+
+    def clean(v: Any) -> Any:
+        if isinstance(v, float):
+            return v if math.isfinite(v) else None
+        if isinstance(v, dict):
+            return {k: clean(x) for k, x in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [clean(x) for x in v]
+        return v
+
+    return json.dumps(clean(value), sort_keys=True, allow_nan=False)
 
 
 def token_path() -> Path:
@@ -135,7 +156,7 @@ def _request_json(
     data: bytes | None = None
 
     if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
+        data = strict_json(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
 
     resolved_token = _resolve_token(token)
@@ -595,7 +616,7 @@ def trial_payload(
         "dims": dims,
         "codex_refs": row.get("codex_refs") or [],
         "code_sha": row.get("candidate_sha") or row.get("code_sha"),
-        "metrics_json": json.dumps({k: row[k] for k in _METRIC_KEYS if k in row}, sort_keys=True),
+        "metrics_json": strict_json({k: row[k] for k in _METRIC_KEYS if k in row}),
         "verified": 0,
         "created_at": row.get("timestamp"),
     }

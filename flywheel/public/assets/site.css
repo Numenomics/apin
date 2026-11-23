@@ -156,6 +156,11 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/* Components set their own display, which would otherwise override the hidden attribute. */
+[hidden] {
+  display: none !important;
+}
+
 a {
   color: inherit;
   text-decoration: underline;

@@ -416,3 +416,10 @@ def test_admin_helpers_hit_handle_routes(monkeypatch: pytest.MonkeyPatch) -> Non
     ]
     assert all(c["auth"] == "Bearer root" for c in fake.calls)
     assert os.environ["APIN_FLYWHEEL_URL"] == "https://flywheel.example.dev"
+
+
+def test_non_finite_numbers_are_sent_as_null() -> None:
+    # ratio = inf when the candidate passes and the incumbent fails; bare `Infinity` is not JSON
+    # and the Worker would reject the whole trial.
+    body = flywheel.strict_json({"ratio_vs_incumbent": float("inf"), "b2_max": float("nan"), "by_class": [1.0, float("-inf")]})
+    assert json.loads(body, parse_constant=lambda name: pytest.fail(name)) == {"b2_max": None, "by_class": [1.0, None], "ratio_vs_incumbent": None}

@@ -20,11 +20,11 @@
 
   function standing(summary) {
     if (!summary) return "";
-    if (!summary.nodes.length) return '<div><dt>Stands at</dt><dd>No trials recorded yet.</dd></div>';
+    if (!summary.trials) return '<div><dt>Stands at</dt><dd>No trials recorded yet.</dd></div>';
     const t = summary.top;
     const stan = summary.stan ? `, ${summary.stan.real_stan_passed} of ${summary.stan.real_stan_total} real Stan models passed` : "";
     return (
-      `<div><dt>Stands at</dt><dd>${summary.kept} kept of ${summary.nodes.length} trials in ${summary.runs} ${summary.runs === 1 ? "run" : "runs"}${stan}. ` +
+      `<div><dt>Stands at</dt><dd>${fmt.int(summary.kept)} kept of ${fmt.int(summary.trials)} trials in ${summary.runs} ${summary.runs === 1 ? "run" : "runs"}${stan}. ` +
       (t ? `<a href="/frontier/#trial=${encodeURIComponent(t.id)}">Best kept trial: ${fmt.eff(t.soft_min_eff)}</a>` : "") +
       "</dd></div>" +
       (summary.claims.length ? `<div><dt>Claimed now</dt><dd>${summary.claims.map((c) => esc(c.agent)).join(", ")}</dd></div>` : "")
@@ -72,11 +72,13 @@
 
   render(null);
   apin
-    .loadGraph()
-    .then((graph) => {
-      render(apin.laneSummaries(graph));
-      const active = new Set(graph.nodes.map((n) => n.lane)).size;
-      $("#lanes-note").innerHTML = `What you edit, what stays fixed, and where the lane stands today. ${active} of ${apin.LANES.length} lanes have trials posted${graph.source === "live" ? "" : " in the snapshot shipped with this page"}.`;
+    .openStore()
+    .then(async (store) => {
+      const overview = await store.overview();
+      const claims = overview.claims || [];
+      render(apin.laneRows(overview).map((row) => ({ ...row, claims: claims.filter((c) => c.lane === row.lane.id) })));
+      const active = overview.lanes.length;
+      $("#lanes-note").innerHTML = `What you edit, what stays fixed, and where the lane stands today. ${active} of ${apin.LANES.length} lanes have trials posted${store.source === "live" ? "" : " in the snapshot shipped with this page"}.`;
     })
     .catch(() => {
       $("#lanes-note").textContent = "What you edit and what stays fixed. Could not load current standings.";

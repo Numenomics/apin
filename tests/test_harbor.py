@@ -9,6 +9,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from harness.models import ROOT
 
 HARBOR_TASKS_DIR = ROOT / "harbor" / "tasks"
@@ -256,3 +258,18 @@ def test_collector_keeps_releases_apart_and_maps_earlier_trials():
     # A run cut off by the provider is excluded even though it scored well.
     assert by_id["old2"]["outcome"] == "interrupted" and by_id["old2"]["start_speedup"] is None
     assert old["leaderboard"][0]["solved"] == 0 and old["leaderboard"][0]["time_limit_hits"] == 1
+
+
+def test_collector_writes_json_a_browser_can_parse(tmp_path):
+    # A sampler that diverges reports b2_max = inf. Python would write `Infinity`, which
+    # JSON.parse rejects, and the whole benchmark page would fail to load.
+    mod = _load_collector()
+    trial = _attempt("x1", "m/a#low", "a0-ground-up", passed=False, outcome="invalid")
+    trial["b2_max"] = float("inf")
+    trial["by_class"] = {"funnel": float("nan")}
+    out = tmp_path / "benchmark.json"
+    mod.write_site_data(mod.aggregate_results([trial], {"models": {}}, release_tag="bench-v0.2.0"), out)
+    text = out.read_text()
+    assert "Infinity" not in text and "NaN" not in text
+    saved = json.loads(text, parse_constant=lambda name: pytest.fail(f"non-standard JSON constant {name}"))["releases"][0]["trials"][0]
+    assert saved["b2_max"] is None and saved["by_class"]["funnel"] is None

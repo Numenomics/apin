@@ -60,6 +60,12 @@ function createD1Shim(preMigration) {
       prepare(query) {
         return makeStatement(query);
       },
+      // D1 runs a batch in one round trip; the shim runs the statements in order.
+      async batch(statements) {
+        const results = [];
+        for (const stmt of statements) results.push(await stmt.all());
+        return results;
+      },
     },
   };
 }
@@ -1316,5 +1322,317 @@ describe("verification queue", () => {
     const flag = await reqJson(env, "POST", `/api/nodes/${encodeURIComponent(l1.json.lease.node_id)}/state`, { state: "needs-replication", reason: "rerun on new judge" }, bearer(v2));
     assert.equal(flag.status, 200);
     assert.equal((await reqJson(env, "GET", "/api/verify/queue")).json.items[0].reason, "needs-replication");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bounded reads: /api/overview, /api/runs, /api/nodes filters, node detail, bounded DAG.
+// ---------------------------------------------------------------------------
+
+const TRIAL_COLUMNS = [
+  "id", "parent_id", "lane", "run_id", "trial_id", "agent_model", "author", "author_tier", "title", "hypothesis",
+  "decision", "soft_min_eff", "real_stan_passed", "real_stan_total", "verified", "state", "codex_refs",
+  "metrics_json", "created_at",
+];
+
+/** Inserts trials straight into SQLite (triggers keep run_stats current). */
+function seedTrials(sqlite, rows) {
+  const stmt = sqlite.prepare(
+    `INSERT INTO nodes (${TRIAL_COLUMNS.join(", ")}) VALUES (${TRIAL_COLUMNS.map(() => "?").join(", ")})`
+  );
+  sqlite.exec("BEGIN");
+  for (const r of rows) {
+    const [lane, run_id, trial_id] = r.id.split(":");
+    const row = {
+      parent_id: null, lane, run_id, trial_id, agent_model: "model-x", author: `${run_id}-author`, author_tier: null,
+      title: `${trial_id}: ${r.hypothesis ?? "idea"}`, hypothesis: "idea", decision: "discard_no_gain",
+      soft_min_eff: null, real_stan_passed: null, real_stan_total: null, verified: 0, state: "unverified",
+      codex_refs: "[]", metrics_json: '{"loc":10}', ...r,
+    };
+    stmt.run(...TRIAL_COLUMNS.map((c) => row[c] ?? null));
+  }
+  sqlite.exec("COMMIT");
+}
+
+const ts = (i) => new Date(Date.UTC(2026, 0, 1) + i * 60_000).toISOString();
+
+describe("bounded reads", () => {
+  it("/api/overview: totals, lanes with frontier, run steps, Stan pick, claims, alignment and models", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    seedTrials(sqlite, [
+      // Lane A1, run r1: first kept scored trial at T2 (0.1), then improvements; T6 is the frontier.
+      { id: "A1:r1:T1", decision: "discard_tier0", created_at: ts(1) },
+      { id: "A1:r1:T2", decision: "keep_baseline", soft_min_eff: 0.1, created_at: ts(2), agent_model: "glm" },
+      { id: "A1:r1:T3", decision: "discard_no_gain", soft_min_eff: 0.05, created_at: ts(3) },
+      { id: "A1:r1:T4", decision: "keep", soft_min_eff: 0.2, created_at: ts(4), real_stan_passed: 3, real_stan_total: 5 },
+      { id: "A1:r1:T5", decision: "archive_only", soft_min_eff: 0.9, created_at: ts(5) },
+      { id: "A1:r1:T6", decision: "keep_incumbent_failed", soft_min_eff: 0.3, created_at: ts(6) },
+      { id: "A1:r1:T7", decision: "keep", soft_min_eff: 0.4, created_at: ts(7), real_stan_passed: 4, real_stan_total: 5 },
+      // Another A1 run, never kept; a disputed high score that must not be the frontier.
+      { id: "A1:r2:T1", decision: "keep", soft_min_eff: 0.95, state: "disputed", created_at: ts(8), author: "bob", agent_model: "deepseek" },
+      { id: "A1:r2:T2", decision: "discard_no_gain", soft_min_eff: 0.01, created_at: ts(9), author: "bob",
+        real_stan_passed: 4, real_stan_total: 5 },
+      // Lane A3 with only discards: frontier falls back to the best non-excluded trial.
+      { id: "A3:z:T1", decision: "discard_tier1", soft_min_eff: 0.002, created_at: ts(10), agent_model: null },
+    ]);
+    await reqJson(env, "POST", "/api/claims", { task_id: "t", lane: "A1", agent: "x" }, ADMIN);
+
+    const res = await reqJson(env, "GET", "/api/overview");
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("Cache-Control"), "public, max-age=30, s-maxage=30");
+    const o = res.json;
+    assert.deepEqual(Object.keys(o).sort(), ["alignment", "claims", "lanes", "models", "totals"]);
+    assert.deepEqual(
+      { ...o.totals, latest_at: undefined },
+      { trials: 10, kept: 5, runs: 3, contributors: 3, claims: 1, latest_at: undefined }
+    );
+    assert.equal(o.totals.latest_at, ts(10));
+    assert.deepEqual(o.lanes.map((l) => l.lane), ["A1", "A3"]);
+
+    const a1 = o.lanes[0];
+    assert.deepEqual({ trials: a1.trials, kept: a1.kept, runs: a1.runs, latest_at: a1.latest_at }, { trials: 9, kept: 5, runs: 2, latest_at: ts(9) });
+    const frontier = await reqJson(env, "GET", "/api/frontier");
+    assert.deepEqual(a1.frontier, frontier.json.frontier.A1); // same row as /api/frontier
+    assert.equal(a1.frontier.id, "A1:r1:T7");
+    // Running best kept efficiency from T2 on: T5 is archive_only (not kept), T6 keep_incumbent_failed counts.
+    assert.deepEqual(a1.run, { run_id: "r1", first_eff: 0.1, gain: 4, steps: [0.1, 0.1, 0.2, 0.2, 0.3, 0.4] });
+    // Highest pass share wins, newest on ties (T7 and r2:T2 both 4/5; r2:T2 is newer).
+    assert.deepEqual(a1.stan, { id: "A1:r2:T2", run_id: "r2", trial_id: "T2", real_stan_passed: 4, real_stan_total: 5 });
+
+    const a3 = o.lanes[1];
+    assert.equal(a3.frontier.id, "A3:z:T1");
+    assert.deepEqual(a3.run, { run_id: "z", first_eff: null, gain: null, steps: [] });
+    assert.equal(a3.stan, null);
+
+    assert.equal(o.claims.length, 1);
+    assert.deepEqual(o.alignment.map((p) => p.id), ["A1:r1:T4", "A1:r1:T7", "A1:r2:T2"]);
+    assert.equal(o.alignment[0].real_stan_pass_rate, 0.6);
+    assert.deepEqual(o.models, ["deepseek", "glm", "model-x"]);
+  });
+
+  it("/api/overview: long runs keep the change points plus the last one, at most 120 steps", async () => {
+    const { env, sqlite } = makeEnv();
+    const rows = [];
+    for (let i = 1; i <= 500; i += 1) {
+      // A new best every 10 trials: 50 change points over 500 trials.
+      const kept = i % 10 === 1;
+      rows.push({ id: `A2:long:T${i}`, decision: kept ? "keep" : "discard_no_gain", soft_min_eff: kept ? i / 1000 : 0.0001, created_at: ts(i) });
+    }
+    seedTrials(sqlite, rows);
+    const run = (await reqJson(env, "GET", "/api/overview")).json.lanes[0].run;
+    assert.equal(run.steps.length, 51); // 50 changes + the last point
+    assert.equal(run.steps[0], 0.001);
+    assert.equal(run.steps.at(-1), 0.491);
+    assert.equal(run.steps.at(-2), 0.491);
+    assert.equal(run.first_eff, 0.001);
+
+    // Short runs send every point.
+    const { env: env2, sqlite: sq2 } = makeEnv();
+    seedTrials(sq2, rows.slice(0, 30));
+    assert.equal((await reqJson(env2, "GET", "/api/overview")).json.lanes[0].run.steps.length, 30);
+
+    // More than 120 change points: the first plus the most recent 119.
+    const { env: env3, sqlite: sq3 } = makeEnv();
+    seedTrials(sq3, Array.from({ length: 300 }, (_, k) => ({ id: `A2:up:T${k + 1}`, decision: "keep", soft_min_eff: (k + 1) / 1000, created_at: ts(k) })));
+    const up = (await reqJson(env3, "GET", "/api/overview")).json.lanes[0].run;
+    assert.equal(up.steps.length, 120);
+    assert.equal(up.steps[0], 0.001);
+    assert.equal(up.steps[1], 0.182);
+    assert.equal(up.steps.at(-1), 0.3);
+  });
+
+  it("/api/runs: newest activity first, paging, slim nodes, truncation to the latest 150, base_eff over the whole run", async () => {
+    const { env, sqlite } = makeEnv();
+    const rows = [];
+    for (let i = 1; i <= 200; i += 1) {
+      rows.push({
+        id: `A1:big:T${String(i).padStart(4, "0")}`,
+        decision: i === 3 ? "keep_baseline" : i % 50 === 0 ? "keep" : "discard_no_gain",
+        soft_min_eff: i === 3 ? 0.07 : 0.01,
+        real_stan_total: i === 199 ? 5 : null,
+        real_stan_passed: i === 199 ? 2 : null,
+        created_at: ts(i),
+        author: "ada",
+        author_tier: "provisional",
+        agent_model: "claude",
+      });
+    }
+    for (let r = 0; r < 30; r += 1) {
+      rows.push({ id: `A2:small${r}:T1`, decision: "keep", soft_min_eff: 0.2, created_at: ts(1000 + r) });
+    }
+    seedTrials(sqlite, rows);
+
+    const page1 = await reqJson(env, "GET", "/api/runs?limit=24");
+    assert.equal(page1.status, 200);
+    assert.equal(page1.json.count, 31);
+    assert.equal(page1.json.runs.length, 24);
+    assert.equal(page1.json.next_offset, 24);
+    assert.equal(page1.json.runs[0].run_id, "small29"); // newest activity first
+    const page2 = await reqJson(env, "GET", "/api/runs?limit=24&offset=24");
+    assert.equal(page2.json.runs.length, 7);
+    assert.equal(page2.json.next_offset, null);
+    assert.equal(page2.json.runs.at(-1).run_id, "big");
+
+    const big = (await reqJson(env, "GET", "/api/runs?lane=A1")).json;
+    assert.equal(big.count, 1);
+    const run = big.runs[0];
+    assert.deepEqual(
+      { ...run, nodes: undefined },
+      {
+        lane: "A1", run_id: "big", author: "ada", author_tier: "provisional", agent_model: "claude",
+        trials: 200, kept: 5, first_at: ts(1), last_at: ts(200), base_eff: 0.07, truncated: true, nodes: undefined,
+      }
+    );
+    assert.equal(run.nodes.length, 150);
+    assert.equal(run.nodes[0].id, "A1:big:T0051"); // the latest 150, in trial order
+    assert.equal(run.nodes.at(-1).id, "A1:big:T0200");
+    assert.deepEqual(Object.keys(run.nodes[0]).sort(), ["created_at", "decision", "id", "soft_min_eff", "stan", "state", "trial_id"]);
+    assert.equal(run.nodes.find((n) => n.id === "A1:big:T0199").stan, true);
+    assert.equal(run.nodes.find((n) => n.id === "A1:big:T0198").stan, false);
+    const small = page1.json.runs[0];
+    assert.equal(small.truncated, false);
+    assert.equal(small.nodes.length, 1);
+    assert.equal((await reqJson(env, "GET", "/api/runs?limit=500")).json.limit, 60);
+  });
+
+  it("/api/nodes: offset, total count, outcome/stan/q/model filters, no metrics_json", async () => {
+    const { env, sqlite } = makeEnv();
+    const rows = [];
+    const decisions = ["keep", "keep_baseline", "keep_simpler", "keep_incumbent_failed", "archive_only", "discard_no_gain", "discard_tier0"];
+    for (let i = 0; i < 140; i += 1) {
+      rows.push({
+        id: `A${i % 2}:run${i % 7}:T${i}`,
+        decision: decisions[i % 7],
+        soft_min_eff: i / 1000,
+        agent_model: i % 3 === 0 ? "glm-5" : "opus",
+        hypothesis: i === 77 ? "Zigzag PDMP with 100% refresh" : "plain idea",
+        real_stan_total: i % 10 === 0 ? 5 : null,
+        real_stan_passed: i % 10 === 0 ? 3 : null,
+        created_at: ts(i),
+      });
+    }
+    seedTrials(sqlite, rows);
+
+    const first = await reqJson(env, "GET", "/api/nodes");
+    assert.equal(first.json.count, 140);
+    assert.equal(first.json.limit, 50);
+    assert.equal(first.json.nodes.length, 50);
+    assert.equal(first.json.next_offset, 50);
+    assert.equal(first.json.nodes[0].id, "A1:run6:T139"); // newest first
+    assert.ok(!("metrics_json" in first.json.nodes[0]));
+    assert.deepEqual(first.json.nodes[0].metrics, { loc: 10 });
+    const last = await reqJson(env, "GET", "/api/nodes?offset=100");
+    assert.equal(last.json.nodes.length, 40);
+    assert.equal(last.json.next_offset, null);
+    assert.equal((await reqJson(env, "GET", "/api/nodes?limit=999")).json.limit, 200);
+
+    const count = async (qs) => (await reqJson(env, "GET", `/api/nodes?${qs}`)).json.count;
+    assert.equal(await count("outcome=kept"), 80);
+    assert.equal(await count("outcome=archived"), 20);
+    assert.equal(await count("outcome=discarded"), 40);
+    assert.equal(await count("stan=1"), 14);
+    assert.equal(await count("lane=A0&outcome=kept"), 40);
+    assert.equal(await count("lane=A0&run_id=run0&stan=1"), 2);
+    assert.equal(await count("model=glm-5"), 47);
+    assert.equal(await count("model=glm-5&outcome=kept&stan=1"), 3);
+    const kept = await reqJson(env, "GET", "/api/nodes?outcome=kept&limit=200");
+    assert.ok(kept.json.nodes.every((n) => decisions.slice(0, 4).includes(n.decision)));
+
+    const q = await reqJson(env, "GET", "/api/nodes?q=zigzag%20100%25");
+    assert.equal(q.json.count, 1);
+    assert.equal(q.json.nodes[0].id, "A1:run0:T77");
+    assert.equal(await count("q=run6&lane=A0"), 10); // run id is matched too
+    assert.equal((await reqJson(env, "GET", "/api/nodes?outcome=lost")).status, 400);
+    assert.equal((await reqJson(env, "GET", "/api/nodes?q=%25")).status, 400);
+  });
+
+  it("/api/nodes/:id: parents and children with lane/trial/decision, and the notes that cite it", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    seedTrials(sqlite, [
+      { id: "A1:r:T1", decision: "keep_baseline", created_at: ts(1) },
+      { id: "A3:o:T9", decision: "keep", created_at: ts(2) },
+    ]);
+    const token = await registerToken(env, "linker");
+    await reqJson(env, "POST", "/api/nodes", trial("A1:r:T2", { parent_id: "A1:r:T1", parent_ids: [{ id: "A3:o:T9", relation: "combines" }, { id: "A9:gone:T1", relation: "fork" }] }), bearer(token));
+    await reqJson(env, "POST", "/api/nodes", trial("A1:r:T3", { parent_id: "A1:r:T2" }), bearer(token));
+    const n1 = await reqJson(env, "POST", "/api/notes", { kind: "insight", title: "T2 combines well", node_ids: ["A1:r:T2", "A1:r:T1"] }, bearer(token));
+    await reqJson(env, "POST", "/api/notes", { kind: "hypothesis", title: "unrelated", node_ids: ["A1:r:T1"] }, bearer(token));
+
+    const d = (await reqJson(env, "GET", `/api/nodes/${encodeURIComponent("A1:r:T2")}`)).json;
+    assert.deepEqual(d.parents, [
+      { id: "A3:o:T9", relation: "combines", lane: "A3", trial_id: "T9", decision: "keep" },
+      { id: "A9:gone:T1", relation: "fork", lane: null, trial_id: null, decision: null },
+      { id: "A1:r:T1", relation: "incumbent", lane: "A1", trial_id: "T1", decision: "keep_baseline" },
+    ]);
+    assert.deepEqual(d.children, [{ id: "A1:r:T3", relation: "incumbent", lane: "A1", trial_id: "T3", decision: "keep" }]);
+    assert.deepEqual(d.notes, [{ id: n1.json.note.id, kind: "insight", title: "T2 combines well", state: "open" }]);
+    assert.equal(d.parent.id, "A1:r:T1");
+    assert.equal(d.node.id, "A1:r:T2");
+    // Re-linking a note moves its citation.
+    await reqJson(env, "PATCH", `/api/notes/${n1.json.note.id}`, { node_ids: ["A1:r:T3"] }, bearer(token));
+    assert.equal((await reqJson(env, "GET", `/api/nodes/${encodeURIComponent("A1:r:T2")}`)).json.notes.length, 0);
+    assert.equal((await reqJson(env, "GET", `/api/nodes/${encodeURIComponent("A1:r:T1")}`)).json.notes.length, 1);
+  });
+
+  it("/api/dag: the newest 300 trials with their edges, plus total and truncated", async () => {
+    const { env, sqlite } = makeEnv();
+    seedTrials(
+      sqlite,
+      Array.from({ length: 400 }, (_, i) => ({
+        id: `A1:chain:T${String(i).padStart(4, "0")}`,
+        parent_id: i > 0 ? `A1:chain:T${String(i - 1).padStart(4, "0")}` : null,
+        decision: "keep",
+        soft_min_eff: i / 1e4,
+        created_at: ts(i),
+      }))
+    );
+    const dag = (await reqJson(env, "GET", "/api/dag")).json;
+    assert.equal(dag.nodes.length, 300);
+    assert.equal(dag.total, 400);
+    assert.equal(dag.truncated, true);
+    assert.equal(dag.nodes[0].id, "A1:chain:T0100"); // oldest of the newest 300 first
+    assert.equal(dag.edges.length, 299); // only edges whose both ends are present
+    assert.ok(!("metrics_json" in dag.nodes[0]));
+    assert.equal(dag.frontier.A1.id, "A1:chain:T0399");
+    const small = (await reqJson(env, "GET", "/api/dag?lane=A2")).json;
+    assert.deepEqual({ n: small.nodes.length, total: small.total, truncated: small.truncated }, { n: 0, total: 0, truncated: false });
+  });
+
+  it("keeps run_stats equal to a full recount through inserts, re-posts, state changes, moves and deletes", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    const token = await registerToken(env, "counter");
+    for (let i = 0; i < 30; i += 1) {
+      const d = ["keep", "archive_only", "discard_no_gain", "keep_incumbent_failed"][i % 4];
+      await reqJson(env, "POST", "/api/nodes", trial(`A${i % 3}:run${i % 4}:T${i}`, { decision: d, soft_min_eff: (i % 5) / 10 }), bearer(token));
+    }
+    // Idempotent re-posts, a decision change, a run move, Stan scores, deletes, a purge.
+    for (let i = 0; i < 30; i += 3) {
+      await reqJson(env, "POST", "/api/nodes", trial(`A${i % 3}:run${i % 4}:T${i}`, { decision: ["keep", "archive_only", "discard_no_gain", "keep_incumbent_failed"][i % 4], soft_min_eff: (i % 5) / 10 }), bearer(token));
+    }
+    await reqJson(env, "POST", "/api/nodes", trial("A0:run0:T0", { decision: "discard_tier0", soft_min_eff: 0 }), bearer(token));
+    await reqJson(env, "POST", "/api/nodes", { ...trial("A1:run1:T1"), run_id: "moved" }, bearer(token));
+    await reqJson(env, "POST", `/api/admin/nodes/${encodeURIComponent("A2:run2:T2")}/verify`, { real_stan_passed: 2, real_stan_total: 4 }, ADMIN);
+    await reqJson(env, "DELETE", `/api/admin/nodes/${encodeURIComponent("A0:run3:T3")}`, undefined, ADMIN);
+    const recount = () =>
+      sqlite
+        .prepare(
+          `SELECT lane, run_id, COUNT(*) AS trials,
+             SUM(decision IN ('keep','keep_baseline','keep_simpler','keep_incumbent_failed')) AS kept,
+             SUM(decision = 'archive_only') AS archived, SUM(coalesce(real_stan_total, 0) > 0) AS stan,
+             MIN(created_at) AS first_at, MAX(created_at) AS last_at
+           FROM nodes GROUP BY lane, run_id ORDER BY lane, run_id`
+        )
+        .all()
+        .map((r) => ({ ...r }));
+    const stats = () =>
+      sqlite
+        .prepare("SELECT lane, run_id, trials, kept, archived, stan, first_at, last_at FROM run_stats ORDER BY lane, run_id")
+        .all()
+        .map((r) => ({ ...r }));
+    assert.deepEqual(stats(), recount());
+    assert.equal((await reqJson(env, "GET", "/api/health")).json.nodes, 29);
+    await reqJson(env, "POST", "/api/admin/handles/counter/purge", undefined, ADMIN);
+    assert.deepEqual(stats(), []);
+    assert.deepEqual((await reqJson(env, "GET", "/api/overview")).json.lanes, []);
   });
 });

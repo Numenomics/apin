@@ -622,6 +622,22 @@ def aggregate_results(trials: list[dict[str, Any]], pricing: dict[str, Any], *, 
     }
 
 
+def _json_safe(value: Any) -> Any:
+    """Replace NaN and infinities with null: browsers reject them, Python writes them by default."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+def write_site_data(data: dict[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_json_safe(data), indent=2, allow_nan=False) + "\n", encoding="utf-8")
+
+
 def _flatten_trials(data: dict[str, Any]) -> list[dict[str, Any]]:
     if "releases" in data:
         return [t for rel in data["releases"] for t in rel["trials"]]
@@ -650,8 +666,7 @@ def main(argv: list[str] | None = None) -> int:
             trials[f"{t.get('release')}/{t['trial_id']}"] = t
     data = aggregate_results(list(trials.values()), pricing, release_tag=args.release)
 
-    args.out_json.parent.mkdir(parents=True, exist_ok=True)
-    args.out_json.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    write_site_data(data, args.out_json)
     n = sum(len(r["trials"]) for r in data["releases"])
     print(f"wrote {args.out_json} ({n} attempts, {len(data['releases'])} releases)")
     return 0

@@ -313,6 +313,10 @@ def test_seed_from_apin_generates_valid_snapshot_and_sql(tmp_path: Path) -> None
     assert states["A1:glm53_a1_1h:T0002"] == "verified"
     assert states["A1:glm53_a1_1h:T0003"] == "disputed"
     assert conn.execute("SELECT COUNT(*) FROM node_parents").fetchone()[0] == 2
+    # Re-applying the seed upserts in place, so the trigger-kept run counters stay exact.
+    assert conn.execute("SELECT lane, run_id, trials, kept, archived FROM run_stats").fetchall() == [
+        ("A1", "glm53_a1_1h", 3, 2, 1)
+    ]
     conn.close()
 
 

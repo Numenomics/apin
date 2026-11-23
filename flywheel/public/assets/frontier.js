@@ -1,15 +1,26 @@
-/* Research frontier page. Data: GET /api/dag (live) or /snapshot.json (shipped with the site). */
+/* Research frontier page. Data comes from apin.openStore(): bounded pages from the Flywheel API,
+   or the same shapes from /snapshot.json when the API does not answer. No request loads every trial. */
 (function () {
   "use strict";
-  const { $, esc, fmt, svg, status, glyph, tip, cmd, KEPT, DECISIONS, STATES, RELATIONS, isNum } = apin;
+  const { $, esc, fmt, svg, status, glyph, tip, cmd, DECISIONS, STATES, RELATIONS, isNum, outcomeOf } = apin;
 
   apin.mount("frontier");
 
-  const state = { graph: null, notes: null, queue: null, summaries: [], selected: null, redraw: [] };
+  const state = {
+    store: null,
+    overview: null,
+    rows: [], // one per lane
+    runs: [], // pages of runs loaded so far, newest first
+    runsNext: null,
+    runsTotal: 0,
+    ledger: { nodes: [], next: null, count: 0, seq: 0 },
+    notes: null,
+    queue: null,
+    selected: null,
+    redraw: [],
+  };
 
   const decision = (n) => DECISIONS[n.decision] || { label: n.decision, glyph: "tick", note: "" };
-  const outcomeOf = (n) => (KEPT.has(n.decision) ? "kept" : n.decision === "archive_only" ? "archived" : "discarded");
-  const byTime = (a, b) => String(a.created_at).localeCompare(String(b.created_at)) || String(a.id).localeCompare(String(b.id));
   const headline = (n) => String(n.hypothesis || n.title || "No hypothesis recorded").replace(/^T\d+:\s*/, "");
   const clip = (s, n) => (s.length > n ? s.slice(0, n - 1).trimEnd() + "…" : s);
   const stateOf = (n) => STATES[n.state] || STATES.unverified;
@@ -17,34 +28,33 @@
   /* A contributor who registered without an invite is marked until a maintainer promotes them. */
   const byline = (n) => esc(n.author || n.agent_model || "—") + (n.author_tier === "provisional" ? ' <span class="tag" title="Registered without an invite; not yet promoted by a maintainer">new</span>' : "");
 
+  /* Chart points carry only what the chart draws; the hypothesis is one click away. */
   function nodeTip(n) {
-    const stan = n.real_stan_total > 0 ? `<br><span class="k">Real Stan</span> ${n.real_stan_passed} of ${n.real_stan_total} passed` : "";
     return (
-      `<b>${esc(n.lane)} ${esc(n.trial_id || "")}</b> · ${esc(decision(n).label)}<br>${esc(clip(headline(n), 150))}<br>` +
-      `<span class="k">Efficiency</span> ${fmt.eff(n.soft_min_eff)} · <span class="k">vs incumbent</span> ${fmt.times(n.ratio_vs_incumbent)}${stan}` +
-      (n.state !== "unverified" ? `<br><span class="k">State</span> ${esc(stateOf(n).label)}` : "")
+      `<b>${esc(n.lane)} ${esc(n.trial_id || "")}</b> · ${esc(decision(n).label)}<br>` +
+      `<span class="k">Efficiency</span> ${fmt.eff(n.soft_min_eff)}${n.stan ? " · also run on real Stan" : ""}` +
+      (n.state && n.state !== "unverified" ? `<br><span class="k">State</span> ${esc(stateOf(n).label)}` : "") +
+      '<br><span class="k">Select to read its hypothesis</span>'
     );
   }
 
   /* ---------- header + lane table ---------- */
 
   function renderMeta() {
-    const g = state.graph;
-    const kept = g.nodes.filter((n) => KEPT.has(n.decision)).length;
-    const runs = new Set(g.nodes.map((n) => n.lane + "/" + n.run_id)).size;
-    const last = g.nodes.map((n) => n.created_at).sort().pop();
+    const t = state.overview.totals;
+    const live = state.store.source === "live";
     $("#meta").innerHTML =
-      `<span id="live" class="${g.source === "live" ? "is-live" : ""}"><i></i>${g.source === "live" ? "Live from the Flywheel" : "Snapshot shipped with this page"}</span>` +
-      `<span><b>${g.nodes.length}</b> trials in <b>${runs}</b> runs</span>` +
-      `<span><b>${kept}</b> kept (${g.nodes.length ? Math.round((kept / g.nodes.length) * 100) : 0}%)</span>` +
-      `<span><b>${g.claims.length}</b> claimed now</span>` +
-      (last ? `<span>Latest trial <b>${esc(fmt.date(last))}</b></span>` : "");
+      `<span id="live" class="${live ? "is-live" : ""}"><i></i>${live ? "Live from the Flywheel" : "Snapshot shipped with this page"}</span>` +
+      `<span><b>${fmt.int(t.trials)}</b> trials in <b>${fmt.int(t.runs)}</b> runs</span>` +
+      `<span><b>${fmt.int(t.kept)}</b> kept (${t.trials ? Math.round((t.kept / t.trials) * 100) : 0}%)</span>` +
+      `<span><b>${fmt.int(t.claims)}</b> claimed now</span>` +
+      (t.latest_at ? `<span>Latest trial <b>${esc(fmt.date(t.latest_at))}</b></span>` : "");
   }
 
   function renderLaneTable() {
-    const body = state.summaries
+    const body = state.rows
       .map((r) => {
-        if (!r.nodes.length) {
+        if (!r.trials) {
           return `<tr><td>${apin.laneTag(r.lane.id)}</td><td colspan="7" class="sub">${esc(r.lane.name)}: no trials recorded yet. <a href="/lanes/#${r.lane.id}">Start this lane</a></td></tr>`;
         }
         const t = r.top;
@@ -55,7 +65,7 @@
           `<tr class="clickable" data-node="${esc(t ? t.id : "")}" tabindex="0"><td>${apin.laneTag(r.lane.id)}</td>` +
           `<td class="wrap-cell"><strong style="color:var(--ink)">${esc(r.lane.name)}</strong><br>${esc(t ? clip(headline(t), 130) : "No kept trial yet")}</td>` +
           `<td class="num">${fmt.eff(t && t.soft_min_eff)}</td><td class="num">${fmt.times(r.gain)}</td><td>${stan}</td>` +
-          `<td class="num">${r.kept} kept of ${r.nodes.length}<div class="sub">${r.runs} ${r.runs === 1 ? "run" : "runs"}</div></td>` +
+          `<td class="num">${fmt.int(r.kept)} kept of ${fmt.int(r.trials)}<div class="sub">${r.runs} ${r.runs === 1 ? "run" : "runs"}</div></td>` +
           `<td>${apin.sparkline(r.steps, apin.laneColor(r.lane.id))}</td>` +
           `<td>${t ? byline(t) : "—"}</td></tr>`
         );
@@ -76,19 +86,14 @@
   function renderField(width) {
     const el = $("#field");
     el.innerHTML = "";
-    const g = state.graph;
-    if (!g.nodes.length) {
+    if (!state.runs.length) {
       el.setAttribute("width", width);
       el.setAttribute("height", 120);
       el.appendChild(svg("text", { x: 16, y: 64 }, "No trials yet. The first one will appear here."));
       return;
     }
-    const runsOf = (r) => {
-      const map = new Map();
-      r.nodes.forEach((n) => (map.has(n.run_id) ? map.get(n.run_id).push(n) : map.set(n.run_id, [n])));
-      return [...map].map(([id, nodes]) => ({ id, nodes: nodes.sort(byTime) })).sort((a, b) => byTime(a.nodes[0], b.nodes[0]));
-    };
-    const laid = state.summaries.filter((r) => r.nodes.length).map((r) => ({ r, runs: runsOf(r) }));
+    /* Runs arrive newest first; the chart groups them by lane and reads each lane oldest first. */
+    const laid = apin.LANES.map((lane) => ({ lane, runs: state.runs.filter((run) => run.lane === lane.id).sort((a, b) => String(a.first_at).localeCompare(String(b.first_at))) })).filter((l) => l.runs.length);
     const longest = Math.max(...laid.flatMap((l) => l.runs.map((run) => run.nodes.length)));
     const narrow = width < 720;
     const left = narrow ? 138 : 236;
@@ -105,12 +110,12 @@
     const marks = svg("g");
     const text = svg("g");
 
-    for (const { r, runs } of laid) {
-      const color = apin.laneColor(r.lane.id);
+    for (const { lane, runs } of laid) {
+      const color = apin.laneColor(lane.id);
       if (y > 0) rules.appendChild(svg("line", { x1: 0, x2: W, y1: y + 0.5, y2: y + 0.5, stroke: "var(--rule)" }));
       const head = svg("text", { class: "lane-name", x: 0, y: y + 25 });
-      head.appendChild(svg("tspan", { fill: color }, r.lane.id));
-      head.appendChild(svg("tspan", { dx: 8 }, r.lane.name));
+      head.appendChild(svg("tspan", { fill: color }, lane.id));
+      head.appendChild(svg("tspan", { dx: 8 }, lane.name));
       text.appendChild(head);
       y += laneHead;
 
@@ -118,8 +123,9 @@
         const top = y + 6;
         const bottom = top + strip;
         const x = (i) => left + i * step;
+        /* The run's first kept score, even when only its latest trials are shown. */
         const first = run.nodes.find((n) => outcomeOf(n) === "kept" && scored(n)) || run.nodes.find(scored);
-        const base = first ? first.soft_min_eff : 1;
+        const base = isNum(run.base_eff) && run.base_eff > 0 ? run.base_eff : first ? first.soft_min_eff : 1;
         const rel = (n) => n.soft_min_eff / base;
         const vals = run.nodes.filter(scored).map(rel);
         let lo = Math.min(1, ...vals);
@@ -131,16 +137,18 @@
         }
         const sy = (v) => bottom - (Math.log(v / lo) / Math.log(hi / lo)) * strip;
 
-        const who = run.nodes[0].author || run.nodes[0].agent_model || "";
-        text.appendChild(svg("text", { class: "run-name", x: 0, y: top + 15 }, clip(run.id, narrow ? 17 : 30)));
-        text.appendChild(svg("text", { x: 0, y: top + 31 }, clip(`${who}, ${run.nodes.length} ${run.nodes.length === 1 ? "trial" : "trials"}`, narrow ? 21 : 36)));
+        const who = run.author || run.agent_model || "";
+        const size = run.truncated ? `latest ${run.nodes.length} of ${fmt.int(run.trials)} trials` : `${run.trials} ${run.trials === 1 ? "trial" : "trials"}`;
+        text.appendChild(svg("text", { class: "run-name", x: 0, y: top + 15 }, clip(run.run_id, narrow ? 17 : 30)));
+        text.appendChild(svg("text", { x: 0, y: top + 31 }, clip(`${who}, ${size}`, narrow ? 21 : 38)));
 
         /* where the run started */
         if (vals.length) rules.appendChild(svg("line", { x1: x(0), x2: x(run.nodes.length - 1), y1: sy(1), y2: sy(1), stroke: "var(--rule-2)", "stroke-dasharray": "1 4", "stroke-linecap": "round" }));
 
         let d = "";
         let held = null;
-        run.nodes.forEach((n, i) => {
+        run.nodes.forEach((slim, i) => {
+          const n = { ...slim, lane: run.lane };
           const px = x(i);
           let py = bottom + 12;
           const node = svg("g", {
@@ -148,7 +156,7 @@
             tabindex: 0,
             role: "button",
             "data-node": n.id,
-            "aria-label": `${n.lane} ${n.trial_id || ""}, ${decision(n).label}: ${clip(headline(n), 90)}`,
+            "aria-label": `${n.lane} ${run.run_id} ${n.trial_id || ""}, ${decision(n).label}`,
           });
           if (!scored(n)) {
             node.appendChild(svg("line", { x1: 0, x2: 0, y1: -4, y2: 4, stroke: "var(--ink-3)", "stroke-width": 1.4, "stroke-linecap": "round" }));
@@ -161,7 +169,7 @@
             } else {
               node.appendChild(svg("circle", { r: 2.6, fill: "var(--paper)", stroke: "var(--ink-3)", "stroke-width": 1.1 }));
             }
-            if (n.real_stan_total > 0) node.appendChild(svg("circle", { r: 6.2, fill: "none", stroke: "var(--ink)", "stroke-width": 1 }));
+            if (n.stan) node.appendChild(svg("circle", { r: 6.2, fill: "none", stroke: "var(--ink)", "stroke-width": 1 }));
           }
           node.setAttribute("transform", `translate(${px.toFixed(1)},${py.toFixed(1)})`);
           node.appendChild(svg("circle", { r: Math.min(10, step / 2 + 2), fill: "transparent" }));
@@ -185,6 +193,27 @@
     el.setAttribute("viewBox", `0 0 ${W} ${y}`);
   }
 
+  function renderFieldMore() {
+    const shown = state.runs.length;
+    $("#field-count").textContent = state.runsTotal > shown ? `The ${shown} most recently active runs of ${fmt.int(state.runsTotal)}.` : "";
+    $("#field-more").hidden = state.runsNext === null;
+  }
+
+  async function moreRuns() {
+    if (state.runsNext === null) return;
+    $("#field-more").disabled = true;
+    try {
+      const page = await state.store.runs({ offset: state.runsNext });
+      state.runs.push(...page.runs);
+      state.runsNext = page.next_offset;
+      state.runsTotal = page.count;
+      state.redraw[0]();
+      renderFieldMore();
+    } finally {
+      $("#field-more").disabled = false;
+    }
+  }
+
   function renderFieldLegend() {
     const c = "var(--ink-2)";
     $("#field-legend").innerHTML =
@@ -201,7 +230,7 @@
     const H = 300;
     el.setAttribute("viewBox", `0 0 ${W} ${H}`);
     el.setAttribute("height", H);
-    const series = state.summaries
+    const series = state.rows
       .filter((r) => r.steps.length > 1 && r.steps[0] > 0)
       .map((r) => ({ lane: r.lane.id, pts: r.steps.map((v, i) => ({ x: i + 1, y: v / r.steps[0] })) }));
     if (!series.length) {
@@ -255,7 +284,7 @@
     const H = 300;
     el.setAttribute("viewBox", `0 0 ${W} ${H}`);
     el.setAttribute("height", H);
-    const pts = state.graph.alignment.filter((a) => isNum(a.real_stan_pass_rate));
+    const pts = state.overview.alignment.filter((a) => isNum(a.real_stan_pass_rate));
     const lanesShown = [...new Set(pts.map((p) => p.lane))].sort();
     $("#align-legend").innerHTML = lanesShown.map((l) => `<span>${glyph("keep", apin.laneColor(l))}${esc(l)} ${esc(apin.laneName(l))}</span>`).join("");
     if (!pts.length) {
@@ -302,7 +331,7 @@
   /* ---------- claims ---------- */
 
   function renderClaims() {
-    const claims = state.graph.claims;
+    const claims = state.overview.claims;
     if (!claims.length) {
       $("#claims").innerHTML =
         '<tbody><tr><td class="empty">Nothing is claimed, so every open task is free. List them with <code>uv run python scripts/choose_research_task.py --list</code>.</td></tr></tbody>';
@@ -340,7 +369,7 @@
     }
     el.innerHTML = list
       .map((n) => {
-        const cited = (n.node_ids || []).map((id) => (state.graph.byId.has(id) ? `<button type="button" data-node="${esc(id)}">${esc(id)}</button>` : `<span class="tag">${esc(id)}</span>`)).join("");
+        const cited = (n.node_ids || []).map((id) => `<button type="button" data-node="${esc(id)}">${esc(id)}</button>`).join("");
         return (
           `<article class="note"><header>${n.lane ? apin.laneTag(n.lane) : ""}<span class="tag">${esc(n.kind)}</span>` +
           `${status(NOTE_TONE[n.state] || "mute", n.state || "open")}<span class="sub">${esc(n.author || "unknown")}, ${esc(fmt.day(n.updated_at || n.created_at))}</span></header>` +
@@ -383,23 +412,45 @@
 
   /* ---------- ledger ---------- */
 
-  function renderLedger() {
-    const lane = $("#f-lane").value;
-    const by = $("#f-by").value;
+  /* The ledger is paged and filtered by the store, so it stays small however long the record grows. */
+  function ledgerFilters() {
     const outcome = $("#f-outcome").value;
-    const q = $("#f-q").value.trim().toLowerCase();
-    const all = state.graph.nodes;
-    const list = [...all]
-      .sort(byTime)
-      .reverse()
-      .filter((n) => {
-        if (lane && n.lane !== lane) return false;
-        if (by && n.agent_model !== by) return false;
-        if (outcome.startsWith("state:") ? n.state !== outcome.slice(6) : outcome === "stan" ? !(n.real_stan_total > 0) : outcome && outcomeOf(n) !== outcome) return false;
-        if (q && !`${n.id} ${n.hypothesis || ""} ${n.code_sha || ""} ${(n.codex_refs || []).join(" ")} ${n.author || ""}`.toLowerCase().includes(q)) return false;
-        return true;
-      });
-    $("#ledger-count").textContent = `${list.length === all.length ? "All" : list.length + " of"} ${all.length} trials, newest first.`;
+    return {
+      lane: $("#f-lane").value,
+      model: $("#f-by").value,
+      q: $("#f-q").value.trim(),
+      state: outcome.startsWith("state:") ? outcome.slice(6) : "",
+      stan: outcome === "stan",
+      outcome: outcome.startsWith("state:") || outcome === "stan" ? "" : outcome,
+    };
+  }
+
+  async function loadLedger(more) {
+    const seq = ++state.ledger.seq;
+    const filters = ledgerFilters();
+    try {
+      const page = await state.store.trials({ ...filters, offset: more ? state.ledger.next : 0 });
+      if (seq !== state.ledger.seq) return; // a newer search has replaced this one
+      state.ledger.nodes = more ? state.ledger.nodes.concat(page.nodes) : page.nodes;
+      state.ledger.next = page.next_offset;
+      state.ledger.count = page.count;
+    } catch {
+      if (seq !== state.ledger.seq) return;
+      state.ledger.nodes = [];
+      state.ledger.next = null;
+      state.ledger.count = 0;
+      $("#ledger").innerHTML = '<tbody><tr><td class="empty">Could not load trials. Reload the page to try again.</td></tr></tbody>';
+      $("#ledger-more").hidden = true;
+      return;
+    }
+    renderLedger(Object.values(filters).some(Boolean));
+  }
+
+  function renderLedger(filtered) {
+    const list = state.ledger.nodes;
+    const total = state.ledger.count;
+    $("#ledger-count").textContent = `${filtered ? fmt.int(total) + " matching" : "All " + fmt.int(total)} trials, newest first${list.length < total ? `; showing ${fmt.int(list.length)}` : ""}.`;
+    $("#ledger-more").hidden = state.ledger.next === null;
     if (!list.length) {
       $("#ledger").innerHTML = '<tbody><tr><td class="empty">No trial matches these filters. Clear the search or pick another lane.</td></tr></tbody>';
       return;
@@ -421,10 +472,14 @@
 
   /* ---------- trial details ---------- */
 
-  function openNode(id, fromHash) {
-    const g = state.graph;
-    const n = g.byId.get(id);
-    if (!n) return;
+  async function openNode(id, fromHash) {
+    let detail;
+    try {
+      detail = await state.store.node(id);
+    } catch {
+      return; // an id the store does not know, for example a stale link
+    }
+    const n = detail.node;
     state.selected = id;
     document.querySelectorAll(".is-selected").forEach((el) => el.classList.remove("is-selected"));
     document.querySelectorAll(`[data-node="${CSS.escape(id)}"]`).forEach((el) => el.classList.add("is-selected"));
@@ -446,18 +501,15 @@
       pair("Code hash", n.code_sha || "—"),
       pair("Judge version", m.judge_digest || "—"),
     ];
-    const chip = (rel, id, text) => (g.byId.has(id) ? `<button type="button" data-node="${esc(id)}">${esc(text)}</button>` : `<span class="tag">${esc(rel)} ${esc(id)}</span>`);
-    const before = (g.parents.get(n.id) || []).map((p) => chip(RELATIONS[p.relation] || p.relation, p.id, `${RELATIONS[p.relation] || p.relation} ${(g.byId.get(p.id) || {}).trial_id || p.id}`)).join("");
-    const after = (g.children.get(n.id) || [])
-      .map((c) => ({ rel: c.relation, node: g.byId.get(c.id) }))
-      .filter((c) => c.node)
-      .sort((x, y) => byTime(x.node, y.node))
-      .map((c) => `<button type="button" data-node="${esc(c.node.id)}">${esc(c.node.trial_id || c.node.id)}, ${esc(c.rel === "incumbent" ? decision(c.node).label : c.rel === "fork" ? "forked this" : "combines this")}</button>`)
+    const name = (x) => (x.lane && x.lane !== n.lane ? `${x.lane} ` : "") + (x.trial_id || x.id);
+    const before = detail.parents.map((x) => `<button type="button" data-node="${esc(x.id)}">${esc(RELATIONS[x.relation] || x.relation)} ${esc(name(x))}</button>`).join("");
+    const after = detail.children
+      .map((x) => `<button type="button" data-node="${esc(x.id)}">${esc(name(x))}, ${esc(x.relation === "incumbent" ? (DECISIONS[x.decision] || { label: x.decision || "trial" }).label : x.relation === "fork" ? "forked this" : "combines this")}</button>`)
       .join("");
     const refs = (n.codex_refs || []).map((r) => `<a class="tag" href="${apin.REPO}/blob/main/codex/cards/${encodeURIComponent(r)}.md">${esc(r)}</a>`).join(" ");
     const d = decision(n);
     const st = stateOf(n);
-    const linked = (state.notes || []).filter((note) => (note.node_ids || []).includes(n.id));
+    const linked = detail.notes.length ? detail.notes : (state.notes || []).filter((note) => (note.node_ids || []).includes(n.id));
     const source = n.has_source
       ? `<div><h4>Source</h4><div class="chips"><button type="button" data-source="${esc(n.id)}">Show the submitted file</button></div>` +
         `<div id="source-box"></div>${cmd(`uv run apin autoresearch fetch --node ${n.id}`)}</div>`
@@ -516,19 +568,23 @@
       sel.innerHTML = `<option value="">${first}</option>` + values.map((v) => `<option value="${esc(v)}">${esc(labelOf ? labelOf(v) : v)}</option>`).join("");
       if (values.includes(prev)) sel.value = prev;
     };
-    const nodes = state.graph.nodes;
-    set("#f-lane", [...new Set(nodes.map((n) => n.lane))].sort(), "All lanes", (l) => `${l} ${apin.laneName(l)}`);
-    set("#f-by", [...new Set(nodes.map((n) => n.agent_model).filter(Boolean))].sort(), "All models");
+    set("#f-lane", state.overview.lanes.map((l) => l.lane).sort(), "All lanes", (l) => `${l} ${apin.laneName(l)}`);
+    set("#f-by", [...state.overview.models].sort(), "All models");
     set("#n-lane", [...new Set((state.notes || []).map((n) => n.lane).filter(Boolean))].sort(), "All lanes", (l) => `${l} ${apin.laneName(l)}`);
   }
 
   async function load() {
     $("#refresh").disabled = true;
     try {
-      const live = Promise.all([apin.loadNotes(), apin.loadQueue()]);
-      state.graph = await apin.loadGraph();
-      [state.notes, state.queue] = state.graph.source === "live" ? await live : [null, null];
-      state.summaries = apin.laneSummaries(state.graph);
+      const extras = Promise.all([apin.loadNotes(), apin.loadQueue()]);
+      state.store = await apin.openStore();
+      state.overview = await state.store.overview();
+      state.rows = apin.laneRows(state.overview);
+      const runs = await state.store.runs({ offset: 0 });
+      state.runs = runs.runs;
+      state.runsNext = runs.next_offset;
+      state.runsTotal = runs.count;
+      [state.notes, state.queue] = state.store.source === "live" ? await extras : [null, null];
       renderMeta();
       renderLaneTable();
       renderFieldLegend();
@@ -536,7 +592,8 @@
       renderQueue();
       fillFilters();
       renderNotes();
-      renderLedger();
+      renderFieldMore();
+      loadLedger(false);
       if (state.redraw.length) state.redraw.forEach((fn) => fn());
       else {
         state.redraw = [
@@ -550,15 +607,21 @@
     } catch (err) {
       console.error(err);
       $("#meta").textContent = "Could not load the trials.";
-      $("#lane-table").innerHTML = '<tbody><tr><td class="empty">Neither the live API nor the snapshot answered. Reload, or read <a href="/api/dag">/api/dag</a> directly.</td></tr></tbody>';
+      $("#lane-table").innerHTML = '<tbody><tr><td class="empty">Neither the live API nor the snapshot answered. Reload, or read <a href="/api/overview">/api/overview</a> directly.</td></tr></tbody>';
     } finally {
       $("#refresh").disabled = false;
     }
   }
 
   $("#refresh").addEventListener("click", load);
-  ["#f-lane", "#f-by", "#f-outcome"].forEach((id) => $(id).addEventListener("change", renderLedger));
-  $("#f-q").addEventListener("input", renderLedger);
+  ["#f-lane", "#f-by", "#f-outcome"].forEach((id) => $(id).addEventListener("change", () => loadLedger(false)));
+  let searchTimer = 0;
+  $("#f-q").addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => loadLedger(false), 250);
+  });
+  $("#ledger-more").addEventListener("click", () => loadLedger(true));
+  $("#field-more").addEventListener("click", moreRuns);
   ["#n-kind", "#n-lane"].forEach((id) => $(id).addEventListener("change", renderNotes));
   apin.onTheme(() => state.redraw.forEach((fn) => fn()));
   load();

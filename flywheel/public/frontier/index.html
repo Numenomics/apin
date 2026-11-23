@@ -95,6 +95,15 @@
         overflow: auto;
         margin-top: 8px;
       }
+      .more {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        margin-top: 12px;
+        font-family: var(--sans);
+        font-size: 0.9rem;
+        color: var(--ink-3);
+      }
       .legend-note {
         font-size: 0.82rem;
         color: var(--ink-3);
@@ -146,6 +155,7 @@
             <div class="legend" id="field-legend"></div>
           </div>
           <div class="field-scroll"><svg id="field" role="group" aria-labelledby="field-h"></svg></div>
+          <p class="more"><span id="field-count"></span> <button class="btn quiet small" type="button" id="field-more" hidden>Show older runs</button></p>
           <figcaption class="caption">
             Each strip is one run, read left to right in the order its trials ran. Height is efficiency relative to the run's first scored trial, on that run's own log scale, and the dotted line marks where the run began. The stepped line is the version to beat. It moves only when a trial is kept, and the number at its end shows the gain over the start. Select any trial to read its hypothesis and numbers.
           </figcaption>
@@ -236,6 +246,7 @@
           </div>
         </div>
         <div class="table-scroll tall"><table class="data" id="ledger"></table></div>
+        <p class="more"><button class="btn quiet small" type="button" id="ledger-more" hidden>Show more trials</button></p>
       </section>
     </main>
     <script src="/assets/site.js"></script>
