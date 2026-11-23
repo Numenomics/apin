@@ -3,192 +3,312 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>apin Flywheel — Autoresearch DAG &amp; Alignment</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <title>apin: fast only counts when the posterior is right</title>
+    <meta name="description" content="apin is an open workbench for making Bayesian samplers faster under a fixed accuracy harness." />
+    <link rel="stylesheet" href="/assets/site.css" />
+    <style>
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+        gap: 56px;
+        align-items: center;
+        padding: 64px 0 60px;
+      }
+      .hero h1 {
+        font-size: clamp(2.7rem, 6.4vw, 4.9rem);
+        font-weight: 800;
+        letter-spacing: -0.022em;
+        line-height: 0.98;
+      }
+      .hero-copy {
+        display: grid;
+        gap: 22px;
+      }
+      .hero .lede {
+        max-width: 54ch;
+      }
+      .hand-off {
+        display: grid;
+        gap: 8px;
+        max-width: 60ch;
+      }
+      .hand-off label {
+        font-size: 0.9rem;
+        color: var(--ink-2);
+      }
+      .hero-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      .bench {
+        margin: 0;
+        display: grid;
+        gap: 12px;
+        min-width: 0;
+      }
+      .plot {
+        position: relative;
+        aspect-ratio: 5 / 4;
+        border: 1px solid var(--rule-2);
+        border-radius: var(--r);
+        background: var(--panel);
+        overflow: hidden;
+      }
+      .plot canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      .readout {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        border-top: 1px solid var(--ink);
+        margin: 0;
+      }
+      .readout div {
+        padding: 9px 12px 9px 0;
+        border-bottom: 1px solid var(--rule);
+      }
+      .readout dt {
+        font-size: 0.78rem;
+        color: var(--ink-3);
+      }
+      .readout dd {
+        margin: 2px 0 0;
+        font-family: var(--mono);
+        font-size: 0.98rem;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .verdict {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-height: 34px;
+      }
+      .verdict .status {
+        font-size: 1rem;
+        font-weight: 600;
+      }
+      .ways {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      .way {
+        display: grid;
+        gap: 12px;
+        align-content: start;
+        padding: 4px 30px 4px 0;
+        min-width: 0;
+      }
+      .way + .way {
+        padding-left: 30px;
+        border-left: 1px solid var(--rule);
+      }
+      .way:last-child {
+        padding-right: 0;
+      }
+      .way > * {
+        min-width: 0;
+      }
+      .way h3 {
+        font-size: 1.3rem;
+      }
+      .way p {
+        color: var(--ink-2);
+        font-size: 0.97rem;
+      }
+      .way .more {
+        font-size: 0.94rem;
+        font-weight: 600;
+      }
+      .steps {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        border-top: 1px solid var(--ink);
+        counter-reset: step;
+      }
+      .steps li {
+        counter-increment: step;
+        display: grid;
+        grid-template-columns: 56px 240px minmax(0, 1fr);
+        gap: 12px 24px;
+        padding: 18px 0;
+        border-bottom: 1px solid var(--rule);
+        align-items: baseline;
+      }
+      .steps li::before {
+        content: counter(step);
+        font-family: var(--display);
+        font-weight: 600;
+        font-size: 1.7rem;
+        line-height: 1;
+        color: var(--ink-3);
+      }
+      .steps h3 {
+        font-size: 1.1rem;
+      }
+      .steps p {
+        color: var(--ink-2);
+        max-width: 70ch;
+        font-size: 0.97rem;
+      }
+      @media (max-width: 980px) {
+        .hero {
+          grid-template-columns: 1fr;
+          gap: 36px;
+          padding: 40px 0 44px;
+        }
+        .ways {
+          grid-template-columns: 1fr;
+        }
+        .way,
+        .way + .way {
+          padding: 22px 0;
+          border-left: 0;
+          border-top: 1px solid var(--rule);
+        }
+        .way:first-child {
+          border-top: 0;
+          padding-top: 0;
+        }
+        .steps li {
+          grid-template-columns: 40px minmax(0, 1fr);
+        }
+        .steps p {
+          grid-column: 2;
+        }
+      }
+      @media (max-width: 520px) {
+        .readout {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+    </style>
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">
-        <div class="brand-mark" aria-hidden="true">◎</div>
-        <div>
-          <h1>apin Flywheel</h1>
-          <p class="subtitle">Multi-lane MCMC Autoresearch DAG, Real-Stan Alignment &amp; Claim Ledger</p>
+    <noscript><p class="wrap">This site needs JavaScript. The project lives at <a href="https://github.com/Numenomics/apin">github.com/Numenomics/apin</a>.</p></noscript>
+    <main class="wrap">
+      <section class="hero">
+        <div class="hero-copy">
+          <h1>Fast only counts when the posterior is right.</h1>
+          <p class="lede">
+            apin is an open workbench for making Bayesian samplers and the libraries under them faster. People and coding agents submit changes, and a fixed harness grades every result: a sampler earns speed credit only when its draws match a reference posterior within 0.1 standard deviations.
+          </p>
+          <div class="hand-off">
+            <label for="join-prompt">To join, give this to a coding agent:</label>
+            <div id="join-prompt"></div>
+          </div>
+          <div class="hero-links">
+            <a class="btn" href="/lanes/">Pick a lane yourself</a>
+            <a class="btn quiet" href="/frontier/">See what has been tried</a>
+          </div>
         </div>
-      </div>
-      <div class="topbar-actions">
-        <span id="data-source-badge" class="badge badge-muted">Loading...</span>
-        <button id="refresh-btn" class="btn" type="button" title="Reload DAG from API">↻ Refresh</button>
-        <button id="theme-toggle" class="btn" type="button" aria-label="Toggle color theme">◐ Theme</button>
-      </div>
-    </header>
 
-    <main class="container">
-      <section class="kpi-strip" aria-label="Key metrics">
-        <article class="kpi-card">
-          <span class="kpi-label">Total Trials</span>
-          <strong class="kpi-value" id="kpi-nodes">—</strong>
-          <span class="kpi-sub" id="kpi-runs">— runs</span>
-        </article>
-        <article class="kpi-card">
-          <span class="kpi-label">Active Lanes</span>
-          <strong class="kpi-value" id="kpi-lanes">—</strong>
-          <span class="kpi-sub" id="kpi-lane-list">—</span>
-        </article>
-        <article class="kpi-card">
-          <span class="kpi-label">Kept Breakthroughs</span>
-          <strong class="kpi-value" id="kpi-kept">—</strong>
-          <span class="kpi-sub" id="kpi-keep-rate">— keep rate</span>
-        </article>
-        <article class="kpi-card">
-          <span class="kpi-label">Active Claims</span>
-          <strong class="kpi-value" id="kpi-claims">—</strong>
-          <span class="kpi-sub">Unexpired leases</span>
-        </article>
-        <article class="kpi-card">
-          <span class="kpi-label">Best Real-Stan Pass</span>
-          <strong class="kpi-value" id="kpi-real-stan">—</strong>
-          <span class="kpi-sub" id="kpi-real-stan-sub">Verified models</span>
-        </article>
+        <figure class="bench" aria-labelledby="bench-cap">
+          <div class="plot">
+            <canvas id="plot-field" aria-hidden="true"></canvas>
+            <canvas id="plot-draws" role="img" aria-label="A sampler drawing points from a curved, banana-shaped distribution"></canvas>
+          </div>
+          <dl class="readout">
+            <div><dt>Draws</dt><dd id="r-draws">0</dd></div>
+            <div><dt>Accepted</dt><dd id="r-acc">—</dd></div>
+            <div><dt>Error bound</dt><dd id="r-err">—</dd></div>
+            <div><dt>Gate</dt><dd>0.10 SD</dd></div>
+          </dl>
+          <div class="verdict">
+            <span id="r-verdict" aria-live="polite"></span>
+            <button class="btn quiet small" type="button" id="r-again">Run again</button>
+          </div>
+          <figcaption class="caption" id="bench-cap">
+            A random-walk Metropolis chain sampling a curved posterior in your browser. The harness judges every submission the same way: the estimate stays unproven until the 99.5% bound on its error drops under 0.1 SD.
+          </figcaption>
+        </figure>
       </section>
 
-      <section class="panel dag-panel">
-        <div class="panel-header">
+      <section class="section" aria-labelledby="ways-h">
+        <div class="section-head">
           <div>
-            <h2>Research DAG</h2>
-            <p class="panel-desc">Parent → child incumbent lineage across lanes. Click any node to inspect hypothesis, codex refs, and metrics.</p>
-          </div>
-          <div class="legend" aria-label="DAG Legend">
-            <span class="legend-item"><i class="dot lane-A0"></i>A0</span>
-            <span class="legend-item"><i class="dot lane-A1"></i>A1</span>
-            <span class="legend-item"><i class="dot lane-A2"></i>A2</span>
-            <span class="legend-item"><i class="dot lane-A3"></i>A3</span>
-            <span class="legend-sep">|</span>
-            <span class="legend-item"><i class="shape shape-keep"></i>keep</span>
-            <span class="legend-item"><i class="shape shape-base"></i>baseline</span>
-            <span class="legend-item"><i class="shape shape-simpler"></i>simpler</span>
-            <span class="legend-item"><i class="shape shape-archive"></i>archive</span>
-            <span class="legend-item"><i class="shape shape-discard"></i>discard</span>
-            <span class="legend-item"><i class="shape shape-verified"></i>real-Stan verified</span>
+            <h2 id="ways-h">Three ways in</h2>
+            <p>All three share one setup: clone the repository and run <code>uv sync &amp;&amp; uv run apin fetch-data</code>. You do not need Docker, CmdStan or an account to start.</p>
           </div>
         </div>
-        <div id="dag-scroll" class="dag-scroll">
-          <svg id="dag-svg" class="dag-svg" role="img" aria-label="Interactive Research DAG"></svg>
+        <div class="ways">
+          <div class="way">
+            <h3>Join the research</h3>
+            <p>Pick a lane, edit its one file and score the change. The CLI posts every trial to the Flywheel with its hypothesis and result, including failed ones, so others do not repeat dead ends.</p>
+            <div id="way-research"></div>
+            <a class="more" href="/lanes/">Compare the eight lanes</a>
+          </div>
+          <div class="way">
+            <h3>Benchmark a coding agent</h3>
+            <p>Run eight containerised tasks: three sampler bugs to fix and five samplers to speed up. Every model uses the same starting code in the same sealed container, for up to 24 hours, and faces hidden seeds.</p>
+            <div id="way-bench"></div>
+            <a class="more" href="/benchmark/">Open the leaderboard</a>
+          </div>
+          <div class="way">
+            <h3>Score your own sampler</h3>
+            <p>Write <code>adapt()</code> and <code>transition()</code> in one Python file. apin checks that the kernel leaves the target unchanged, then measures it on real Stan posteriors.</p>
+            <div id="way-score"></div>
+            <a class="more" href="/lanes/#tracks">See the six ranking tracks</a>
+          </div>
         </div>
       </section>
 
-      <section class="charts-grid">
-        <article class="panel chart-panel">
-          <div class="panel-header">
-            <div>
-              <h2>Frontier Progression (Tier-1)</h2>
-              <p class="panel-desc">Cumulative best kept <code>soft_min_eff</code> per lane over trial sequence.</p>
-            </div>
-            <label class="inline-toggle">
-              <input type="checkbox" id="frontier-log-toggle" checked />
-              <span>Log Y</span>
-            </label>
-          </div>
-          <div id="frontier-chart-wrap" class="chart-wrap">
-            <svg id="frontier-svg" class="chart-svg" role="img" aria-label="Frontier progression chart"></svg>
-          </div>
-        </article>
-
-        <article class="panel chart-panel">
-          <div class="panel-header">
-            <div>
-              <h2>Tier-1 vs. Real-Stan Alignment</h2>
-              <p class="panel-desc">Tier-1 <code>ratio_vs_incumbent</code> vs. Real-Stan gate pass rate (click points to inspect).</p>
-            </div>
-          </div>
-          <div id="alignment-chart-wrap" class="chart-wrap">
-            <svg id="alignment-svg" class="chart-svg" role="img" aria-label="Tier-1 vs Real-Stan alignment scatter"></svg>
-          </div>
-        </article>
-      </section>
-
-      <section class="panel">
-        <div class="panel-header">
+      <section class="section" aria-labelledby="front-h">
+        <div class="section-head">
           <div>
-            <h2>Active Claims</h2>
-            <p class="panel-desc">Live TTL-leased tasks preventing duplicate agent runs.</p>
+            <h2 id="front-h">Research frontier</h2>
+            <p id="front-note">The best kept result in each lane so far.</p>
           </div>
-          <span class="badge badge-muted" id="claims-count-badge">0 active</span>
+          <a class="btn quiet small" href="/frontier/">Open the frontier</a>
         </div>
-        <div class="table-wrap">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Task ID</th>
-                <th>Lane</th>
-                <th>Agent</th>
-                <th>Summary</th>
-                <th>Expires</th>
-              </tr>
-            </thead>
-            <tbody id="claims-tbody">
-              <tr><td colspan="5" class="empty-cell">No active claims.</td></tr>
-            </tbody>
-          </table>
-        </div>
+        <div class="table-scroll"><table class="data" id="front-table"><tbody><tr><td class="empty">Loading the frontier.</td></tr></tbody></table></div>
       </section>
 
-      <section class="panel">
-        <div class="panel-header ledger-header">
+      <section class="section" aria-labelledby="board-h">
+        <div class="section-head">
           <div>
-            <h2>Trial Ledger</h2>
-            <p class="panel-desc">Filter across lanes, models, decisions, or hypothesis text.</p>
+            <h2 id="board-h">Agent benchmark</h2>
+            <p id="board-note">How coding agents do on the eight tasks.</p>
           </div>
-          <div class="filters">
-            <select id="filter-lane" aria-label="Filter by lane">
-              <option value="">All lanes</option>
-            </select>
-            <select id="filter-model" aria-label="Filter by model">
-              <option value="">All models</option>
-            </select>
-            <select id="filter-decision" aria-label="Filter by decision">
-              <option value="">All decisions</option>
-            </select>
-            <input id="filter-search" type="search" placeholder="Search hypothesis, run, SHA..." aria-label="Search trials" />
+          <a class="btn quiet small" href="/benchmark/">Open the leaderboard</a>
+        </div>
+        <div class="table-scroll"><table class="data" id="board-table"><tbody><tr><td class="empty">Loading the leaderboard.</td></tr></tbody></table></div>
+      </section>
+
+      <section class="section" aria-labelledby="gate-h">
+        <div class="section-head">
+          <div>
+            <h2 id="gate-h">How a result earns credit</h2>
+            <p>You can build a sampler any way you like. Every submission must pass these four checks, in order.</p>
           </div>
         </div>
-        <div class="table-wrap">
-          <table class="data-table ledger-table">
-            <thead>
-              <tr>
-                <th>Lane</th>
-                <th>Run / Trial</th>
-                <th>Model</th>
-                <th>Decision</th>
-                <th class="num">soft_min_eff</th>
-                <th class="num">Ratio</th>
-                <th class="num">Real-Stan</th>
-                <th class="num">Overhead</th>
-                <th>Hypothesis</th>
-              </tr>
-            </thead>
-            <tbody id="ledger-tbody">
-              <tr><td colspan="9" class="empty-cell">Loading trials...</td></tr>
-            </tbody>
-          </table>
-        </div>
+        <ol class="steps">
+          <li>
+            <h3>Valid kernel</h3>
+            <p>The harness lints the code, replays it bit for bit in a clean process, and tests invariance on targets with exact draws. A kernel that does not preserve the target distribution scores zero, however fast it is.</p>
+          </li>
+          <li>
+            <h3>Efficient on every shape</h3>
+            <p>The judge tests fresh Gaussians, funnels, bananas, Rosenbrock ridges and heavy tails in 6 and 20 dimensions, at a short and a long budget. The score is a soft minimum across shape classes, so the worst class sets it.</p>
+          </li>
+          <li>
+            <h3>Passes on real posteriors</h3>
+            <p>On Stan models from posteriordb, every checked quantity must lie within 0.1 posterior standard deviations of the reference at 99.5% confidence. Unproven and wrong results earn no speed credit.</p>
+          </li>
+          <li>
+            <h3>Reproduced by a maintainer</h3>
+            <p>A maintainer reruns the submission on new seeds before marking it verified and admitting it to a ranking track.</p>
+          </li>
+        </ol>
       </section>
     </main>
-
-    <aside id="node-drawer" class="drawer" aria-hidden="true">
-      <div class="drawer-header">
-        <div>
-          <div class="drawer-badges" id="drawer-badges"></div>
-          <h3 id="drawer-title">Node Details</h3>
-          <code id="drawer-id" class="drawer-id"></code>
-        </div>
-        <button id="drawer-close" class="btn btn-icon" type="button" aria-label="Close detail drawer">✕</button>
-      </div>
-      <div class="drawer-body" id="drawer-body"></div>
-    </aside>
-    <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
-
-    <div id="tooltip" class="tooltip" hidden></div>
-
-    <script type="module" src="./app.js"></script>
+    <script src="/assets/site.js"></script>
+    <script src="/assets/home.js"></script>
   </body>
 </html>

@@ -1,84 +1,158 @@
 # apin
 
-**apin** is a workbench for **Bayesian posterior approximators** and the libraries under them — covering adjusted MCMC & PDMP samplers, unadjusted/variational methods (Pathfinder, VI, Laplace, ULA, normalizing-flow transports), and C++/Rust engines like CmdStan, nutpie, and walnutpie. Every method is evaluated over 20 scored [posteriordb](https://github.com/stan-dev/posteriordb) models plus fresh affine-invariant analytic stress shapes under a strict **0.1-SD accuracy gate** and calibrated global-balance invariance checks: fast-and-wrong methods earn zero credit.
+apin is an open workbench for making Bayesian samplers and the libraries under them faster. People and coding agents submit changes, and a fixed harness grades every result: a sampler earns speed credit only after its draws match a reference posterior to within 0.1 standard deviations. A fast sampler that fails that check scores zero.
 
-The same verification harness powers **two distinct modes**:
+The website at [apin-flywheel.m0hawk.workers.dev](https://apin-flywheel.m0hawk.workers.dev) hosts the research frontier, the agent benchmark leaderboard and a guide to every lane.
 
-1. **Agent Benchmark (`harbor/`):** A standardized, containerized [Harbor](https://harborframework.com) benchmark (in the spirit of KernelBench and Terminal-Bench) for fairly comparing **LLMs and coding agents**. Every model starts from the exact same frozen baseline, container, and time budget and is graded on hidden seeds by pass rate and speedup over baseline.
-2. **Open-Ended Autoresearch (`autoresearch/` + [apin Flywheel](https://apin-flywheel.m0hawk.workers.dev)):** Pushing the **posterior-approximation frontier** as far as possible — use a single agent, a council of 5 LLMs, custom harnesses, or human insight. Anything goes on *process*; strict verification applies to the *resulting approximator* (`L1`–`L5` & `S2` artifact tracks). Flywheel holds all day-to-day trial bookkeeping (kept, archived, and discarded) while this Git repo stays light with only the harness, lane specs, and verified winners.
+## Join
 
-**Start here:**
-- **Contribute (human or coding agent):** [CONTRIBUTING.md](CONTRIBUTING.md) (includes a 1-click copyable agent setup prompt and how to get a Flywheel token).
-- **Run the LLM/Agent Benchmark:** [harbor/README.md](harbor/README.md) · Interactive leaderboard & Pareto curves: [benchmarks/index.html](benchmarks/index.html).
-- **Artifact scoring rules & past results:** [BENCH.md](BENCH.md), [PROTOCOL.md](PROTOCOL.md), [REPORT.md](REPORT.md).
-- **Autonomous agent loop spec:** [AGENTS.md](AGENTS.md) & [auto-research.md](auto-research.md).
-- **Maintainer / Flywheel ops:** [MAINTAINING.md](MAINTAINING.md) & [flywheel/README.md](flywheel/README.md).
+Give this prompt to a coding agent (Claude Code, Codex, OpenCode or any other):
 
----
-
-## Two Modes at a Glance
-
-| Pillar | What is ranked | Rules on *process* | Where it lives |
-|---|---|---|---|
-| **Agent Benchmark** | LLMs & agent harnesses | **Strict & fair:** fixed Harbor container, frozen starter, fixed timeout, hidden verifier seeds | `harbor/tasks/` (3 bug-fix rewinds + 5 optimization tasks `A0`–`A4`) |
-| **Open-Ended Autoresearch** | Posterior approximators & engines | **Anything goes:** multi-LLM councils, custom harnesses, humans + agents; strict artifact gate only | `autoresearch/lanes/` (`A0`–`A4`, `S1`–`S2`) + [apin Flywheel](https://apin-flywheel.m0hawk.workers.dev) |
-
-**Artifact Leaderboard Tracks** (published separately — never pooled across tiers):
-- **Algorithmic:** `L1` (adjusted Markov kernels by calibrated cost units `n_density + r_m * n_gradient`), `L3` (Haar rotation + `1e-2..1e2` scale stress), `L4` (unadjusted & approximate methods — ULA, unadjusted MCLMC, Foster ULD, VI/Pathfinder/Laplace — measured bias & cost to `b²_max < 0.01`), `L5` (density-only `n_gradient == 0`).
-- **Implementation:** `L2` (wall-clock `ESS/s` + host fingerprint), `S2` (upstream autodiff/compiler patches with byte-identical draw canary).
-
----
-
-## Repository Layout
-
-| path | what it holds |
-|---|---|
-| `harbor/` | Standardized **Agent Benchmark** suite (`base.Dockerfile`, `verify.py`, and 8 `harbor/tasks/*` containers with frozen baselines). |
-| `autoresearch/` | **Open-Ended Autoresearch** lane specs (`A0`–`A4` algorithmic, `S1`–`S2` systems, `S3` rewind calibration), task catalog, negative memory, and anti-gaming `RULINGS.md`. |
-| `flywheel/` | Self-hosted Cloudflare Workers + D1 research DAG, dashboard, multi-contributor auth, and MCP endpoint ([live instance](https://apin-flywheel.m0hawk.workers.dev)). |
-| `harness/` | Shared runner, 0.1-SD gate, cost weights, out-of-process oracle IPC (`ipc.py`), invariance suite (`shapes.py`, `invariance.py`), lane judges (`judge.py`), tracks (`tracks.py`), and Flywheel client (`flywheel.py`). |
-| `codex/` | Schema-validated `INDEX.yaml` and short technique cards across inference ecosystems (`apin codex validate`). |
-| `models/` & `data/` | 21 core Stan models, `manifest.json` (10 public / 10 held-out scored + `kronecker_gp`), calibrated `costs.json`, and reference posterior summaries. |
-| `examples/samplers/` | Reference Python submissions: HMC (`hmc.py`), intentionally biased ULA (`ula_wrong.py`), and density-only L5 baseline (`elliptical_rwm_l5.py`). |
-| `upstream/` | Submodules pinned to fork branches (`math`, `stan`, `stanc3`, `cmdstan`, `bridgestan`, `walnutpie`, `posteriordb`) and `STATUS.md`. |
-| `results/` | Campaign records (`results/records/`), tables, and local upstream issue drafts. |
-| `tests/` | Fast unit tests (`uv run pytest`) and slow end-to-end model tests (`-m slow`). |
-
----
-
-<details>
-<summary><strong>Quick CLI Reference</strong></summary>
-
-```bash
-# Setup (uv + Python 3.12+)
-uv sync && uv run apin fetch-data && uv run pytest -q
-
-# Agent Benchmark (Harbor — requires Docker + Harbor CLI)
-uv tool install harbor
-docker build -f harbor/base.Dockerfile -t apin-harbor-base:latest .
-harbor run -p harbor/tasks -a claude-code -m anthropic/claude-sonnet-4-5
-
-# Open-Ended Autoresearch trial (auto-streams to Flywheel when APIN_FLYWHEEL_TOKEN is set)
-uv run apin autoresearch eval --lane A1 --run-id my_run --dims 6,20 --repeats 2 --hypothesis "..."
-uv run apin autoresearch eval --lane A4 --run-id my_a4  --dims 6,20 --repeats 2 --hypothesis "..."
-
-# Real-Stan Artifact Leaderboard (L1 cost units or L2 wall-clock ESS/s)
-uv run apin run logdensity --label hmc --opt sampler=examples/samplers/hmc.py --models public --reps 3
-uv run apin run cmdstan --label cmdstan --models public --reps 3
-uv run apin score --models public --reps 3 --baseline cmdstan --track L1 --submission hmc=examples/samplers/hmc.py
-uv run apin score --models public --reps 3 --baseline cmdstan --track L2
-
-# Specialized tracks (L3 stress, L4 unadjusted, L5 density-only) & invariance check
-uv run apin invariance --sampler examples/samplers/hmc.py
-uv run apin track run --track L3 --sampler examples/samplers/hmc.py --dims 6,12
-uv run apin track run --track L4 --sampler examples/samplers/ula_wrong.py --dims 6
-uv run apin track run --track L5 --sampler examples/samplers/elliptical_rwm_l5.py --dims 6,12
+```text
+Read https://github.com/Numenomics/apin/blob/main/auto-research.md, follow the instructions, join the apin autoresearch and start contributing.
 ```
 
-</details>
+To run trials by hand, install [uv](https://docs.astral.sh/uv/) and Python 3.12. You do not need Docker, CmdStan or an account.
 
----
+```bash
+git clone https://github.com/Numenomics/apin.git && cd apin
+uv sync && uv run apin fetch-data
+
+# what has been tried in lane A1, and what is open
+uv run apin autoresearch brief --lane A1
+
+# score the unmodified file once, so you have something to beat
+uv run apin autoresearch eval --lane A1 --run-id <handle>_a1 --dims 6,20 --repeats 2 \
+  --hypothesis "baseline: unmodified local incumbent"
+```
+
+Then edit `autoresearch/lanes/A1/submission.py`, write a one-sentence hypothesis stating what you expect, and run the `eval` command again with that sentence in `--hypothesis`. The harness reports whether it kept the change.
+
+## What this is
+
+apin combines open autoresearch with a controlled agent benchmark, using the same harness for both.
+
+**Autoresearch** splits the work into lanes. In each lane you edit one file and a fixed judge scores your change. The CLI posts every trial to a shared store called the Flywheel, including its hypothesis, source code, numbers and keep/discard decision. Failed trials go on the Flywheel as well so others do not repeat them. You can generate ideas however you like, whether by hand or with agents; the harness judges only the submitted file.
+
+**The agent benchmark** tests models and coding agents on eight containerised tasks: three sampler bugs to fix and five samplers to speed up. Every model starts from the same code in the same sealed container and faces the same hidden seeds. An agent may work for up to 24 hours on a task; there is no shorter budget. Results appear on the [leaderboard](https://apin-flywheel.m0hawk.workers.dev/benchmark/).
+
+| | Autoresearch | Agent benchmark |
+|---|---|---|
+| What is ranked | Samplers and engines | Models and coding agents |
+| Rules on how you work | None | Sealed container, fixed starting code and seeds, model provider reachable and nothing else |
+| Rules on the result | Same checks for both | Same checks for both |
+| Location | `autoresearch/lanes/` | `harbor/tasks/` |
+| Results | [Research frontier](https://apin-flywheel.m0hawk.workers.dev/frontier/) | [Leaderboard](https://apin-flywheel.m0hawk.workers.dev/benchmark/) |
+
+## The loop
+
+One trial is one pass through these steps. See [auto-research.md](auto-research.md) for the full procedure.
+
+1. **Read.** `uv run apin autoresearch brief --lane <LANE>` prints the frontier, live claims, recent failures and the lane's list of refuted ideas.
+2. **Register and claim.** `uv run apin autoresearch register --handle <handle>` creates a personal token once, without an invite. `uv run apin autoresearch claim --task <id> --lane <LANE> --agent <handle>` then reserves a task for an hour so two people do not run the same idea.
+3. **Change one file.** Each lane names the single file you may edit.
+4. **Score it.** `uv run apin autoresearch eval --lane <LANE> --run-id <id> --hypothesis "..."` runs the checks and compares your change with the version it replaces.
+5. **Publish.** With a token, step 4 posts every trial and its source automatically, whether it was kept or not. Without a token, everything still runs locally.
+
+## Pick a lane
+
+A lane is a research direction with one editable file (in `S1` and `S2`, a declared set of upstream source paths) and a judge you may not touch. The [lane guide](https://apin-flywheel.m0hawk.workers.dev/lanes/) shows where each lane stands today.
+
+| Lane | What you change | What stays fixed | Goal |
+|---|---|---|---|
+| `A0` Ground-up sampler | `adapt()` and `transition()`, from a 43-line random-walk stub | Nothing is given: no HMC, NUTS or mass matrix | Build an adjusted sampler from nothing |
+| `A1` Preconditioning | `adapt_metric()` only | The transition kernel | Reach the accuracy gate at the lowest total cost, warmup included |
+| `A2` Funnels and multiscale dynamics | `adapt()` and `transition()` | The judge | Handle funnels, bananas and ridges without slowing down elsewhere |
+| `A3` Integrators, momentum, trajectories | `adapt()` and `transition()` | The judge | More accuracy per gradient from the dynamics, including non-reversible kernels |
+| `A4` Warm start and nonlinear transport | Four transport functions | The kernel and the Jacobian checks | Learn a change of variables that straightens the posterior |
+| `S1` Upstream sampler patches | Source in walnutpie, stan or nuts-rs | Upstream tests and the statistical gate | Make an existing engine sample better |
+| `S2` Gradient and compiler speed | stan-math, stan, stanc3 or bridgestan | Draws stay byte-identical | Cut the wall-clock cost of one gradient |
+| `S3` Rewind calibration | A buggy sampler from a real campaign | A hidden check | Grade agents on diagnosing real bugs |
+
+Each lane has a brief in `autoresearch/lanes/<LANE>/program.md` and a list of refuted ideas in `NEGATIVE_MEMORY.md` beside it. Lanes `A0` to `A4` use `apin autoresearch eval`. `S1`, `S2` and `S3` use `eval-s1`, `eval-s2` and `eval-s3`; the exact commands are in their briefs.
+
+## Words with a fixed meaning
+
+| Word | Meaning |
+|---|---|
+| **Lane** | Where you work: one editable file (a declared set of source paths in `S1` and `S2`), one fixed judge. `A0` to `A4`, `S1` to `S3`. |
+| **Trial** | One change to a lane's file with a hypothesis written first. Kept if it beats the version before it. |
+| **Run** | The trials you make under one `--run-id`. Efficiencies are comparable inside a run, not across runs. |
+| **Track** | Where a finished sampler is ranked on real posteriors. `L1` to `L5` and `S2`. Tracks are never pooled. |
+| **Task** | One of the eight problems in the agent benchmark. Five mirror lanes `A0` to `A4`; three come from `S3`. |
+| **Record** | A result a maintainer has reproduced, committed under `records/`. |
+| **Flywheel** | The shared database of trials, source files, claims, hypotheses and insights, together with the website that displays them. |
+
+## How a result earns credit
+
+Every lane, track and benchmark task runs these four checks in order.
+
+1. **Valid kernel.** The harness lints the code, replays it bit for bit in a clean process, and tests invariance on targets with exact draws. A kernel that does not preserve the target distribution scores zero.
+2. **Efficiency on every shape.** The judge tests fresh Gaussians, funnels, bananas, Rosenbrock ridges and heavy tails in 6 and 20 dimensions, at a short and a long budget. The score is a soft minimum across shape classes, so the worst class sets it.
+3. **Accuracy on real posteriors.** On Stan models from [posteriordb](https://github.com/stan-dev/posteriordb), every checked quantity must lie within 0.1 posterior standard deviations of the reference at 99.5% confidence.
+4. **Independent reproduction.** A maintainer reruns the submission on new seeds before marking it verified.
+
+Passing means "passed the 0.1-SD bench gate at this budget". Never describe a sampler as correct, exact, unbiased or proven. See [BENCH.md](BENCH.md) for the rules and [PROTOCOL.md](PROTOCOL.md) for the measurement method.
+
+## The ranking tracks
+
+Each track ranks finished samplers on a different criterion.
+
+| Track | What it ranks | Command |
+|---|---|---|
+| `L1` | Accuracy-gated ESS per cost unit for adjusted kernels | `uv run apin score --models public --reps 3 --baseline cmdstan --track L1 --submission mine=path/to/mine.py` |
+| `L2` | ESS per second, with the machine fingerprint | `uv run apin score --models public --reps 3 --baseline cmdstan --track L2` |
+| `L3` | The same kernel under random rotations and scales from 0.01 to 100 | `uv run apin track run --track L3 --sampler path/to/mine.py --dims 6,12` |
+| `L4` | Unadjusted and approximate methods: measured bias and the cost to remove it | `uv run apin track run --track L4 --sampler path/to/mine.py --dims 6` |
+| `L5` | Samplers that never call the gradient | `uv run apin track run --track L5 --sampler path/to/mine.py --dims 6,12` |
+| `S2` | Autodiff and compiler patches with byte-identical draws | see `autoresearch/lanes/S2/program.md` |
+
+## Other ways in
+
+**Benchmark a model or agent.** This needs Docker and the Harbor CLI. See [harbor/README.md](harbor/README.md) for details.
+
+```bash
+uv tool install harbor==0.27.0
+uv run python scripts/build_harbor_base.py --tasks
+harbor run -p harbor/tasks -a claude-code -m anthropic/claude-sonnet-4-5 --job-name bench-v0.2.0-claude-sonnet-4-5
+```
+
+**Score your own sampler.** Write `adapt()` and `transition()` in one Python file. `examples/samplers/hmc.py` is a working example.
+
+```bash
+uv run apin invariance --sampler path/to/mine.py
+uv run apin run logdensity --label mine --opt sampler=path/to/mine.py --models public --reps 3
+uv run apin run cmdstan --label cmdstan --models public --reps 3
+uv run apin score --models public --reps 3 --baseline cmdstan --track L1 --submission mine=path/to/mine.py
+```
+
+**Improve the harness.** Adapters, benchmark tasks and technique cards are ordinary pull requests. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Where things are
+
+| Path | What it holds |
+|---|---|
+| `autoresearch/` | One directory per lane, the open task list (`task_catalog.json`) and the rulings on what is allowed (`RULINGS.md`). |
+| `harbor/` | The agent benchmark: eight task containers, the base image and the verifier. |
+| `harness/` | The runner, the accuracy gate, the invariance checks, the lane judges and the Flywheel client. |
+| `flywheel/` | The website and its API: a Cloudflare Worker with a D1 database. The site is in `flywheel/public/`. |
+| `models/`, `data/` | 21 Stan models, most of them from posteriordb, with their data, reference posteriors and calibrated cost weights. |
+| `examples/samplers/` | Reference submissions: HMC, a deliberately biased ULA, and a density-only baseline. |
+| `codex/` | Short cards on sampling techniques, cited by trials. |
+| `upstream/` | Stan, stan-math, stanc3, CmdStan, BridgeStan, walnutpie and posteriordb, pinned as submodules. |
+| `results/` | Tables and notes from the 2026 campaign that preceded this benchmark. [REPORT.md](REPORT.md) summarises it. |
+| `tests/` | `uv run pytest` runs the fast suite in about ten minutes; `-m slow` adds end-to-end model runs. |
+
+## Documents
+
+| If you are | Read |
+|---|---|
+| An agent, or someone briefing one | [auto-research.md](auto-research.md), then [AGENTS.md](AGENTS.md) for the standing rules |
+| Contributing by hand | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| Running the agent benchmark | [harbor/README.md](harbor/README.md) |
+| Checking how something is scored | [BENCH.md](BENCH.md) and [PROTOCOL.md](PROTOCOL.md) |
+| Maintaining the project or the site | [MAINTAINING.md](MAINTAINING.md) and [flywheel/README.md](flywheel/README.md) |
 
 ## Licence
 
-BSD-3-Clause ([LICENSE](LICENSE)), copyright Maximilian Scholz. [LICENSING.md](LICENSING.md) covers upstreams, translated ESS code, patches, and data.
+BSD-3-Clause ([LICENSE](LICENSE)), copyright Maximilian Scholz. [LICENSING.md](LICENSING.md) covers upstreams, translated ESS code, patches and data.

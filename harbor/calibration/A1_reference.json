@@ -1,0 +1,108 @@
+{
+  "lane": "A1",
+  "label": "reference",
+  "file": "harbor/tasks/a1-preconditioning/tests/reference.py",
+  "config": {
+    "seed": 39389868,
+    "dims": [
+      6,
+      20
+    ],
+    "repeats": 8,
+    "n_chains": 48,
+    "k_steps": 16,
+    "adapt_draws": 100,
+    "horizon_steps": 500
+  },
+  "wall_s": 496.0,
+  "valid": true,
+  "tier0_ok": true,
+  "tier1_ok": true,
+  "soft_min_eff": 0.00031748552302321843,
+  "per_repeat_soft_min": [
+    0.00039082266571166904,
+    0.00041918354150938193,
+    0.0004227577966445185,
+    0.00029911515450748897,
+    0.00028738144853225395,
+    0.0003850883698312262,
+    0.0003216523977997651,
+    0.000139981770078062
+  ],
+  "per_repeat_by_class": [
+    {
+      "gaussian_illcond": 0.006945558485378129,
+      "funnel": 0.0013622213474353546,
+      "banana": 0.002008640211957432,
+      "hybrid_rosenbrock": 0.00024979910124312444,
+      "student_t": 0.007798926608080425,
+      "mixture_crossable": 0.016344196664745805
+    },
+    {
+      "gaussian_illcond": 0.004193093706595667,
+      "funnel": 0.001993019284011902,
+      "banana": 0.00110831926491842,
+      "hybrid_rosenbrock": 0.000268090589058504,
+      "student_t": 0.0030040961296752574,
+      "mixture_crossable": 0.016726466703487923
+    },
+    {
+      "gaussian_illcond": 0.00624600996718217,
+      "funnel": 0.0019402408194702948,
+      "banana": 0.0004813399070131068,
+      "hybrid_rosenbrock": 0.000277299620780075,
+      "student_t": 0.002852611578399431,
+      "mixture_crossable": 0.014596602095720609
+    },
+    {
+      "gaussian_illcond": 0.0042480324683942155,
+      "funnel": 0.002032793590730809,
+      "banana": 0.0012581215941413627,
+      "hybrid_rosenbrock": 0.000191147190959899,
+      "student_t": 0.00403470093640486,
+      "mixture_crossable": 0.012437494973629414
+    },
+    {
+      "gaussian_illcond": 0.006055106119006191,
+      "funnel": 0.002038498869689402,
+      "banana": 0.0013358974734669418,
+      "hybrid_rosenbrock": 0.00018363985487206851,
+      "student_t": 0.008920062914713507,
+      "mixture_crossable": 0.017499515610603384
+    },
+    {
+      "gaussian_illcond": 0.007404042724493561,
+      "funnel": 0.0012649412305813562,
+      "banana": 0.0019205255901436462,
+      "hybrid_rosenbrock": 0.00024615453041395115,
+      "student_t": 0.0061988662096979594,
+      "mixture_crossable": 0.018450722601517932
+    },
+    {
+      "gaussian_illcond": 0.006263236695406678,
+      "funnel": 0.001575971447762589,
+      "banana": 0.0008487943782158858,
+      "hybrid_rosenbrock": 0.00020570978398000485,
+      "student_t": 0.004416096868234517,
+      "mixture_crossable": 0.0191795599246281
+    },
+    {
+      "gaussian_illcond": 0.004147877363292526,
+      "funnel": 0.0016524284733980216,
+      "banana": 0.0004411906083736458,
+      "hybrid_rosenbrock": 8.947839065433191e-05,
+      "student_t": 0.00685268865784912,
+      "mixture_crossable": 0.02705881498664311
+    }
+  ],
+  "by_class": {
+    "banana": 0.0010328694632320524,
+    "funnel": 0.0017064555988351448,
+    "gaussian_illcond": 0.005549846303491483,
+    "hybrid_rosenbrock": 0.00020360675874828786,
+    "mixture_crossable": 0.01737770465880674,
+    "student_t": 0.005090937937464264
+  },
+  "error": null,
+  "failed_targets": []
+}

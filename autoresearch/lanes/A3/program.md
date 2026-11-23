@@ -1,6 +1,6 @@
 # Autoresearch Lane A3: Integrators, Momentum & Trajectories (`program.md`)
 
-> **Karpathy-style 3-file contract for `Numenomics/apin` (`ARCHITECTURE.md` §2.2 Lane A3).**
+> **Karpathy-style 3-file contract for `Numenomics/apin`.**
 > - **Read-only judge:** `harness/judge.py`, `harness/invariance.py`, `harness/ipc.py`, `harness/autoresearch.py` (never edit)
 > - **Single writable file:** `autoresearch/lanes/A3/submission.py`
 > - **Contract:** Full kernel-v2 ABI `adapt(oracle, budget, rng) -> (tuning, chain0, betas, aux_spec)` and `transition(tuning, chain, oracle, rng) -> chain_next` — focus on **symplectic / isokinetic integrators, persistent momentum / auxiliary velocity, and trajectory length / termination rules**.

@@ -8,7 +8,7 @@ A submission is one Python file defining two entry points:
     def transition(tuning, chain: Chain, oracle: Oracle, rng: np.random.Generator)
         -> Chain | tuple[np.ndarray, Any]
 
-Contract highlights (BENCH.md, PROTOCOL.md, apin/ARCHITECTURE.md):
+Contract highlights (BENCH.md, PROTOCOL.md):
   - `tuning` is a canonical plain tree (dict/list/tuple/str/int/float/bool/None/ndarray),
     serialized canonically (no pickle) and SHA-256 hashed before and after sampling.
   - `chain = Chain(position, aux)` separates parameter positions from typed auxiliary Markov

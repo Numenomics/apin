@@ -1,6 +1,6 @@
 # Autoresearch Lane A2: Multiscale & Funnel Dynamics (`program.md`)
 
-> **Karpathy-style 3-file contract for `Numenomics/apin` (`ARCHITECTURE.md` §2.2 Lane A2).**
+> **Karpathy-style 3-file contract for `Numenomics/apin`.**
 > - **Read-only judge:** `harness/judge.py`, `harness/invariance.py`, `harness/ipc.py`, `harness/autoresearch.py` (never edit)
 > - **Single writable file:** `autoresearch/lanes/A2/submission.py`
 > - **Contract:** Full kernel-v2 ABI `adapt(oracle, budget, rng) -> (tuning, chain0, betas, aux_spec)` and `transition(tuning, chain, oracle, rng) -> chain_next` — focus on **local step-size / multiscale / delayed-rejection transition dynamics** that survive funnels, bananas, and multiscale Rosenbrock ridges without harming rotated Gaussians.

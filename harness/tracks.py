@@ -2,7 +2,7 @@
 L4 (unadjusted kernels: measured bias & cost to b^2_max < 0.01, never pooled with L1),
 and L5 (density-only view of L1, strictly enforcing n_gradient == 0).
 
-Implements ARCHITECTURE.md §1.5 & LEADERBOARD.md §2.3:
+Implements the ranking tracks described in BENCH.md:
   - No cross-tier pooling: L1, L2, L3, L4, and L5 publish separate reports/tables.
   - Claim-wording hygiene: passing a check means "passed the 0.1-SD bench gate / invariance check
     at this budget" — never "is correct", "exact", "unbiased", or "proven".

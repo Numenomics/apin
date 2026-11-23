@@ -281,3 +281,26 @@ def test_unpaired_keep_flagged_when_incumbent_fails_tier1(tmp_path, monkeypatch)
     assert row["decision"] == "keep_incumbent_failed"
     assert row["incumbent_ok"] is False
     assert row["ratio_vs_incumbent"] is None
+
+
+def test_submission_is_never_imported_in_the_judging_process(tmp_path):
+    """Import-time code in a submission must not reach the process that computes the verdict."""
+    import numpy as np
+    import pytest
+
+    from harness import autoresearch
+
+    sub = tmp_path / "submission.py"
+    sub.write_text(
+        "import numpy as np\n"
+        "np.APIN_TAMPERED = True\n"
+        "def adapt(oracle, budget, rng):\n    return {}, (np.zeros(oracle.dim), None), [1.0], 'none'\n"
+        "def transition(tuning, chain, oracle, rng):\n    return chain.position, None\n"
+    )
+    autoresearch._load_check(sub, None)  # loads fine, in a child
+    assert not hasattr(np, "APIN_TAMPERED")
+
+    broken = tmp_path / "broken.py"
+    broken.write_text("def adapt(oracle, budget, rng):\n    return None\n")
+    with pytest.raises(RuntimeError, match="must define both adapt"):
+        autoresearch._load_check(broken, None)

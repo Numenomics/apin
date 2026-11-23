@@ -26,6 +26,8 @@ import hashlib
 import json
 import math
 import shutil
+import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -92,13 +94,39 @@ def _write_results_tsv(ledger_path: Path, tsv_path: Path) -> None:
 
 
 def _append_row(ledger_path: Path, tsv_path: Path, row: dict, *, run_id: str | None = None,
-                parent_id: str | None = None) -> dict:
+                parent_id: str | None = None, parents: list[dict] | None = None,
+                source: str | None = None) -> dict:
+    """Append to the ledger, then best-effort post the trial (with its source and parents) to Flywheel."""
     with open(ledger_path, "a") as fh:
         fh.write(json.dumps(row) + "\n")
     _write_results_tsv(ledger_path, tsv_path)
     if run_id is not None:
-        flywheel.post_trial_row(row, run_id=run_id, parent_id=parent_id)
+        flywheel.post_trial_row(row, run_id=run_id, parent_id=parent_id, parents=parents, source=source)
     return row
+
+
+_LOAD_CHECK = (
+    "import sys; from pathlib import Path; from harness import judge, sandbox; "
+    "p = Path(sys.argv[1]); sandbox.confine_worker(p); judge.resolve_lane_submission(p, sys.argv[2] or None)"
+)
+
+
+def _load_check(sub_path: Path, lane: str | None) -> None:
+    """Check that a submission imports and exposes its lane's seam, in a confined child process.
+
+    A submission is untrusted code: a benchmark candidate, or another contributor's trial being
+    rerun. It must never be imported in this process, which computes the statistics and writes
+    the verdict, so the import happens in a child confined like the sampling workers."""
+    try:
+        res = subprocess.run(
+            [sys.executable, "-c", _LOAD_CHECK, str(Path(sub_path).resolve()), lane or ""],
+            capture_output=True, text=True, timeout=120, cwd=str(ROOT),
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError("submission did not finish importing within 120 s") from e
+    if res.returncode != 0:
+        lines = [ln for ln in res.stderr.strip().splitlines() if ln.strip()]
+        raise RuntimeError(lines[-1] if lines else f"submission failed to load (exit {res.returncode})")
 
 
 def _eval_tier0(
@@ -112,7 +140,7 @@ def _eval_tier0(
     """Tier 0 fast reject: AST lint, lane seam, isolated ABI + replay, calibrated invariance smoke."""
     try:
         logdensity.check_imports(sub_path.read_text())
-        judge.resolve_lane_submission(sub_path, lane)
+        _load_check(sub_path, lane)
     except Exception as e:
         return False, {"stage": "load_lint", "error": str(e)}
 
@@ -375,8 +403,14 @@ def evaluate_lane_trial(
     submission_path: Path | None = None,
     dry_run: bool = False,
     use_queue: bool = True,
+    combines: list[str] | None = None,
+    fork_of: list[str] | None = None,
 ) -> dict:
-    """Run one complete Karpathy-ratchet + paired MAP-Elites autoresearch trial on `lane`."""
+    """Run one complete Karpathy-ratchet + paired MAP-Elites autoresearch trial on `lane`.
+
+    ``combines`` / ``fork_of`` name Flywheel trial ids whose mechanism this candidate reuses
+    or whose source it started from; they are posted as extra parents next to the incumbent.
+    """
     lane_dir = autoresearch_dir / "lanes" / lane
     sub_path = Path(submission_path) if submission_path is not None else (lane_dir / "submission.py")
     if not sub_path.is_file():
@@ -395,6 +429,8 @@ def evaluate_lane_trial(
     parent_node_id = (
         f"{lane}:{run_id}:{last_kept['trial_id']}" if last_kept and last_kept.get("trial_id") else None
     )
+    parent_links = flywheel.parent_links(parent_node_id, combines=combines, fork_of=fork_of)
+    extra_parents = [p for p in parent_links if p["relation"] != "incumbent"]
     trial_id = f"T{len(prior) + 1:04d}"
     seed = int(seed if seed is not None else (20261120 + len(prior) * 97))
     repeats = max(1, int(repeats))
@@ -432,6 +468,8 @@ def evaluate_lane_trial(
         "hypothesis": hypothesis,
         "codex_refs": list(codex_refs or []),
     }
+    if extra_parents:
+        base_meta["parents"] = extra_parents
 
     # Pre-eval novelty filter: reject exact duplicate OR AST-equivalent (comment/whitespace-only) diff
     is_dup = any(
@@ -443,7 +481,7 @@ def evaluate_lane_trial(
         lint_error = None
         try:
             logdensity.check_imports(raw_text)
-            judge.resolve_lane_submission(snap_path, lane)
+            _load_check(snap_path, lane)
         except Exception as e:
             lint_error = str(e)
         return {
@@ -468,7 +506,8 @@ def evaluate_lane_trial(
             "decision": "discard_duplicate",
             "wall_s": round(time.perf_counter() - t0, 3),
         }
-        return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id)
+        return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id,
+                           parents=parent_links, source=raw_text)
 
     with queue.eval_slot(f"autoresearch:{lane}/{run_id}/{trial_id}", enabled=use_queue) as queue_wait_s:
         t0_ok, t0_info = _eval_tier0(
@@ -482,7 +521,8 @@ def evaluate_lane_trial(
                 "decision": "discard_tier0",
                 "wall_s": round(time.perf_counter() - t0, 3),
             }
-            return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id)
+            return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id,
+                           parents=parent_links, source=raw_text)
 
         # Tier 1: paired fresh suites for candidate AND incumbent on identical fresh seeds
         suites = [(seed + r * 7919, _build_tier1_suite(dim_ladder[0], seed + r * 7919, dims=dim_ladder)) for r in range(repeats)]
@@ -499,7 +539,8 @@ def evaluate_lane_trial(
                 "error": f"{type(e).__name__}: {e}",
                 "wall_s": round(time.perf_counter() - t0, 3),
             }
-            return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id)
+            return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id,
+                           parents=parent_links, source=raw_text)
 
         inc_sha = None
         inc_ok: bool | None = None
@@ -595,7 +636,73 @@ def evaluate_lane_trial(
         "decision": decision,
         "wall_s": round(time.perf_counter() - t0, 3),
     }
-    return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id)
+    return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id,
+                           parents=parent_links, source=raw_text)
+
+
+REPLICATION_TOLERANCE = 0.25  # a rerun passes at >= 75% of the claimed soft_min_eff
+
+
+def rerun_for_verification(
+    source_path: Path,
+    lane: str,
+    *,
+    claimed_soft_min: float | None,
+    dims: tuple[int, ...] = (6, 20),
+    seed: int | None = None,
+    repeats: int = 2,
+    n_chains: int = 48,
+    k_steps: int = 16,
+    adapt_draws: int = 100,
+    horizon_steps: int = 500,
+    tolerance: float = REPLICATION_TOLERANCE,
+    work_dir: Path | None = None,
+    use_queue: bool = True,
+) -> dict:
+    """Independently rerun a fetched trial source through Tier 0 + Tier 1 on fresh seeds.
+
+    Passes when Tier 0 and Tier 1 pass and the reproduced soft_min_eff reaches
+    ``(1 - tolerance)`` of the claimed value. Returns ``{passed, metrics}`` for
+    ``POST /api/verify/:id/result``. Nothing is written to any ledger.
+    """
+    import secrets
+
+    seed = int(seed if seed is not None else 30_000_000 + secrets.randbelow(10_000_000))
+    dims = tuple(int(d) for d in dims) or (6,)
+    work = work_dir or (source_path.parent / "verify_work")
+    work.mkdir(parents=True, exist_ok=True)
+    t0 = time.perf_counter()
+    metrics: dict = {
+        "seed": seed, "dims": list(dims), "repeats": int(repeats), "judge_digest": _judge_digest(),
+        "claimed_soft_min_eff": claimed_soft_min, "tolerance": tolerance,
+    }
+    with queue.eval_slot(f"verify:{lane}/{source_path.name}", enabled=use_queue):
+        t0_ok, t0_info = _eval_tier0(source_path, seed=seed, work_dir=work, lane=lane, horizon_steps=horizon_steps)
+        metrics["tier0_ok"] = bool(t0_ok)
+        if not t0_ok:
+            metrics["tier0_info"] = t0_info
+            metrics["wall_s"] = round(time.perf_counter() - t0, 3)
+            return {"passed": False, "metrics": metrics, "reason": f"tier0 failed: {t0_info.get('stage')}"}
+        suites = [(seed + r * 7919, _build_tier1_suite(dims[0], seed + r * 7919, dims=dims)) for r in range(max(1, int(repeats)))]
+        res = _eval_tier1_multi(
+            source_path, suites, n_chains=n_chains, k_steps=k_steps,
+            adapt_draws=adapt_draws, lane=lane, horizon_steps=horizon_steps,
+        )
+    soft = float(res["soft_min_eff"])
+    ratio = (soft / claimed_soft_min) if claimed_soft_min else None
+    metrics.update({
+        "tier1_ok": bool(res["passed"]),
+        "soft_min_eff": round(soft, 6),
+        "ratio_vs_claimed": round(ratio, 4) if ratio is not None and math.isfinite(ratio) else None,
+        "overhead_ratio": round(float(res["overhead_ratio"]), 3),
+        "b2_max": round(float(res["b2_max"]), 5),
+        "wall_s": round(time.perf_counter() - t0, 3),
+    })
+    passed = bool(res["passed"]) and (ratio is None or ratio >= 1.0 - tolerance)
+    reason = "tier1 failed" if not res["passed"] else (
+        f"reproduced {soft:.4g} vs claimed {claimed_soft_min:.4g}" if claimed_soft_min else f"reproduced {soft:.4g}"
+    )
+    return {"passed": passed, "metrics": metrics, "reason": reason}
 
 
 def format_evaluator_json(
@@ -673,6 +780,35 @@ def _extract_list(resp: object, *keys: str) -> list[dict]:
             if isinstance(v, dict):
                 return [val for _, val in sorted(v.items()) if isinstance(val, dict)]
     return []
+
+
+def _brief_notes(lane: str | None, flywheel_url: str, limit: int) -> list[str]:
+    """Open hypotheses and the most recent insights for a lane, from the live Flywheel."""
+    where = f"on {lane}" if lane else "(all lanes)"
+    try:
+        hyp = _extract_list(flywheel.list_notes(lane=lane, kind="hypothesis", state="open", limit=limit,
+                                                url=flywheel_url, timeout=5.0), "notes")
+        ins = _extract_list(flywheel.list_notes(lane=lane, kind="insight", limit=limit,
+                                                url=flywheel_url, timeout=5.0), "notes")
+    except flywheel.FlywheelError as exc:
+        return [f"## Hypotheses and Insights {where}", f"- (unavailable: {exc})", ""]
+    ins = [n for n in ins if n.get("state") != "retracted"]
+
+    def fmt(n: dict) -> str:
+        tag = "" if lane else f"[{n.get('lane') or '-'}] "
+        body = " ".join(str(n.get("body") or "").split())
+        body = f" — {body[:160]}{'…' if len(body) > 160 else ''}" if body else ""
+        links = n.get("node_ids") or []
+        linked = f" (trials: {', '.join(f'`{x}`' for x in links[:4])})" if links else ""
+        state = f" [{n.get('state')}]" if n.get("state") not in (None, "open") else ""
+        return f"- {tag}`{n.get('id', '?')}` by `{n.get('author', '?')}`{state}: **{n.get('title', '')}**{body}{linked}"
+
+    lines = [f"## Open Hypotheses {where} (test one, or add yours: `apin autoresearch note add --kind hypothesis`)"]
+    lines += [fmt(n) for n in hyp] or ["- (none)"]
+    lines += ["", f"## Recent Insights {where}"]
+    lines += [fmt(n) for n in ins] or ["- (none)"]
+    lines.append("")
+    return lines
 
 
 def build_research_brief(
@@ -757,6 +893,8 @@ def build_research_brief(
             lines.append("")
         except flywheel.FlywheelError as exc:
             lines += [f"## Live Flywheel Snapshot", f"- (unreachable: {exc})", ""]
+        else:
+            lines += _brief_notes(None if all_lanes else lane, flywheel_url, max_failures)
 
     # 2. Local NEGATIVE_MEMORY.md
     if lane_dir is not None:

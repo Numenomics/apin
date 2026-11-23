@@ -1521,9 +1521,9 @@
             {
               "target": "gaussian_illcond",
               "passed": false,
-              "max_z": Infinity,
+              "max_z": null,
               "z_thresh": 0.0,
-              "b2_max": Infinity,
+              "b2_max": null,
               "move": 0.0,
               "adapt_cost": 0.0,
               "reason": "adapt() failed: name 'MAX_RANK' is not defined"
@@ -1535,7 +1535,7 @@
         "seed": 20262478,
         "ast_sha": "6369ec89af50af63"
       },
-      "metrics_json": "{\"ast_sha\": \"6369ec89af50af63\", \"judge_digest\": \"740da459529f66a9\", \"loc\": 158, \"seed\": 20262478, \"tier0_info\": {\"checks\": [{\"adapt_cost\": 0.0, \"b2_max\": Infinity, \"max_z\": Infinity, \"move\": 0.0, \"passed\": false, \"reason\": \"adapt() failed: name 'MAX_RANK' is not defined\", \"target\": \"gaussian_illcond\", \"z_thresh\": 0.0}], \"error\": \"adapt() failed: name 'MAX_RANK' is not defined\", \"stage\": \"invariance_smoke\"}, \"tier0_ok\": false, \"tier1_ok\": false, \"wall_s\": 0.702}",
+      "metrics_json": "{\"ast_sha\": \"6369ec89af50af63\", \"judge_digest\": \"740da459529f66a9\", \"loc\": 158, \"seed\": 20262478, \"tier0_info\": {\"checks\": [{\"adapt_cost\": 0.0, \"b2_max\": null, \"max_z\": null, \"move\": 0.0, \"passed\": false, \"reason\": \"adapt() failed: name 'MAX_RANK' is not defined\", \"target\": \"gaussian_illcond\", \"z_thresh\": 0.0}], \"error\": \"adapt() failed: name 'MAX_RANK' is not defined\", \"stage\": \"invariance_smoke\"}, \"tier0_ok\": false, \"tier1_ok\": false, \"wall_s\": 0.702}",
       "verified": 0,
       "created_at": "2026-11-21T12:34:08.240498+00:00"
     },

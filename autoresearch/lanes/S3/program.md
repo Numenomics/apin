@@ -1,6 +1,6 @@
 # Autoresearch Lane S3: Rewind Calibration & Agent Grading (`program.md`)
 
-> **Calibration Lane S3 (`ARCHITECTURE.md` §2.2):** Rewind tasks where `base` fails a hidden invariance/efficiency check and `reference` passes.
+> **Calibration Lane S3:** Rewind tasks where `base` fails a hidden invariance/efficiency check and `reference` passes.
 > Grades agent configurations, models, and harnesses by pass rate and **AUARC** (Area Under Accuracy–Resource Curve).
 
 ## Calibration Check
