@@ -16,7 +16,7 @@
     ledger: { nodes: [], next: null, count: 0, seq: 0 },
     notes: null,
     queue: null,
-    improve: { all: [], base: new Map(), lane: "", loading: false, capped: false, expanded: false }, // every kept trial that beat its incumbent, oldest first
+    improve: { all: [], kept: new Map(), lane: "", loading: false, capped: false, failed: false, expanded: false }, // every kept trial that beat its incumbent, oldest first
     selected: null,
     redraw: [],
   };
@@ -234,19 +234,20 @@
   const improvementsIn = (lane) => (lane ? state.improve.all.filter((n) => n.lane === lane) : state.improve.all);
 
   /* Every improvement gets `best`: the run's best measured efficiency up to and including it,
-     relative to the run's baseline trial. */
+     relative to the run's baseline. Both come from every scored kept trial of the run, not only
+     the improvements: the baseline is the earliest one, and a later "kept, simpler" trial can
+     raise the best. `runBest` is the run's best over all of them. */
   function withRunBest(list) {
-    const best = new Map();
-    /* A run posted without a baseline trial starts from the version its first improvement beat. */
-    const start = new Map(state.improve.base);
+    const cursor = new Map();
     return list.map((n) => {
       const key = n.lane + "/" + n.run_id;
-      if (!start.has(key)) start.set(key, n.soft_min_eff / n.ratio_vs_incumbent);
-      const base = start.get(key);
-      const rel = isNum(n.soft_min_eff) && base > 0 ? n.soft_min_eff / base : 1;
-      const top = Math.max(best.get(key) || 1, rel);
-      best.set(key, top);
-      return { ...n, best: top };
+      const kept = state.improve.kept.get(key) || [];
+      const base = kept.length ? kept[0].eff : n.soft_min_eff / n.ratio_vs_incumbent;
+      const c = cursor.get(key) || { i: 0, top: 0 };
+      while (c.i < kept.length && kept[c.i].at <= n.created_at) c.top = Math.max(c.top, kept[c.i++].eff);
+      cursor.set(key, c);
+      const runTop = kept.reduce((m, k) => Math.max(m, k.eff), 0);
+      return { ...n, best: base > 0 ? Math.max(c.top, n.soft_min_eff || 0) / base : 1, runBest: base > 0 && runTop > 0 ? runTop / base : null };
     });
   }
 
@@ -266,7 +267,7 @@
     }
     const value = (n) => (lane ? n.best : n.ratio_vs_incumbent);
     const pad = { l: 40, r: 14, t: 166, b: 34 };
-    const top = Math.max(2, ...pts.map(value)) * 1.08;
+    const top = Math.max(2, ...pts.map(value), ...(lane ? pts.map((n) => n.runBest || 0) : [])) * 1.08;
     const sx = (i) => (pts.length === 1 ? (pad.l + W - pad.r) / 2 : pad.l + 8 + (i / (pts.length - 1)) * (W - pad.l - pad.r - 16));
     const sy = (v) => H - pad.b - (Math.log(Math.max(v, 1)) / Math.log(top)) * (H - pad.t - pad.b);
     for (const v of [1, 1.5, 2, 3, 5, 10, 20, 50, 100].filter((t) => t <= top)) {
@@ -288,8 +289,14 @@
         const main = runId === frontierRun || runs.size === 1;
         el.appendChild(svg("path", { d, fill: "none", stroke: color, "stroke-width": main ? 1.75 : 1, opacity: main ? 1 : 0.45, "stroke-linejoin": "round" }));
         const last = idxs[idxs.length - 1];
+        /* A kept trial after the last improvement can still raise the run's best: step up to it. */
+        const end = Math.max(pts[last].best, pts[last].runBest || 0);
+        if (end > pts[last].best) {
+          const ex = Math.min(sx(last) + 10, W - pad.r);
+          el.appendChild(svg("path", { d: `M${sx(last).toFixed(1)} ${sy(pts[last].best).toFixed(1)}H${ex.toFixed(1)}V${sy(end).toFixed(1)}`, fill: "none", stroke: color, "stroke-width": main ? 1.75 : 1, opacity: main ? 1 : 0.45 }));
+        }
         const atEdge = sx(last) + 8 > W - 150;
-        el.appendChild(svg("text", { class: "run-end", x: atEdge ? sx(last) - 6 : sx(last) + 8, y: sy(pts[last].best) + (atEdge ? -9 : 4), "text-anchor": atEdge ? "end" : "start" }, `${clip(runId, 22)} ${fmt.times(pts[last].best)}`));
+        el.appendChild(svg("text", { class: "run-end", x: atEdge ? sx(last) - 6 : sx(last) + 8, y: sy(end) + (atEdge ? -9 : 4), "text-anchor": atEdge ? "end" : "start" }, `${clip(runId, 22)} ${fmt.times(end)}`));
       }
     }
 
@@ -361,7 +368,8 @@
       (state.improve.loading ? "Loading. " : "") +
       `${shown.length} ${shown.length === 1 ? "improvement" : "improvements"}${lane ? ` in ${lane} ${apin.laneName(lane)}` : ` in ${lanes.length} ${lanes.length === 1 ? "lane" : "lanes"}`}` +
       (state.improve.capped ? ", from the newest kept trials only" : "") +
-      ".";
+      "." +
+      (state.improve.failed ? " Some could not be loaded, so this is partial. Use Reload to try again." : "");
     $("#break-caption").textContent = lane
       ? "Each line is one run, and each dot on it is a kept trial that beat the version before it. The line shows the run's best measured efficiency so far, as a multiple of the run's baseline, so it steps up only when an improvement sets a new best. The full-colour line is the run that holds the lane's frontier. The largest gains say what was tried and who tried it."
       : "Each dot is a kept trial that beat the version it replaced, in time order. Height is how much faster it was on the same seeds, on a log scale. The largest gains say what was tried and who tried it. Pick a lane to see how its runs climbed step by step.";
@@ -392,20 +400,29 @@
 
   async function loadImprovements() {
     const seq = (state.improve.seq = (state.improve.seq || 0) + 1);
-    Object.assign(state.improve, { all: [], base: new Map(), loading: true, capped: false });
+    Object.assign(state.improve, { all: [], kept: new Map(), loading: true, capped: false, failed: false });
+    const seen = new Set(); // a trial posted between two requests shifts a row onto the next page
     let offset = 0;
     for (let page = 0; page < IMPROVE_PAGES && offset !== null; page += 1) {
       let res;
       try {
         res = await state.store.trials({ outcome: "kept", limit: IMPROVE_PAGE, offset });
       } catch {
+        if (seq !== state.improve.seq) return;
+        state.improve.failed = true;
         break;
       }
       if (seq !== state.improve.seq) return; // a reload replaced this pass
-      /* Pages arrive newest first, so the last baseline seen for a run is its earliest. */
-      for (const n of res.nodes) if (n.decision === "keep_baseline" && isNum(n.soft_min_eff) && n.soft_min_eff > 0) state.improve.base.set(n.lane + "/" + n.run_id, n.soft_min_eff);
-      const found = res.nodes.filter((n) => n.decision === "keep" && isNum(n.ratio_vs_incumbent) && n.ratio_vs_incumbent > 1);
-      state.improve.all = found.reverse().concat(state.improve.all); // pages arrive newest first
+      const fresh = res.nodes.filter((n) => !seen.has(n.id) && seen.add(n.id));
+      /* Pages arrive newest first, so each run's list is built back to front. */
+      for (const n of fresh) {
+        if (!isNum(n.soft_min_eff) || !(n.soft_min_eff > 0)) continue;
+        const key = n.lane + "/" + n.run_id;
+        if (!state.improve.kept.has(key)) state.improve.kept.set(key, []);
+        state.improve.kept.get(key).unshift({ eff: n.soft_min_eff, at: n.created_at });
+      }
+      const found = fresh.filter((n) => n.decision === "keep" && isNum(n.ratio_vs_incumbent) && n.ratio_vs_incumbent > 1);
+      state.improve.all = found.reverse().concat(state.improve.all);
       offset = res.next_offset;
       state.improve.capped = offset !== null && page === IMPROVE_PAGES - 1;
       renderBreakChrome();
