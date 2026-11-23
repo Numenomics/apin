@@ -212,6 +212,8 @@ def test_collector_ranks_by_tasks_solved_and_never_scores_interrupted_runs():
         # Setting C: returned the starting code unchanged.
         _attempt("c1", "m/c#low", "s3-unadjusted-ula", passed=False, outcome="invalid"),
         _attempt("c2", "m/c#low", "a0-ground-up", outcome="no_gain", ref=0.2, start=1.0),
+        # A valid result the verifier could not score (its own reference failed) is nobody's zero.
+        _attempt("c3", "m/c#low", "a0-ground-up", outcome="unscorable"),
     ]
     rel = mod.aggregate_results(trials, {"models": {}}, release_tag="bench-v0.2.0")["releases"][0]
     assert rel["scoring"] == "reference"
@@ -232,6 +234,7 @@ def test_collector_ranks_by_tasks_solved_and_never_scores_interrupted_runs():
 
     c = board["m/c#low"]
     assert c["solved"] == 0 and c["tasks"]["a0-ground-up"]["outcomes"] == {"no_gain": 1}
+    assert c["tasks"]["a0-ground-up"]["attempts"] == 1 and c["interrupted"] == 1 and c["opt_valid"] == 1.0
 
     # Complete settings first, then tasks solved. B's bigger ratio does not lift it over A.
     assert [r["config_key"] for r in rel["leaderboard"]] == ["m/a#low", "m/c#low", "m/b#low"]

@@ -234,15 +234,14 @@
       const meta = bench.meta(rel, id);
       if (meta.category !== group) {
         group = meta.category;
-        html += `<tr class="group"><td colspan="${list.length + 1}">${group === "rewind" ? "Fix a bug: solved or not" : `Make it faster: efficiency relative to ${bench.against(rel)}`}</td></tr>`;
+        html += `<tr class="group"><td colspan="${list.length + 1}">${group === "rewind" ? "Bug fixes: pass or fail" : `Speed-ups: efficiency relative to ${bench.against(rel)}`}</td></tr>`;
       }
       const facts = [meta.lane ? `lane ${meta.lane}` : "", meta.difficulty ? `rated ${meta.difficulty}` : ""].filter(Boolean).join(", ");
       /* How the three yardsticks compare on this task, so a ratio can be read for what it is. */
       const den = rel.scoring === "reference" ? meta.denominators : null;
       const yard =
         den && isNum(den.start) && den.start > 0
-          ? `<span class="yard">Reference ${isNum(den.reference) ? fmt.times(den.reference / den.start) : "not scored"} the starting code` +
-            `${isNum(den.frontier) ? `, lane frontier ${fmt.times(den.frontier / den.start)}` : ""}</span>`
+          ? `<span class="yard">${[isNum(den.reference) ? `Reference ${fmt.times(den.reference / den.start)} the starting code` : "", isNum(den.frontier) ? `lane frontier ${fmt.times(den.frontier / den.start)}` : ""].filter(Boolean).join(", ")}</span>`
           : "";
       html +=
         `<tr><td class="task"><code>${esc(id)}</code><span>${esc(meta.title)}</span>${yard}` +
@@ -283,9 +282,9 @@
     const t = attempts.find((a) => a.trial_id === (pick || cell.best_trial)) || attempts[0];
     const sol = t.solution || {};
     const kind = bench.meta(rel, taskId).category;
-    const tone = t.outcome === "solved" || (rel.scoring !== "reference" && t.outcome === "improved") ? "good" : t.outcome === "interrupted" ? "warn" : t.outcome === "invalid" || t.outcome === "unscorable" ? "bad" : "mute";
+    const tone = t.outcome === "solved" || (rel.scoring !== "reference" && t.outcome === "improved") ? "good" : t.outcome === "interrupted" || t.outcome === "unscorable" ? "warn" : t.outcome === "invalid" ? "bad" : "mute";
     const pair = (k, v) => `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>`;
-    const ended = { finished: "the agent stopped by itself", time_limit: "reached the time limit", agent_error: "the agent exited with an error", provider_limit: "cut off by the model provider", infrastructure: "infrastructure failure", agent_crash: "the agent never started" };
+    const ended = { finished: "the agent finished", time_limit: "reached the time limit", agent_error: "the agent exited with an error", provider_limit: "the model provider cut it off", infrastructure: "the infrastructure failed", agent_crash: "the agent never started" };
     const facts = [];
     if (kind === "optimize" && t.outcome !== "interrupted") {
       if (rel.scoring === "reference") facts.push(pair("Against the reference", fmt.times(t.ref_speedup)));
@@ -296,8 +295,8 @@
       );
       if (rel.scoring === "reference") {
         facts.push(pair("Reference", fmt.eff(t.reference_soft_min)));
-        if (isNum(t.frontier_speedup)) facts.push(pair("Against the lane's frontier", fmt.times(t.frontier_speedup)));
-        if (isNum(t.gap_closed)) facts.push(pair("Gap to the frontier closed", fmt.pct(t.gap_closed)));
+        if (isNum(t.frontier_speedup)) facts.push(pair("Against the lane frontier", fmt.times(t.frontier_speedup)));
+        if (isNum(t.gap_closed)) facts.push(pair("Frontier gap closed", fmt.pct(t.gap_closed)));
       }
       facts.push(pair("Short budget", fmt.eff(t.short_horizon_soft_min)), pair("Long budget", fmt.eff(t.long_horizon_soft_min)), pair("Overhead", isNum(t.overhead_ratio) ? fmt.times(t.overhead_ratio, 1) : "—"));
     }
@@ -328,9 +327,9 @@
         classes.map(([k, v]) => `<div><span>${esc(k)}</span><i style="width:${Math.max(1, (v / top) * 100).toFixed(1)}%"></i><b>${Number(v).toExponential(2)}</b></div>`).join("") +
         '</div><p class="caption">The weakest shape sets the score.</p></div>'
       : "";
-    const failed = (t.failed_targets || []).length ? `<div><h4>Targets that failed</h4><p class="quote">${esc(t.failed_targets.join("; "))}</p></div>` : "";
+    const failed = (t.failed_targets || []).length ? `<div><h4>Failed targets</h4><p class="quote">${esc(t.failed_targets.join("; "))}</p></div>` : "";
     const note = t.approach_summary ? `<div><h4>The agent's closing note</h4><pre class="log">${esc(t.approach_summary)}</pre></div>` : "";
-    const error = t.error ? `<div><h4>Error reported by the harness</h4><pre class="log">${esc(t.error)}</pre></div>` : "";
+    const error = t.error ? `<div><h4>Harness error</h4><pre class="log">${esc(t.error)}</pre></div>` : "";
 
     document.querySelectorAll(".heat.is-open").forEach((n) => n.classList.remove("is-open"));
     document.querySelectorAll(`.heat[data-run="${CSS.escape(key)}"]`).forEach((n) => n.classList.add("is-open"));
@@ -376,7 +375,7 @@
     state.sort = { key: "rank", dir: 1 };
     state.models = [...new Set(rel.leaderboard.map((r) => r.model))];
     const harness = [...new Set(rel.trials.map((t) => t.agent).filter(Boolean))].join(", ");
-    const unfinished = rel.trials.filter((t) => t.outcome === "interrupted").length;
+    const unfinished = rel.trials.filter((t) => t.outcome === "interrupted" || t.outcome === "unscorable").length;
     $("#meta").innerHTML =
       `<span><b>${rel.leaderboard.length}</b> model and effort settings</span>` +
       `<span><b>${rel.trials.length}</b> runs on <b>${rel.tasks.length}</b> tasks${unfinished ? `, <b>${unfinished}</b> did not finish` : ""}</span>` +
@@ -386,8 +385,8 @@
     $("#release-note").classList.toggle("is-old", rel.release !== data.current_release);
     $("#speedup-rule").textContent =
       rel.scoring === "reference"
-        ? "Typical speed-up is the geometric mean, over the five speed-up tasks, of efficiency relative to the Stan-style reference. A task with no valid result enters at 0.1×."
-        : "Typical speed-up is the geometric mean, over the five speed-up tasks, of efficiency relative to the starting code. A task with no valid result enters at 0.1×.";
+        ? "Typical speed-up is the geometric mean of efficiency relative to the Stan-style reference across the five speed-up tasks. A task with no valid result counts as 0.1×."
+        : "Typical speed-up is the geometric mean of efficiency relative to the starting code across the five speed-up tasks. A task with no valid result counts as 0.1×.";
     fill("#f-model", "All models", state.models, (m) => (rel.leaderboard.find((r) => r.model === m) || {}).label || m);
     fill("#f-effort", "All efforts", [...new Set(rel.leaderboard.map((r) => r.effort))], (e) => e + " effort");
     renderLegend();
@@ -411,8 +410,8 @@
     })
     .catch((err) => {
       console.error(err);
-      $("#meta").textContent = "No benchmark results are published with this build.";
+      $("#meta").textContent = "This build has no published benchmark results.";
       $("#board").innerHTML =
-        '<tbody><tr><td class="empty">Results could not be loaded. Run <code>scripts/collect_harbor_results.py</code> to write <code>data/benchmark.json</code>, then reload.</td></tr></tbody>';
+        '<tbody><tr><td class="empty">Could not load the results. Run <code>scripts/collect_harbor_results.py</code> to write <code>data/benchmark.json</code>, then reload.</td></tr></tbody>';
     });
 })();

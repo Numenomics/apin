@@ -428,7 +428,10 @@ _INFRA_EXCEPTIONS = frozenset({
 })
 IMPROVED_MARGIN = 0.05  # same margin as harbor/verify.py; used only for trials graded before it reported an outcome
 INVALID_FLOOR = 0.1  # a task with no valid attempt enters the geometric mean at this ratio
-OUTCOMES = ("solved", "improved", "no_gain", "invalid", "unscorable")
+OUTCOMES = ("solved", "improved", "no_gain", "invalid")
+# Not evidence about the agent: the run was cut off, or the verifier could not score a valid
+# result because one of its own denominators failed. Both are left out of every count.
+NOT_SCORED = ("interrupted", "unscorable")
 SCORING_NOTES = {
     "reference": "Speed-ups are relative to a Stan-style reference sampler on the same seeds. "
                  "A speed-up task is solved when the result is valid, beats the starting code by 5% and matches the reference.",
@@ -480,7 +483,7 @@ def classify_attempt(trial: dict[str, Any]) -> dict[str, Any]:
         return t
     reported = t.get("verifier_outcome")
     start, ref = _num(t.get("start_speedup")), _num(t.get("ref_speedup"))
-    if reported in OUTCOMES:
+    if reported in OUTCOMES or reported == "unscorable":
         outcome = reported
     elif t["category"] == "rewind":
         outcome = "solved" if t.get("passed") else "invalid"
@@ -502,14 +505,14 @@ def _geomean(values: list[float]) -> float | None:
 
 def _summarise_task(rows: list[dict[str, Any]], scoring: str) -> dict[str, Any]:
     """All attempts of one setting on one task."""
-    scored = [r for r in rows if r["outcome"] != "interrupted"]
+    scored = [r for r in rows if r["outcome"] not in NOT_SCORED]
     key = "ref_speedup" if scoring == "reference" else "start_speedup"
     success = ("solved",) if scoring == "reference" or rows[0]["category"] == "rewind" else ("solved", "improved")
-    # An invalid or unscorable attempt earned no speed-up: it counts as zero in the task mean.
-    ratios = [(_num(r.get(key)) or 0.0) if r["outcome"] not in ("invalid", "unscorable") else 0.0 for r in scored]
+    # An invalid attempt earned no speed-up: it counts as zero in the task mean.
+    ratios = [(_num(r.get(key)) or 0.0) if r["outcome"] != "invalid" else 0.0 for r in scored]
     # Share of the distance from the starting code to the lane's frozen frontier that was closed
     # (0 for an invalid attempt, as for unchanged code); only where the verifier reported it.
-    gaps = [0.0 if r["outcome"] in ("invalid", "unscorable") else _num(r.get("gap_closed")) for r in scored]
+    gaps = [0.0 if r["outcome"] == "invalid" else _num(r.get("gap_closed")) for r in scored]
     gaps = [g for g in gaps if g is not None]
     counts = {o: sum(1 for r in scored if r["outcome"] == o) for o in OUTCOMES}
     n_ok = sum(counts[o] for o in success)
@@ -535,7 +538,7 @@ def summarise_setting(rows: list[dict[str, Any]], tasks: list[str], scoring: str
     done = {tid: s for tid, s in per_task.items() if s["attempts"]}
     fixes = [s for s in done.values() if s["category"] == "rewind"]
     opts = [s for s in done.values() if s["category"] == "optimize"]
-    scored = [r for r in rows if r["outcome"] != "interrupted"]
+    scored = [r for r in rows if r["outcome"] not in NOT_SCORED]
 
     def total(field: str) -> float:
         return sum(float(r.get(field) or 0) for r in rows)
@@ -564,7 +567,7 @@ def summarise_setting(rows: list[dict[str, Any]], tasks: list[str], scoring: str
         "fix_total": sum(1 for t in tasks if t.startswith("s3-")),
         "opt_solved": round(sum(s["solve_rate"] for s in opts), 3),
         "opt_total": sum(1 for t in tasks if not t.startswith("s3-")),
-        "opt_valid": round(sum(1 - (s["outcomes"].get("invalid", 0) + s["outcomes"].get("unscorable", 0)) / s["attempts"] for s in opts), 3),
+        "opt_valid": round(sum(1 - s["outcomes"].get("invalid", 0) / s["attempts"] for s in opts), 3),
         "opt_geomean": _geomean([max(s["ratio_mean"], INVALID_FLOOR) for s in opts]),
         "opt_gap_closed": (lambda g: round(sum(g) / len(g), 4) if g else None)([s["gap_closed_mean"] for s in opts if s["gap_closed_mean"] is not None]),
         "tasks": per_task,

@@ -629,7 +629,7 @@
       if (cell.solve_rate >= 1) return "solved";
       if (cell.solve_rate > 0) return "partly";
       const o = cell.outcomes || {};
-      return (o.invalid || 0) + (o.unscorable || 0) >= cell.attempts ? "invalid" : "unsolved";
+      return (o.invalid || 0) >= cell.attempts ? "invalid" : "unsolved";
     },
     against(rel) {
       return rel.scoring === "reference" ? "the Stan-style reference" : "the starting code";
@@ -642,7 +642,7 @@
       if (st === "none") return "not run";
       if (st === "unfinished") return "did not finish";
       const many = cell.attempts > 1 ? `, solved in ${bench.solvedCount(cell)} of ${cell.attempts} attempts` : "";
-      if (bench.meta(rel, taskId).category === "rewind") return (st === "solved" ? "bug fixed" : st === "partly" ? "bug fixed in some attempts" : "bug not fixed") + many;
+      if (bench.meta(rel, taskId).category === "rewind") return (st === "solved" ? "bug fixed" : st === "partly" ? "partly fixed" : "bug not fixed") + many;
       if (st === "invalid") return "failed the checks" + many;
       return `${fmt.times(cell.ratio_mean)} ${bench.against(rel)}${st === "unsolved" ? ", not solved" : ""}${many}`;
     },
@@ -657,7 +657,7 @@
       if (rel.scoring !== "reference") return t.outcome === "no_gain" ? `no gain: ${start}` : `improved: ${start}`;
       const ref = `${fmt.times(t.ref_speedup)} the Stan-style reference`;
       if (t.outcome === "solved") return `solved: ${ref}, ${start}`;
-      if (t.outcome === "improved") return `improved, but below the reference: ${ref}, ${start}`;
+      if (t.outcome === "improved") return `improved, below the reference: ${ref}, ${start}`;
       return `no gain: ${start}, ${ref}`;
     },
     pips(rel, row) {
