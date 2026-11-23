@@ -13,7 +13,7 @@
     "uv run python harbor/verify.py optimize --lane A1 \\\n  --submission path/to/submission.py \\\n  --baseline harbor/tasks/a1-preconditioning/tests/baseline.py \\\n  --dims 6,20 --repeats 2"
   );
   $("#cmd-collect").innerHTML = cmd(
-    "uv run python scripts/collect_harbor_results.py \\\n  --input-json flywheel/public/data/benchmark.json --jobs jobs/"
+    "uv run python scripts/collect_harbor_results.py --jobs jobs/"
   );
 
   const SHAPES = { low: "circle", high: "square", max: "diamond" };

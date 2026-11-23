@@ -20,7 +20,7 @@
 
   function standing(summary) {
     if (!summary) return "";
-    if (!summary.nodes.length) return '<div><dt>Stands at</dt><dd>No trials recorded yet. The first baseline is yours to set.</dd></div>';
+    if (!summary.nodes.length) return '<div><dt>Stands at</dt><dd>No trials recorded yet.</dd></div>';
     const t = summary.top;
     const stan = summary.stan ? `, ${summary.stan.real_stan_passed} of ${summary.stan.real_stan_total} real Stan models passed` : "";
     return (
@@ -76,9 +76,9 @@
     .then((graph) => {
       render(apin.laneSummaries(graph));
       const active = new Set(graph.nodes.map((n) => n.lane)).size;
-      $("#lanes-note").innerHTML = `What you edit, what stays fixed, and where the lane stands today. ${active} of ${apin.LANES.length} lanes have trials on record${graph.source === "live" ? "" : " in the snapshot shipped with this page"}.`;
+      $("#lanes-note").innerHTML = `What you edit, what stays fixed, and where the lane stands today. ${active} of ${apin.LANES.length} lanes have trials posted${graph.source === "live" ? "" : " in the snapshot shipped with this page"}.`;
     })
     .catch(() => {
-      $("#lanes-note").textContent = "What you edit and what stays fixed. Current standings could not be loaded.";
+      $("#lanes-note").textContent = "What you edit and what stays fixed. Could not load current standings.";
     });
 })();

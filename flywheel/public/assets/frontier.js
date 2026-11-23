@@ -8,7 +8,7 @@
   const state = { graph: null, notes: null, queue: null, summaries: [], selected: null, redraw: [] };
 
   const decision = (n) => DECISIONS[n.decision] || { label: n.decision, glyph: "tick", note: "" };
-  const outcomeOf = (n) => (KEPT.has(n.decision) || n.decision === "keep_incumbent_failed" ? "kept" : n.decision === "archive_only" ? "archived" : "discarded");
+  const outcomeOf = (n) => (KEPT.has(n.decision) ? "kept" : n.decision === "archive_only" ? "archived" : "discarded");
   const byTime = (a, b) => String(a.created_at).localeCompare(String(b.created_at)) || String(a.id).localeCompare(String(b.id));
   const headline = (n) => String(n.hypothesis || n.title || "No hypothesis recorded").replace(/^T\d+:\s*/, "");
   const clip = (s, n) => (s.length > n ? s.slice(0, n - 1).trimEnd() + "…" : s);
@@ -189,7 +189,7 @@
     const c = "var(--ink-2)";
     $("#field-legend").innerHTML =
       `<span>${glyph("line", c)}version to beat</span><span>${glyph("keep", c)}kept</span><span>${glyph("open", "var(--ink-3)")}scored, not kept</span>` +
-      `<span>${glyph("tick", "var(--ink-3)")}failed a check</span><span>${glyph("verified", c)}also run on real Stan</span>`;
+      `<span>${glyph("tick", "var(--ink-3)")}failed a check</span><span>${glyph("stan", c)}also run on real Stan</span>`;
   }
 
   /* ---------- gain chart ---------- */
@@ -328,14 +328,14 @@
     const el = $("#notes");
     const add = cmd('uv run apin autoresearch note add --kind hypothesis --lane A1 \\\n  --title "One falsifiable sentence" --body "What would refute it"');
     if (state.notes === null) {
-      el.innerHTML = '<p class="empty">Notes are read from the live Flywheel, which did not answer. The trial record above comes from the snapshot shipped with this page.</p>';
+      el.innerHTML = '<p class="empty">Could not load notes from the live Flywheel. The trials above come from the snapshot shipped with this page.</p>';
       return;
     }
     const kind = $("#n-kind").value;
     const lane = $("#n-lane").value;
     const list = state.notes.filter((n) => (!kind || n.kind === kind) && (!lane || n.lane === lane));
     if (!list.length) {
-      el.innerHTML = `<p class="empty">${state.notes.length ? "No note matches these filters." : "Nobody has written a hypothesis or an insight down yet. Add the first one:"}</p>${state.notes.length ? "" : add}`;
+      el.innerHTML = `<p class="empty">${state.notes.length ? "No note matches these filters." : "No hypotheses or insights yet. Add the first one:"}</p>${state.notes.length ? "" : add}`;
       return;
     }
     el.innerHTML = list
@@ -358,7 +358,7 @@
   function renderQueue() {
     const el = $("#queue");
     if (state.queue === null) {
-      el.innerHTML = '<tbody><tr><td class="empty">The rerun queue is read from the live Flywheel, which did not answer.</td></tr></tbody>';
+      el.innerHTML = '<tbody><tr><td class="empty">Could not load the rerun queue from the live Flywheel.</td></tr></tbody>';
       return;
     }
     if (!state.queue.length) {
@@ -367,7 +367,7 @@
     }
     const why = { beats_frontier: "beat the frontier", "needs-replication": "rerun requested" };
     el.innerHTML =
-      "<thead><tr><th>Lane</th><th>Trial</th><th>By</th><th class='num'>Claimed efficiency</th><th>Why it is here</th><th>Status</th></tr></thead><tbody>" +
+      "<thead><tr><th>Lane</th><th>Trial</th><th>By</th><th class='num'>Claimed efficiency</th><th>Reason</th><th>Status</th></tr></thead><tbody>" +
       state.queue
         .map((q) => {
           const n = q.node || {};
@@ -395,7 +395,7 @@
       .filter((n) => {
         if (lane && n.lane !== lane) return false;
         if (by && n.agent_model !== by) return false;
-        if (outcome.startsWith("state:") ? n.state !== outcome.slice(6) : outcome === "verified" ? !(n.real_stan_total > 0) : outcome && outcomeOf(n) !== outcome) return false;
+        if (outcome.startsWith("state:") ? n.state !== outcome.slice(6) : outcome === "stan" ? !(n.real_stan_total > 0) : outcome && outcomeOf(n) !== outcome) return false;
         if (q && !`${n.id} ${n.hypothesis || ""} ${n.code_sha || ""} ${(n.codex_refs || []).join(" ")} ${n.author || ""}`.toLowerCase().includes(q)) return false;
         return true;
       });
@@ -461,7 +461,7 @@
     const source = n.has_source
       ? `<div><h4>Source</h4><div class="chips"><button type="button" data-source="${esc(n.id)}">Show the submitted file</button></div>` +
         `<div id="source-box"></div>${cmd(`uv run apin autoresearch fetch --node ${n.id}`)}</div>`
-      : '<div><h4>Source</h4><p class="caption">This trial was posted before the Flywheel stored source files. Only its hash is on record.</p></div>';
+      : '<div><h4>Source</h4><p class="caption">No source file was stored for this older trial; only its hash is available.</p></div>';
 
     apin.drawer.open({
       title: `${n.lane} ${apin.laneName(n.lane)}, trial ${n.trial_id || ""}`,
@@ -487,7 +487,7 @@
       box.innerHTML = `<pre class="log source">${esc(res.source)}</pre><p class="caption">${fmt.int(res.size)} bytes, sha256 ${esc(String(res.sha256).slice(0, 16))}</p>`;
       button.hidden = true;
     } catch {
-      box.innerHTML = '<p class="caption">The source could not be loaded from the Flywheel.</p>';
+      box.innerHTML = '<p class="caption">Could not load the source from the Flywheel.</p>';
       button.disabled = false;
     }
   }
@@ -549,7 +549,7 @@
       if (m) openNode(decodeURIComponent(m[1]), true);
     } catch (err) {
       console.error(err);
-      $("#meta").textContent = "The trial record could not be loaded.";
+      $("#meta").textContent = "Could not load the trials.";
       $("#lane-table").innerHTML = '<tbody><tr><td class="empty">Neither the live API nor the snapshot answered. Reload, or read <a href="/api/dag">/api/dag</a> directly.</td></tr></tbody>';
     } finally {
       $("#refresh").disabled = false;

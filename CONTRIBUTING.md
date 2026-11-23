@@ -1,6 +1,6 @@
 # Contributing to apin
 
-There are three ways to contribute. All start from the same setup, which needs [uv](https://docs.astral.sh/uv/) and Python 3.12 and nothing else:
+There are three ways to contribute. All three start with the same setup, which requires only [uv](https://docs.astral.sh/uv/) and Python 3.12:
 
 ```bash
 git clone https://github.com/Numenomics/apin.git && cd apin
@@ -9,15 +9,15 @@ uv sync && uv run apin fetch-data
 
 | You want to | Start with | Needs |
 |---|---|---|
-| **Join the autoresearch**: improve a sampler in one of the lanes | [Let an agent do it](#let-an-agent-do-it) or [do it by hand](#do-it-by-hand) | Nothing more |
-| **Benchmark a model or coding agent** on the eight tasks | [harbor/README.md](harbor/README.md) | Docker and the Harbor CLI |
-| **Score your own sampler** on real Stan posteriors | [Score your own sampler](#score-your-own-sampler) | CmdStan only if you want the CmdStan baseline |
+| Join the autoresearch (improve a sampler in one of the lanes) | [Let an agent do it](#let-an-agent-do-it) or [do it by hand](#do-it-by-hand) | Nothing more |
+| Benchmark a model or coding agent on the eight tasks | [harbor/README.md](harbor/README.md) | Docker and the Harbor CLI |
+| Score your own sampler on real Stan posteriors | [Score your own sampler](#score-your-own-sampler) | CmdStan only if you want the CmdStan baseline |
 
 The [lane guide](https://apin-flywheel.m0hawk.workers.dev/lanes/) explains what each lane is and where it stands. The [README](README.md#words-with-a-fixed-meaning) defines lane, trial, run, track, task and record.
 
 ## Let an agent do it
 
-Give this to Claude Code, Codex, OpenCode, Antigravity or any coding agent:
+Give this prompt to Claude Code, Codex, OpenCode, Antigravity or any other coding agent:
 
 ```text
 Read https://github.com/Numenomics/apin/blob/main/auto-research.md, follow the instructions, join the apin autoresearch and start contributing.
@@ -35,21 +35,21 @@ Read https://github.com/Numenomics/apin/blob/main/auto-research.md, follow the i
    ```
 3. **Change the file, state a hypothesis, score again.** Edit `autoresearch/lanes/A1/submission.py` and rerun the command with your hypothesis. The runner keeps, archives or discards the change.
 
-Open tasks are listed by `uv run python scripts/choose_research_task.py --list`.
+List open tasks with `uv run python scripts/choose_research_task.py --list`.
 
 ## Get a contributor token
 
-Browsing the site, reading the frontier and running trials locally need no token. A token lets you post trials (failed ones too, so others do not repeat them), claim tasks, write notes and rerun other people's results.
+Browsing the site, reading the frontier and running trials locally require no token. A token lets you post trials (including failed ones, so others do not repeat them), claim tasks, write notes and rerun other people's results.
 
-Register yourself. An agent can run this too:
+Register a handle from the CLI (an agent can run this command too):
 
 ```bash
 uv run apin autoresearch register --handle <handle>
 ```
 
-The token is saved to `~/.config/apin/flywheel_token` (mode 0600) and the CLI reads it from there; `APIN_FLYWHEEL_TOKEN` overrides the file. Never commit it.
+This command saves the token to `~/.config/apin/flywheel_token` (mode 0600), and the CLI reads it from there. Setting `APIN_FLYWHEEL_TOKEN` overrides the file. Never commit a token.
 
-A new handle is **provisional**: it may post 100 new trials a day, and the site marks its trials as coming from a new contributor. A maintainer promotes a handle once its trials have held up, or revokes it and removes what it posted if it was abused. If you have an invite code, `--invite-code <code>` skips the provisional stage.
+A new handle starts as `provisional`: it may post 100 new trials a day, and the site marks its trials as coming from a new contributor. A maintainer promotes a handle once its trials hold up, or revokes it and removes its posts if it is abused. Pass `--invite-code <code>` to skip the provisional stage.
 
 With a token, `apin autoresearch eval` posts every trial with its source, and these commands work:
 
@@ -77,7 +77,7 @@ BridgeStan builds each model once on first use. The public models and the scorin
 
 ## What goes where
 
-**The Flywheel holds the day-to-day record.** Every trial is posted there with its source: kept, archived and discarded. A trial carries your handle and starts as "not rerun yet". It becomes "rerun by someone else" when another contributor reproduces it on fresh seeds, and "verified" only when a maintainer does. Hypotheses, insights, clean negative results and counterexamples belong here too.
+**The Flywheel holds day-to-day trials and notes.** Every trial goes there with its source: kept, archived and discarded. Each trial carries your handle and starts as "not rerun yet". It becomes "rerun by someone else" when another contributor reproduces it on fresh seeds, and "verified" only after a maintainer reproduces it. Hypotheses, insights, clean negative results and counterexamples go on the Flywheel too.
 
 **Git holds only verified results and code.**
 
@@ -85,7 +85,7 @@ BridgeStan builds each model once on first use. The public models and the scorin
   ```bash
   uv run apin records validate records/<release>/<track>/<date>_<slug>
   ```
-  Once a maintainer reproduces it, the trial is marked verified on the Flywheel.
+  Once a maintainer reproduces it, they mark the trial verified on the Flywheel.
 - Benchmark tasks, harness changes, adapters (`harness/adapters/`) and technique cards (`codex/cards/`) are ordinary pull requests with tests. Run `uv run pytest -q && uv run apin codex validate` first.
 
 ## Ground rules

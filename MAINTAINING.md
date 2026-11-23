@@ -1,10 +1,8 @@
-# Maintainer Guide (`MAINTAINING.md`)
+# Maintainer guide (`MAINTAINING.md`)
 
-Operations runbook for the repository owner: Flywheel administration, verifying contributor submissions, rebuilding references/costs, and managing upstream fork submodules. Contributors should read [CONTRIBUTING.md](CONTRIBUTING.md) instead.
+Operations runbook for the repository owner: Flywheel administration, verifying contributor submissions, rebuilding references and cost weights, and managing upstream fork submodules. Contributors should read [CONTRIBUTING.md](CONTRIBUTING.md) instead.
 
----
-
-## 1. Flywheel Administration (`https://apin-flywheel.m0hawk.workers.dev`)
+## 1. Flywheel administration (`https://apin-flywheel.m0hawk.workers.dev`)
 
 Your Cloudflare secret `FLYWHEEL_API_KEY` is the root admin Bearer token. Export it locally as `APIN_FLYWHEEL_ADMIN_KEY` (never commit it).
 
@@ -56,7 +54,7 @@ curl -fsS -X DELETE "https://apin-flywheel.m0hawk.workers.dev/api/admin/nodes/<u
   -H "Authorization: Bearer $APIN_FLYWHEEL_ADMIN_KEY"
 ```
 
-### Deploy the website and Flywheel updates & cost safety
+### Deploy the website and Flywheel, and keep costs at zero
 One deploy ships both the API Worker and the whole website (`flywheel/public/`: overview, research frontier, agent benchmark, lane guide).
 ```bash
 cd flywheel
@@ -67,20 +65,18 @@ npx wrangler d1 execute apin-flywheel --remote --yes --file=./schema.sql   # bas
 npx wrangler d1 migrations apply apin-flywheel --remote                  # applies flywheel/migrations/*.sql once each
 npx wrangler deploy
 ```
-- **Schema changes go in a new numbered file in `flywheel/migrations/`**, never into `schema.sql` (the base schema every migration builds on). Wrangler records applied files in the `d1_migrations` table, so `migrations apply` runs only new ones; `npx wrangler d1 migrations list apin-flywheel --remote` shows what is pending. Deploy the Worker only after the migration it needs has been applied: the Worker from `0001_research_objects.sql` onwards reads `nodes.state`, `sources`, `node_parents`, `notes` and `verify_queue`. Seed data (`seed.sql`) also needs the migrations applied first.
+- **Put schema changes in a new numbered file in `flywheel/migrations/`.** Never edit `schema.sql`, which is the base schema every migration builds on. Wrangler records applied files in the `d1_migrations` table, so `migrations apply` runs only new ones; run `npx wrangler d1 migrations list apin-flywheel --remote` to see pending files. Apply a migration before deploying the Worker that needs it: from `0001_research_objects.sql` onwards, the Worker reads `nodes.state`, `sources`, `node_parents`, `notes` and `verify_queue`. Apply migrations before loading `seed.sql` as well.
 - **Do not add virtual tables (FTS5).** D1 cannot export a database that has them, and the export above is the backup.
 - **Abuse limits** (registration caps, provisional write and trial caps) are listed in the API reference in `flywheel/README.md`. Change one with `npx wrangler secret put FLYWHEEL_<NAME>`; `FLYWHEEL_REGISTRATIONS_PER_DAY=0` closes open registration. Set `FLYWHEEL_IP_SALT` once to any random string.
-- **Publishing a benchmark sweep:** run `uv run python scripts/collect_harbor_results.py --input-json flywheel/public/data/benchmark.json --jobs jobs/` (adds the new runs to `flywheel/public/data/benchmark.json` and keeps earlier releases), commit it, then deploy.
-- **`/api/dag` has a ceiling.** Building the whole graph costs about 20 ms of CPU per 1,000 trials and the free plan allows 10 ms, so the full graph stops answering at roughly 450 trials. The site then loads it lane by lane (`/api/dag?lane=A1`), and falls back to `snapshot.json` if that fails too. Past that point the graph needs a paginated or prebuilt form.
+- **Publishing a benchmark sweep:** run `uv run python scripts/collect_harbor_results.py --jobs jobs/` (adds the new runs to `flywheel/public/data/benchmark.json` and keeps earlier releases), commit it, then deploy.
+- **`/api/dag` has a ceiling.** Building the whole graph uses about 20 ms of CPU per 1,000 trials against the free plan's 10 ms limit, so the full endpoint stops answering at roughly 450 trials. When that happens, the site loads it lane by lane (`/api/dag?lane=A1`), and falls back to `snapshot.json` if that fails too. Beyond that point the graph needs pagination or a prebuilt file.
 - **Refreshing the offline snapshot:** `.venv/bin/python flywheel/seed_from_apin.py` rewrites `flywheel/public/snapshot.json`, which the site falls back to when the API is unreachable.
 - **Lane and track descriptions** on the site live in one place, `flywheel/public/assets/site.js` (`LANES`, `TRACKS`). Update them when a lane's `program.md` changes its contract.
-- **Zero-bill guarantee:** Keep Flywheel on the Cloudflare **Workers Free** plan ($0/mo). Free plans enforce hard fail-closed limits (100k req/day, 5M D1 reads/day, 100k D1 writes/day, 10ms CPU/req) and cannot incur overage charges. Public `GET` routes also carry a 30-second anti-cache-bust edge cache.
+- **Cost ceiling:** Keep Flywheel on the Cloudflare Workers Free plan ($0/mo). The free plan enforces hard fail-closed limits (100k req/day, 5M D1 reads/day, 100k D1 writes/day, 10ms CPU/req) and cannot incur overage charges. Public `GET` routes also carry a 30-second anti-cache-bust edge cache.
 
----
+## 2. Reviewing and promoting contributor PRs
 
-## 2. Reviewing & Promoting Contributor PRs
-
-1. Validate the record schema, imports, license allowlist, and involutive `invariance.md`:
+1. Validate the record schema, imports, licence allowlist, and involutive `invariance.md`:
    ```bash
    uv run apin records validate records/<release>/<track>/<date>_<slug>
    ```
@@ -89,11 +85,9 @@ npx wrangler deploy
    uv run apin run logdensity --label cand --opt sampler=records/.../submission.py --models public --reps 5
    uv run apin score --models public --reps 5 --baseline cmdstan --track L1 --submission cand=records/.../submission.py
    ```
-3. Merge the PR and call `POST /api/admin/nodes/<id>/verify` to flip `verified = 1` on Flywheel.
+3. Merge the PR and call `POST /api/admin/nodes/<id>/verify` to set `verified = 1` on Flywheel.
 
----
-
-## 3. Rebuilding References & Calibrated Cost Weights
+## 3. Rebuilding references and calibrated cost weights
 
 ```bash
 export CMDSTAN=/path/to/cmdstan
@@ -102,21 +96,17 @@ uv run apin costs build --models all               # re-measure r_grad weights i
 CMDSTAN=/path/to/cmdstan uv run pytest -m slow     # full end-to-end tests on real models
 ```
 
----
-
-## 4. Upstream Submodules & Fork Patch Workflow (Lanes S1 / S2)
+## 4. Upstream submodules and fork patch workflow (lanes S1 and S2)
 
 Submodules are pinned to owner fork branches (`upstream/STATUS.md`). Check out only what you need:
 ```bash
 git submodule update --init upstream/math upstream/stan
 ```
 1. Branch inside `upstream/<name>/` from the upstream base commit (`origin` is your fork).
-2. Follow `upstream/<name>.md` for clean rebuilds (hard ban on mixed ISA/SIMD builds — `W-27`).
-3. Verify via `uv run apin autoresearch eval-s1 ...` or `eval-s2 ...` (finite-difference gradient parity + byte-identical draw canary for the R-008 exact-math waiver).
+2. Follow `upstream/<name>.md` for clean rebuilds (do not mix ISA or SIMD builds; see `W-27`).
+3. Verify with `uv run apin autoresearch eval-s1 ...` or `eval-s2 ...` (finite-difference gradient parity and byte-identical draw canary for the R-008 exact-math waiver).
 4. Record measurements in `results/records/`, push the fork branch (or tag `apin/<name>-<label>` if detached), update the submodule pin and `upstream/STATUS.md`.
-5. Upstream PRs to `stan-dev`, `flatironinstitute`, `pymc-devs`, or `cmdstanr` are always submitted personally by the owner — never by agents.
-
----
+5. Only the owner submits upstream PRs to `stan-dev`, `flatironinstitute`, `pymc-devs` or `cmdstanr`; agents never do.
 
 ## 5. Running a Benchmark Sweep (Harbor, release `bench-v0.2.0`)
 

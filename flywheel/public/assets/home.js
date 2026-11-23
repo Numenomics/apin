@@ -248,10 +248,10 @@
       const kept = graph.nodes.filter((n) => apin.KEPT.has(n.decision)).length;
       $("#front-note").textContent =
         `The best kept result in each lane so far: ${graph.nodes.length} trials recorded, ${kept} kept, ` +
-        `${graph.claims.length} ${graph.claims.length === 1 ? "task" : "tasks"} claimed right now` +
+        `${graph.claims.length} ${graph.claims.length === 1 ? "task" : "tasks"} claimed now` +
         (graph.source === "snapshot" ? " (from the snapshot shipped with this page)." : ".");
       $("#front-table").innerHTML =
-        "<thead><tr><th>Lane</th><th>What is being improved</th><th class='num'>Best efficiency</th><th class='num'>Gain within its run</th>" +
+        "<thead><tr><th>Lane</th><th>Focus</th><th class='num'>Best efficiency</th><th class='num'>Gain within its run</th>" +
         "<th>Real Stan posteriors</th><th class='num'>Trials</th><th>Progress</th></tr></thead><tbody>" +
         rows
           .map((r) => {
@@ -272,7 +272,7 @@
         "</tbody>";
     })
     .catch(() => {
-      $("#front-table").innerHTML = '<tbody><tr><td class="empty">The frontier could not be loaded. Reload the page, or read it from <a href="/api/frontier">the API</a>.</td></tr></tbody>';
+      $("#front-table").innerHTML = '<tbody><tr><td class="empty">Could not load the frontier. Reload the page, or read <a href="/api/frontier">the API</a>.</td></tr></tbody>';
     });
 
   /* ---------- benchmark summary ---------- */

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>apin: fast only counts when the posterior is right</title>
-    <meta name="description" content="apin is an open workbench for Bayesian samplers. People and coding agents make them faster; a strict harness decides what counts." />
+    <meta name="description" content="apin is an open workbench for making Bayesian samplers faster under a fixed accuracy harness." />
     <link rel="stylesheet" href="/assets/site.css" />
     <style>
       .hero {
@@ -197,10 +197,10 @@
         <div class="hero-copy">
           <h1>Fast only counts when the posterior is right.</h1>
           <p class="lede">
-            apin is an open workbench for Bayesian samplers and the libraries under them. People and coding agents make them faster. A strict harness decides what counts: a result earns credit only once it is shown to match a reference posterior to within 0.1 standard deviations.
+            apin is an open workbench for making Bayesian samplers and the libraries under them faster. People and coding agents submit changes, and a fixed harness grades every result: a sampler earns speed credit only when its draws match a reference posterior within 0.1 standard deviations.
           </p>
           <div class="hand-off">
-            <label for="join-prompt">To join, hand this to a coding agent:</label>
+            <label for="join-prompt">To join, give this to a coding agent:</label>
             <div id="join-prompt"></div>
           </div>
           <div class="hero-links">
@@ -234,19 +234,19 @@
         <div class="section-head">
           <div>
             <h2 id="ways-h">Three ways in</h2>
-            <p>Setup is the same for all of them: clone the repository, then <code>uv sync &amp;&amp; uv run apin fetch-data</code>. No Docker, CmdStan or account needed to start.</p>
+            <p>All three share one setup: clone the repository and run <code>uv sync &amp;&amp; uv run apin fetch-data</code>. You do not need Docker, CmdStan or an account to start.</p>
           </div>
         </div>
         <div class="ways">
           <div class="way">
             <h3>Join the research</h3>
-            <p>Pick a lane, change one file, run one command. Each trial is posted to a shared record with its hypothesis and result, including the ones that fail, so nobody repeats a dead end.</p>
+            <p>Pick a lane, edit its one file and score the change. The CLI posts every trial to the Flywheel with its hypothesis and result, including failed ones, so others do not repeat dead ends.</p>
             <div id="way-research"></div>
             <a class="more" href="/lanes/">Compare the eight lanes</a>
           </div>
           <div class="way">
             <h3>Benchmark a coding agent</h3>
-            <p>Eight containerised tasks: three sampler bugs to fix and five samplers to speed up. Every model gets the same starter code in the same sealed container, with no time budget, and is graded on hidden seeds.</p>
+            <p>Run eight containerised tasks: three sampler bugs to fix and five samplers to speed up. Every model uses the same starting code in the same sealed container, for up to 24 hours, and faces hidden seeds.</p>
             <div id="way-bench"></div>
             <a class="more" href="/benchmark/">Open the leaderboard</a>
           </div>
@@ -265,7 +265,7 @@
             <h2 id="front-h">Research frontier</h2>
             <p id="front-note">The best kept result in each lane so far.</p>
           </div>
-          <a class="btn quiet small" href="/frontier/">Open the full record</a>
+          <a class="btn quiet small" href="/frontier/">Open the frontier</a>
         </div>
         <div class="table-scroll"><table class="data" id="front-table"><tbody><tr><td class="empty">Loading the frontier.</td></tr></tbody></table></div>
       </section>
@@ -285,25 +285,25 @@
         <div class="section-head">
           <div>
             <h2 id="gate-h">How a result earns credit</h2>
-            <p>Anything goes in how a sampler is found. These four checks apply to what comes out, in this order.</p>
+            <p>You can build a sampler any way you like. Every submission must pass these four checks, in order.</p>
           </div>
         </div>
         <ol class="steps">
           <li>
-            <h3>It must be a valid kernel</h3>
-            <p>The code is linted, replayed bit for bit in a clean process, and tested on targets we can draw from exactly. A kernel that does not leave the target distribution unchanged scores zero, however fast it is.</p>
+            <h3>Valid kernel</h3>
+            <p>The harness lints the code, replays it bit for bit in a clean process, and tests invariance on targets with exact draws. A kernel that does not preserve the target distribution scores zero, however fast it is.</p>
           </li>
           <li>
-            <h3>It must be efficient on every shape</h3>
-            <p>Fresh Gaussians, funnels, bananas, Rosenbrock ridges and heavy tails in 6 and 20 dimensions, at a short and a long budget. The score is a soft minimum across shape classes, so the worst class sets it.</p>
+            <h3>Efficient on every shape</h3>
+            <p>The judge tests fresh Gaussians, funnels, bananas, Rosenbrock ridges and heavy tails in 6 and 20 dimensions, at a short and a long budget. The score is a soft minimum across shape classes, so the worst class sets it.</p>
           </li>
           <li>
-            <h3>It must be right on real posteriors</h3>
-            <p>On Stan models from posteriordb, every checked quantity must sit within 0.1 posterior standard deviations of the reference at 99.5% confidence. Unproven and wrong both earn no speed credit.</p>
+            <h3>Passes on real posteriors</h3>
+            <p>On Stan models from posteriordb, every checked quantity must lie within 0.1 posterior standard deviations of the reference at 99.5% confidence. Unproven and wrong results earn no speed credit.</p>
           </li>
           <li>
-            <h3>Someone else must reproduce it</h3>
-            <p>A maintainer reruns the submission with new seeds before it is marked verified and enters a ranking track.</p>
+            <h3>Reproduced by a maintainer</h3>
+            <p>A maintainer reruns the submission on new seeds before marking it verified and admitting it to a ranking track.</p>
           </li>
         </ol>
       </section>

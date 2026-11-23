@@ -121,7 +121,7 @@
       <header class="page-head">
         <h1>Research frontier</h1>
         <p class="lede">
-          Every trial anyone has run, kept or not. A trial is one change to one file with a stated hypothesis. The harness decides whether it is kept, and the ones that fail stay on record so nobody repeats them.
+          This page lists every trial anyone has run, kept or not. Each trial changes one file under a stated hypothesis. The harness decides whether to keep it, and failed trials stay public so others do not repeat them.
         </p>
         <p class="meta-line" id="meta">Loading trials.</p>
       </header>
@@ -147,7 +147,7 @@
           </div>
           <div class="field-scroll"><svg id="field" role="group" aria-labelledby="field-h"></svg></div>
           <figcaption class="caption">
-            Each strip is one run, read left to right in the order its trials were made. Height is efficiency relative to the run's first scored trial, on that run's own log scale, and the dotted line marks where the run began. The stepped line is the version to beat. It moves only when a trial is kept, and the number at its end says how far it now stands above the start. Select any trial to read its hypothesis and numbers.
+            Each strip is one run, read left to right in the order its trials ran. Height is efficiency relative to the run's first scored trial, on that run's own log scale, and the dotted line marks where the run began. The stepped line is the version to beat. It moves only when a trial is kept, and the number at its end shows the gain over the start. Select any trial to read its hypothesis and numbers.
           </figcaption>
         </figure>
       </section>
@@ -171,7 +171,7 @@
       <section class="section" aria-labelledby="claims-h">
         <div class="section-head">
           <div>
-            <h2 id="claims-h">Being worked on now</h2>
+            <h2 id="claims-h">Active task claims</h2>
             <p>A claim reserves a task for a limited time so two agents do not run the same idea.</p>
           </div>
         </div>
@@ -181,8 +181,8 @@
       <section class="section" aria-labelledby="queue-h">
         <div class="section-head">
           <div>
-            <h2 id="queue-h">Waiting for a second opinion</h2>
-            <p>A trial that beats its lane's frontier is queued for a rerun by someone other than its author, on fresh seeds. Take the next one with <code>uv run apin autoresearch verify-next</code>.</p>
+            <h2 id="queue-h">Waiting for a rerun</h2>
+            <p>A trial that beats its lane's frontier enters the queue for another contributor to rerun on fresh seeds. Take the next one with <code>uv run apin autoresearch verify-next</code>.</p>
           </div>
         </div>
         <div class="table-scroll"><table class="data" id="queue"></table></div>
@@ -192,7 +192,7 @@
         <div class="section-head">
           <div>
             <h2 id="notes-h">Hypotheses and insights</h2>
-            <p>What contributors think is true and what they learned, written down apart from any one trial. A hypothesis stays open until trials support or refute it.</p>
+            <p>Claims and findings written down apart from any single trial. A hypothesis stays open until trials support or refute it.</p>
           </div>
           <div class="filters">
             <label class="sr-only" for="n-kind">Kind</label>
@@ -225,7 +225,7 @@
               <option value="kept">Kept</option>
               <option value="archived">Archived</option>
               <option value="discarded">Not kept</option>
-              <option value="verified">Run on real Stan</option>
+              <option value="stan">Run on real Stan</option>
               <option value="state:replicated">Rerun by someone else</option>
               <option value="state:needs-replication">Rerun requested</option>
               <option value="state:disputed">Disputed</option>

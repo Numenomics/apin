@@ -24,8 +24,8 @@
       name: "Ground-up sampler",
       kind: "algorithm",
       edits: "adapt() and transition(), starting from a 43-line random-walk Metropolis stub",
-      fixed: "Nothing is given: no HMC, no NUTS, no mass matrix",
-      goal: "Build an adjusted sampler from nothing that passes the checks and keeps improving.",
+      fixed: "Nothing is provided: no HMC, NUTS or mass matrix",
+      goal: "Build an adjusted sampler from scratch that passes the checks and improves efficiency.",
       start: 'uv run apin autoresearch eval --lane A0 --run-id <handle>_a0 \\\n  --dims 6,20 --repeats 2 \\\n  --hypothesis "baseline: unmodified local incumbent"',
     },
     {
@@ -41,18 +41,18 @@
       id: "A2",
       name: "Funnels and multiscale dynamics",
       kind: "algorithm",
-      edits: "adapt() and transition(), with the focus on local step size, multiscale moves and delayed rejection",
+      edits: "adapt() and transition(), focusing on local step size, multiscale moves and delayed rejection",
       fixed: "The judge and its target shapes",
-      goal: "Survive funnels, bananas and Rosenbrock ridges without slowing down on rotated Gaussians.",
+      goal: "Handle funnels, bananas and Rosenbrock ridges without slowing down on rotated Gaussians.",
       start: 'uv run apin autoresearch eval --lane A2 --run-id <handle>_a2 \\\n  --dims 6,20 --repeats 2 \\\n  --hypothesis "baseline: unmodified local incumbent"',
     },
     {
       id: "A3",
       name: "Integrators, momentum and trajectories",
       kind: "algorithm",
-      edits: "adapt() and transition(), with the focus on the integrator, momentum refreshment and when a trajectory ends",
+      edits: "adapt() and transition(), focusing on the integrator, momentum refreshment and when a trajectory ends",
       fixed: "The judge and its target shapes",
-      goal: "Get more accuracy per gradient from the dynamics themselves, including non-reversible kernels and PDMPs.",
+      goal: "Get more accuracy per gradient from the dynamics, including non-reversible kernels and PDMPs.",
       start: 'uv run apin autoresearch eval --lane A3 --run-id <handle>_a3 \\\n  --dims 6,20 --repeats 2 \\\n  --hypothesis "baseline: unmodified local incumbent"',
     },
     {
@@ -103,14 +103,14 @@
     { id: "S2", name: "Upstream patches", ranks: "Wall-clock gain of an autodiff or compiler patch with byte-identical draws", cmd: 'uv run apin autoresearch eval-s2 --upstream math --allowed-path stan/math/rev/ --run-id <handle>_s2 --hypothesis "..."' },
   ];
 
-  const KEPT = new Set(["keep", "keep_baseline", "keep_simpler"]);
+  const KEPT = new Set(["keep", "keep_baseline", "keep_simpler", "keep_incumbent_failed"]);
 
   /* glyph: "keep" (on the kept line), "open" (scored, not kept), "tick" (never scored). */
   const DECISIONS = {
     keep: { label: "kept", glyph: "keep", note: "Passed every check and beat the incumbent" },
     keep_baseline: { label: "baseline", glyph: "keep", note: "First passing trial of a run; later trials are compared to it" },
     keep_simpler: { label: "kept, simpler", glyph: "keep", note: "Tied the incumbent with less code" },
-    keep_incumbent_failed: { label: "kept, unpaired", glyph: "keep", note: "Passed while the paired incumbent failed; not a proven gain" },
+    keep_incumbent_failed: { label: "kept, unpaired", glyph: "keep", note: "Passed while the paired incumbent failed; gain not yet confirmed" },
     archive_only: { label: "archived", glyph: "open", note: "Passed, did not beat the incumbent, best in its niche" },
     discard_no_gain: { label: "no gain", glyph: "open", note: "Passed but did not beat the incumbent" },
     discard_tier0: { label: "failed checks", glyph: "tick", note: "Failed lint, replay or the invariance smoke test" },
@@ -232,7 +232,7 @@
     const open = `<svg viewBox="-8 -8 16 16" width="${s}" height="${s}" aria-hidden="true">`;
     if (kind === "open") return `${open}<circle r="3.4" fill="none" stroke="${c}" stroke-width="1.4"/></svg>`;
     if (kind === "tick") return `${open}<path d="M0-4.5V4.5" stroke="${c}" stroke-width="1.6" stroke-linecap="round"/></svg>`;
-    if (kind === "verified") return `${open}<circle r="6.2" fill="none" stroke="${c}" stroke-width="1.1"/><circle r="3" fill="${c}"/></svg>`;
+    if (kind === "stan") return `${open}<circle r="6.2" fill="none" stroke="${c}" stroke-width="1.1"/><circle r="3" fill="${c}"/></svg>`;
     if (kind === "line") return `${open}<path d="M-7 3H-1V-3H7" fill="none" stroke="${c}" stroke-width="1.5"/></svg>`;
     return `${open}<circle r="3.6" fill="${c}"/></svg>`;
   }
@@ -359,7 +359,7 @@
   /* The research graph: live from the Flywheel API, or the snapshot shipped with the site. */
   /* What has happened to a trial since it was posted. */
   const STATES = {
-    unverified: { label: "not rerun yet", tone: "mute", note: "Nobody but its author has run this trial." },
+    unverified: { label: "not rerun yet", tone: "mute", note: "Only its author has run this trial." },
     "needs-replication": { label: "rerun requested", tone: "warn", note: "A contributor asked for an independent rerun." },
     replicated: { label: "rerun by someone else", tone: "good", note: "An independent rerun on fresh seeds reached the claimed efficiency." },
     verified: { label: "verified by a maintainer", tone: "good", note: "A maintainer reproduced it." },
@@ -659,7 +659,7 @@
     const foot = document.createElement("footer");
     foot.className = "site-foot";
     foot.innerHTML =
-      '<div class="wrap"><span>apin is BSD-3-Clause. Results here passed the stated checks at the stated budget; that is the whole claim.</span>' +
+      '<div class="wrap"><span>apin is BSD-3-Clause. Results show only that a sampler passed the stated checks at the stated budget.</span>' +
       `<nav aria-label="Project links"><a href="${REPO}">Repository</a><a href="${REPO}/blob/main/CONTRIBUTING.md">Contribute</a>` +
       `<a href="${REPO}/blob/main/BENCH.md">Scoring rules</a><a href="/api/frontier">Frontier API</a></nav></div>`;
     document.body.append(foot);

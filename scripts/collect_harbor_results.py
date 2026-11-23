@@ -631,16 +631,19 @@ def _flatten_trials(data: dict[str, Any]) -> list[dict[str, Any]]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Collect Harbor benchmark results into the site's benchmark data file")
     ap.add_argument("--jobs", type=Path, action="append", default=[], help="Harbor jobs directory to scan (repeatable)")
-    ap.add_argument("--input-json", type=Path, help="Existing data file whose attempts are kept; attempts found under --jobs are added to them")
+    ap.add_argument("--input-json", type=Path, help="Data file whose attempts are kept (default: the output file, if it exists)")
+    ap.add_argument("--fresh", action="store_true", help="Start from nothing instead of adding to the existing data file")
     ap.add_argument("--pricing", type=Path, default=DEFAULT_PRICING)
     ap.add_argument("--release", default=DEFAULT_RELEASE, help="Release tag for job directories whose name does not start with one")
     ap.add_argument("--out-json", type=Path, default=DEFAULT_OUT_JSON)
     args = ap.parse_args(argv)
 
     pricing = json.loads(args.pricing.read_text(encoding="utf-8")) if args.pricing.is_file() else {"models": {}}
+    # Attempts already published are kept: a sweep adds to the record, it does not replace it.
+    prior = None if args.fresh else (args.input_json or args.out_json)
     trials: dict[str, dict[str, Any]] = {}
-    if args.input_json and args.input_json.is_file():
-        for t in _flatten_trials(json.loads(args.input_json.read_text(encoding="utf-8"))):
+    if prior and prior.is_file():
+        for t in _flatten_trials(json.loads(prior.read_text(encoding="utf-8"))):
             trials[f"{t.get('release')}/{t['trial_id']}"] = t
     if args.jobs or not trials:
         for t in scan_jobs(args.jobs or [ROOT / "jobs"], pricing, release_tag=args.release):
