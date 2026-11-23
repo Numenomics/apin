@@ -16,6 +16,7 @@
     ledger: { nodes: [], next: null, count: 0, seq: 0 },
     notes: null,
     queue: null,
+    improve: { all: [], kept: new Map(), lane: "", loading: false, capped: false, failed: false, expanded: false }, // every kept trial that beat its incumbent, oldest first
     selected: null,
     redraw: [],
   };
@@ -219,6 +220,218 @@
     $("#field-legend").innerHTML =
       `<span>${glyph("line", c)}version to beat</span><span>${glyph("keep", c)}kept</span><span>${glyph("open", "var(--ink-3)")}scored, not kept</span>` +
       `<span>${glyph("tick", "var(--ink-3)")}failed a check</span><span>${glyph("stan", c)}also run on real Stan</span>`;
+  }
+
+  /* ---------- breakthroughs ----------
+     An improvement is a kept trial that beat the version it replaced, measured on the same seeds.
+     That paired gain is comparable across lanes and runs, unlike raw efficiency. Two views:
+       all lanes  every improvement as a dot in time order, at the height of its own gain
+       one lane   each run as a staircase: its best measured efficiency so far, relative to the
+                  run's baseline. Paired gains are not multiplied up: each one is selected for
+                  being large, so their product overstates the run (37x where 3.3x was measured).
+     The largest steps carry a note; the table under the chart lists every improvement. */
+
+  const improvementsIn = (lane) => (lane ? state.improve.all.filter((n) => n.lane === lane) : state.improve.all);
+
+  /* Every improvement gets `best`: the run's best measured efficiency up to and including it,
+     relative to the run's baseline. Both come from every scored kept trial of the run, not only
+     the improvements: the baseline is the earliest one, and a later "kept, simpler" trial can
+     raise the best. `runBest` is the run's best over all of them. */
+  function withRunBest(list) {
+    const cursor = new Map();
+    return list.map((n) => {
+      const key = n.lane + "/" + n.run_id;
+      const kept = state.improve.kept.get(key) || [];
+      const base = kept.length ? kept[0].eff : n.soft_min_eff / n.ratio_vs_incumbent;
+      const c = cursor.get(key) || { i: 0, top: 0 };
+      /* Up to this trial in ledger order (time, then id), so trials sharing a timestamp stay in sequence. */
+      while (c.i < kept.length && (kept[c.i].at < n.created_at || (kept[c.i].at === n.created_at && kept[c.i].id <= n.id))) c.top = Math.max(c.top, kept[c.i++].eff);
+      cursor.set(key, c);
+      const runTop = kept.reduce((m, k) => Math.max(m, k.eff), 0);
+      return { ...n, best: base > 0 ? Math.max(c.top, n.soft_min_eff || 0) / base : 1, runBest: base > 0 && runTop > 0 ? runTop / base : null };
+    });
+  }
+
+  function renderBreak(width) {
+    const el = $("#break");
+    el.innerHTML = "";
+    const W = width;
+    const narrow = W < 640;
+    const H = narrow ? 400 : 430;
+    el.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    el.setAttribute("height", H);
+    const lane = state.improve.lane;
+    const pts = withRunBest(improvementsIn(lane));
+    if (!pts.length) {
+      el.appendChild(svg("text", { x: 0, y: H / 2 }, state.improve.loading ? "Loading improvements." : "No kept trial has beaten its incumbent here yet."));
+      return;
+    }
+    const value = (n) => (lane ? n.best : n.ratio_vs_incumbent);
+    const pad = { l: 40, r: 14, t: 166, b: 34 };
+    const top = Math.max(2, ...pts.map(value), ...(lane ? pts.map((n) => n.runBest || 0) : [])) * 1.08;
+    const sx = (i) => (pts.length === 1 ? (pad.l + W - pad.r) / 2 : pad.l + 8 + (i / (pts.length - 1)) * (W - pad.l - pad.r - 16));
+    const sy = (v) => H - pad.b - (Math.log(Math.max(v, 1)) / Math.log(top)) * (H - pad.t - pad.b);
+    for (const v of [1, 1.5, 2, 3, 5, 10, 20, 50, 100].filter((t) => t <= top)) {
+      el.appendChild(svg("line", { class: v === 1 ? "axis" : "grid", x1: pad.l, x2: W - pad.r, y1: sy(v), y2: sy(v) }));
+      el.appendChild(svg("text", { x: pad.l - 8, y: sy(v) + 4, "text-anchor": "end" }, v + "×"));
+    }
+    el.appendChild(svg("text", { class: "axis-title", x: pad.l, y: H - 8 }, `Oldest to newest, ${fmt.day(pts[0].created_at)} to ${fmt.day(pts[pts.length - 1].created_at)}`));
+
+    /* One lane: a staircase per run. The run that holds the lane's frontier is drawn in full
+       colour, the others lighter. Each staircase starts at 1x just before its first step. */
+    if (lane) {
+      const color = apin.laneColor(lane);
+      const frontierRun = ((state.rows.find((r) => r.lane.id === lane) || {}).top || {}).run_id;
+      const runs = new Map();
+      pts.forEach((n, i) => (runs.has(n.run_id) ? runs.get(n.run_id).push(i) : runs.set(n.run_id, [i])));
+      for (const [runId, idxs] of runs) {
+        let d = `M${Math.max(pad.l, sx(idxs[0]) - 14).toFixed(1)} ${sy(1).toFixed(1)}`;
+        for (const i of idxs) d += `H${sx(i).toFixed(1)}V${sy(pts[i].best).toFixed(1)}`;
+        const main = runId === frontierRun || runs.size === 1;
+        el.appendChild(svg("path", { d, fill: "none", stroke: color, "stroke-width": main ? 1.75 : 1, opacity: main ? 1 : 0.45, "stroke-linejoin": "round" }));
+        const last = idxs[idxs.length - 1];
+        /* A kept trial after the last improvement can still raise the run's best: step up to it. */
+        const end = Math.max(pts[last].best, pts[last].runBest || 0);
+        if (end > pts[last].best) {
+          const ex = Math.min(sx(last) + 10, W - pad.r);
+          el.appendChild(svg("path", { d: `M${sx(last).toFixed(1)} ${sy(pts[last].best).toFixed(1)}H${ex.toFixed(1)}V${sy(end).toFixed(1)}`, fill: "none", stroke: color, "stroke-width": main ? 1.75 : 1, opacity: main ? 1 : 0.45 }));
+        }
+        const atEdge = sx(last) + 8 > W - 150;
+        el.appendChild(svg("text", { class: "run-end", x: atEdge ? sx(last) - 6 : sx(last) + 8, y: sy(end) + (atEdge ? -9 : 4), "text-anchor": atEdge ? "end" : "start" }, `${clip(runId, 22)} ${fmt.times(end)}`));
+      }
+    }
+
+    /* Notes for the largest steps, as many as three rows hold. In each row a note starts at its
+       dot unless the note before it is in the way, and a row that runs off the right edge is
+       pushed back from its last note. */
+    const noteW = narrow ? Math.min(210, W - pad.l - pad.r) : 236;
+    const gap = 16;
+    const capacity = 3 * Math.max(1, Math.floor((W - pad.l - pad.r + gap) / (noteW + gap)));
+    const noted = [...pts.keys()].sort((a, b) => pts[b].ratio_vs_incumbent - pts[a].ratio_vs_incumbent).slice(0, capacity).sort((a, b) => a - b);
+    const chars = Math.floor(noteW / 6.7);
+    const leaders = svg("g", { fill: "none", stroke: "var(--rule-2)", "stroke-dasharray": "1 3", "stroke-linecap": "round" });
+    const notes = svg("g");
+    const rowsOf = [[], [], []];
+    noted.forEach((idx, k) => rowsOf[k % 3].push({ idx, tx: Math.max(pad.l, sx(idx) - 24) }));
+    for (const row of rowsOf) {
+      row.forEach((c, i) => (c.tx = i ? Math.max(c.tx, row[i - 1].tx + noteW + gap) : c.tx));
+      for (let i = row.length - 1; i >= 0; i -= 1) {
+        const limit = i === row.length - 1 ? W - pad.r - noteW : row[i + 1].tx - noteW - gap;
+        row[i].tx = Math.max(pad.l, Math.min(row[i].tx, limit));
+      }
+    }
+    rowsOf.forEach((row, r) =>
+      row.forEach(({ idx, tx }) => {
+        const n = pts[idx];
+        const px = sx(idx);
+        const py = sy(value(n));
+        const ty = 14 + (2 - r) * 48;
+        leaders.appendChild(svg("path", { d: `M${Math.max(tx + 4, Math.min(px, tx + noteW - 4)).toFixed(1)} ${ty + 36}L${px.toFixed(1)} ${(py - 7).toFixed(1)}` }));
+        const g = svg("g", { class: "note-call", "data-node": n.id, tabindex: 0, role: "button", "aria-label": `${n.lane} ${fmt.times(n.ratio_vs_incumbent)} over its incumbent: ${clip(headline(n), 90)}` });
+        const head = svg("text", { class: "call-gain", x: tx, y: ty });
+        head.appendChild(svg("tspan", { fill: apin.laneColor(n.lane) }, n.lane));
+        head.appendChild(svg("tspan", { dx: 6 }, fmt.times(n.ratio_vs_incumbent) + " its incumbent"));
+        g.appendChild(head);
+        g.appendChild(svg("text", { class: "call-what", x: tx, y: ty + 16 }, clip(headline(n), chars)));
+        const who = [...new Set([n.author, n.agent_model].filter(Boolean))].join(" · ") || "unknown";
+        g.appendChild(svg("text", { class: "call-who", x: tx, y: ty + 31 }, clip(`${who}, ${fmt.day(n.created_at)}`, chars)));
+        notes.appendChild(g);
+      })
+    );
+    el.append(leaders);
+
+    pts.forEach((n, i) => {
+      const node = svg("g", { class: "node", transform: `translate(${sx(i).toFixed(1)},${sy(value(n)).toFixed(1)})`, tabindex: 0, role: "button", "data-node": n.id, "aria-label": `${n.lane} ${n.trial_id || ""}: ${fmt.times(n.ratio_vs_incumbent)} over its incumbent` });
+      node.appendChild(svg("circle", { r: 10, fill: "transparent" }));
+      node.appendChild(svg("circle", { r: noted.includes(i) ? 4.2 : 3, fill: apin.laneColor(n.lane), stroke: "var(--paper)", "stroke-width": 1 }));
+      node.appendChild(svg("circle", { class: "pick", r: 7.5 }));
+      tip.bind(
+        node,
+        () =>
+          `<b>${esc(n.lane)} ${esc(n.trial_id || "")}</b> · ${fmt.times(n.ratio_vs_incumbent)} its incumbent<br>${esc(clip(headline(n), 150))}<br>` +
+          `<span class="k">Run's best so far</span> ${fmt.times(n.best)} its baseline · <span class="k">by</span> ${esc(n.author || n.agent_model || "unknown")} · ${esc(fmt.day(n.created_at))}`
+      );
+      el.appendChild(node);
+    });
+    el.append(notes);
+  }
+
+  /* The lane tabs, the count, the caption and the table of every improvement. */
+  function renderBreakChrome() {
+    const all = state.improve.all;
+    const lane = state.improve.lane;
+    const lanes = apin.LANES.filter((l) => all.some((n) => n.lane === l.id));
+    $("#break-tabs").innerHTML =
+      `<button type="button" data-break-lane="" aria-pressed="${!lane}">All lanes</button>` +
+      lanes.map((l) => `<button type="button" data-break-lane="${l.id}" aria-pressed="${lane === l.id}" title="${esc(l.name)}">${l.id}</button>`).join("");
+    const shown = withRunBest(improvementsIn(lane));
+    $("#break-count").textContent =
+      (state.improve.loading ? "Loading. " : "") +
+      `${shown.length} ${shown.length === 1 ? "improvement" : "improvements"}${lane ? ` in ${lane} ${apin.laneName(lane)}` : ` in ${lanes.length} ${lanes.length === 1 ? "lane" : "lanes"}`}` +
+      (state.improve.capped ? ", from the newest kept trials only" : "") +
+      "." +
+      (state.improve.failed ? " Some could not be loaded, so this is partial. Use Reload to try again." : "");
+    $("#break-caption").textContent = lane
+      ? "Each line is one run, and each dot on it is a kept trial that beat the version before it. The line shows the run's best measured efficiency so far, as a multiple of the run's baseline, so it steps up only when an improvement sets a new best. The full-colour line is the run that holds the lane's frontier. The largest gains say what was tried and who tried it."
+      : "Each dot is a kept trial that beat the version it replaced, in time order. Height is how much faster it was on the same seeds, on a log scale. The largest gains say what was tried and who tried it. Pick a lane to see how its runs climbed step by step.";
+
+    const rows = [...shown].reverse();
+    const visible = state.improve.expanded ? rows : rows.slice(0, 8);
+    $("#break-list").innerHTML = rows.length
+      ? "<thead><tr><th>When</th><th>Lane</th><th class='num'>Gain over incumbent</th><th class='num'>Run's best so far</th><th>What was tried</th><th>By</th></tr></thead><tbody>" +
+        visible
+          .map(
+            (n) =>
+              `<tr class="clickable" data-node="${esc(n.id)}" tabindex="0"><td class="num">${esc(fmt.day(n.created_at))}</td><td>${apin.laneTag(n.lane)}</td>` +
+              `<td class="num">${fmt.times(n.ratio_vs_incumbent)}</td><td class="num">${fmt.times(n.best)}</td>` +
+              `<td class="wrap-cell">${esc(clip(headline(n), 150))}</td><td>${byline(n)}</td></tr>`
+          )
+          .join("") +
+        "</tbody>"
+      : "";
+    const more = $("#break-more");
+    more.hidden = rows.length <= 8;
+    more.textContent = state.improve.expanded ? "Show the newest 8" : `Show all ${rows.length} improvements`;
+  }
+
+  /* Improvements are a small share of all trials, so the page reads every kept trial, a bounded
+     page at a time, and draws as the pages arrive. Early steps are never dropped by a newer one. */
+  const IMPROVE_PAGE = 100;
+  const IMPROVE_PAGES = 60;
+
+  async function loadImprovements() {
+    const seq = (state.improve.seq = (state.improve.seq || 0) + 1);
+    Object.assign(state.improve, { all: [], kept: new Map(), loading: true, capped: false, failed: false });
+    const seen = new Set(); // a trial posted between two requests shifts a row onto the next page
+    let offset = 0;
+    for (let page = 0; page < IMPROVE_PAGES && offset !== null; page += 1) {
+      let res;
+      try {
+        res = await state.store.trials({ outcome: "kept", limit: IMPROVE_PAGE, offset });
+      } catch {
+        if (seq !== state.improve.seq) return;
+        state.improve.failed = true;
+        break;
+      }
+      if (seq !== state.improve.seq) return; // a reload replaced this pass
+      const fresh = res.nodes.filter((n) => !seen.has(n.id) && seen.add(n.id));
+      /* Pages arrive newest first, so each run's list is built back to front. */
+      for (const n of fresh) {
+        if (!isNum(n.soft_min_eff) || !(n.soft_min_eff > 0)) continue;
+        const key = n.lane + "/" + n.run_id;
+        if (!state.improve.kept.has(key)) state.improve.kept.set(key, []);
+        state.improve.kept.get(key).unshift({ eff: n.soft_min_eff, at: n.created_at, id: n.id });
+      }
+      const found = fresh.filter((n) => n.decision === "keep" && isNum(n.ratio_vs_incumbent) && n.ratio_vs_incumbent > 1);
+      state.improve.all = found.reverse().concat(state.improve.all);
+      offset = res.next_offset;
+      state.improve.capped = offset !== null && page === IMPROVE_PAGES - 1;
+      renderBreakChrome();
+      if (state.redrawBreak) state.redrawBreak();
+    }
+    state.improve.loading = false;
+    renderBreakChrome();
+    if (state.redrawBreak) state.redrawBreak();
   }
 
   /* ---------- gain chart ---------- */
@@ -610,10 +823,12 @@
       renderNotes();
       renderFieldMore();
       loadLedger(false);
+      loadImprovements();
       if (state.redraw.length) state.redraw.forEach((fn) => fn());
       else {
         state.redraw = [
           apin.watchWidth($(".field-scroll"), renderField),
+          (state.redrawBreak = apin.watchWidth($("#break-box"), renderBreak)),
           apin.watchWidth($("#gain-box"), renderGain),
           apin.watchWidth($("#align-box"), renderAlign),
         ];
@@ -638,6 +853,18 @@
   });
   $("#ledger-more").addEventListener("click", () => loadLedger(true));
   $("#field-more").addEventListener("click", moreRuns);
+  $("#break-tabs").addEventListener("click", (e) => {
+    const tab = e.target.closest("[data-break-lane]");
+    if (!tab) return;
+    state.improve.lane = tab.getAttribute("data-break-lane");
+    state.improve.expanded = false;
+    renderBreakChrome();
+    state.redrawBreak();
+  });
+  $("#break-more").addEventListener("click", () => {
+    state.improve.expanded = !state.improve.expanded;
+    renderBreakChrome();
+  });
   ["#n-kind", "#n-lane"].forEach((id) => $(id).addEventListener("change", renderNotes));
   apin.onTheme(() => state.redraw.forEach((fn) => fn()));
   load();
