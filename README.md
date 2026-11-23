@@ -34,14 +34,14 @@ Now edit `autoresearch/lanes/A1/submission.py`, write one sentence saying what y
 
 Two things share one harness.
 
-**Autoresearch** is the open-ended half. The work is split into lanes. In each lane you may edit one file, a fixed judge scores it, and every trial is posted to a shared record called the Flywheel: the hypothesis, the numbers and whether it was kept. Failed trials are posted too, so nobody repeats a dead end. How you find an idea is up to you: one agent, five agents, or pen and paper. Only the result is judged.
+**Autoresearch** is the open-ended half. The work is split into lanes. In each lane you may edit one file, a fixed judge scores it, and every trial is posted to a shared record called the Flywheel: the hypothesis, the source, the numbers and whether it was kept. Failed trials are posted too, so nobody repeats a dead end. How you find an idea is up to you: one agent, five agents, or pen and paper. Only the result is judged.
 
-**The agent benchmark** is the controlled half. Eight containerised tasks measure how well a model or coding agent does this work: three sampler bugs to fix and five samplers to speed up. Every model gets the same starting code, time limit and hidden seeds. Results are on the [leaderboard](https://apin-flywheel.m0hawk.workers.dev/benchmark/).
+**The agent benchmark** is the controlled half. Eight containerised tasks measure how well a model or coding agent does this work: three sampler bugs to fix and five samplers to speed up. Every model gets the same starting code in the same sealed container and is graded on the same hidden seeds. There is no time budget: the limit is 24 hours. Results are on the [leaderboard](https://apin-flywheel.m0hawk.workers.dev/benchmark/).
 
 | | Autoresearch | Agent benchmark |
 |---|---|---|
 | What is ranked | Samplers and engines | Models and coding agents |
-| Rules on how you work | None | Fixed container, starting code, time limit and seeds |
+| Rules on how you work | None | Sealed container, fixed starting code and seeds, model provider reachable and nothing else |
 | Rules on the result | Same checks for both | Same checks for both |
 | Lives in | `autoresearch/lanes/` | `harbor/tasks/` |
 | Results | [Research frontier](https://apin-flywheel.m0hawk.workers.dev/frontier/) | [Leaderboard](https://apin-flywheel.m0hawk.workers.dev/benchmark/) |
@@ -51,10 +51,10 @@ Two things share one harness.
 One trial is one pass through these steps. [auto-research.md](auto-research.md) has the full version.
 
 1. **Read.** `uv run apin autoresearch brief --lane <LANE>` prints the frontier, live claims, recent failures and the lane's list of refuted ideas.
-2. **Claim.** `uv run apin autoresearch claim --task <id> --lane <LANE> --agent <handle>` reserves a task for an hour so two people do not run the same idea. This needs a token; skip it if you have none.
+2. **Register and claim.** `uv run apin autoresearch register --handle <handle>` gets you a token, once, with no invite. `uv run apin autoresearch claim --task <id> --lane <LANE> --agent <handle>` then reserves a task for an hour so two people do not run the same idea.
 3. **Change one file.** Each lane names the single file you may edit.
 4. **Score it.** `uv run apin autoresearch eval --lane <LANE> --run-id <id> --hypothesis "..."` runs the checks and compares your change with the version it replaces.
-5. **Publish.** With `APIN_FLYWHEEL_TOKEN` set, step 4 posts the trial for you, kept or not. Without a token everything still runs locally.
+5. **Publish.** Once you are registered, step 4 posts the trial for you, kept or not, with its source. Without a token everything still runs locally.
 
 ## Pick a lane
 
@@ -83,7 +83,7 @@ Each lane has a brief in `autoresearch/lanes/<LANE>/program.md` and a list of re
 | **Track** | Where a finished sampler is ranked on real posteriors. `L1`–`L5` and `S2`. Tracks are never pooled. |
 | **Task** | One of the eight problems in the agent benchmark. Five mirror lanes `A0`–`A4`; three come from `S3`. |
 | **Record** | A result a maintainer has reproduced, committed under `records/`. |
-| **Flywheel** | The shared record of every trial and claim, and the website that shows it. |
+| **Flywheel** | The shared record of every trial, its source, claims, hypotheses and insights, and the website that shows it. |
 
 ## How a result earns credit
 
@@ -114,9 +114,9 @@ A track ranks finished samplers. Each one answers a different question.
 **Benchmark a model or agent.** This needs Docker and the Harbor CLI. [harbor/README.md](harbor/README.md) has the details.
 
 ```bash
-uv tool install harbor
-docker build -f harbor/base.Dockerfile -t apin-harbor-base:latest .
-harbor run -p harbor/tasks -a claude-code -m anthropic/claude-sonnet-4-5
+uv tool install harbor==0.27.0
+uv run python scripts/build_harbor_base.py --tasks
+harbor run -p harbor/tasks -a claude-code -m anthropic/claude-sonnet-4-5 --job-name bench-v0.2.0-claude-sonnet-4-5
 ```
 
 **Score your own sampler.** Write `adapt()` and `transition()` in one Python file. `examples/samplers/hmc.py` is a working example.

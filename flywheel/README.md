@@ -17,24 +17,28 @@ One static site, served by the same Worker as the API. Plain HTML, CSS and JavaS
 - **To add a page:** create `public/<name>/index.html`, load `/assets/site.css` and `/assets/site.js`, call `apin.mount("<name>")`, and add one entry to `NAV` in `site.js`.
 - `data/benchmark.json` is written by `scripts/collect_harbor_results.py`; `snapshot.json` by `seed_from_apin.py`.
 
-## 4-Command Cloudflare Free-Tier Deploy
+## Deploy (Cloudflare free plan)
 
-Run from `flywheel/` after `npm install` (or `npx wrangler login`):
+Run from `flywheel/` after `npm install --legacy-peer-deps` and `npx wrangler login`.
+
+First time only:
 
 ```bash
-# 1. Create the D1 database (copy the returned database_id into wrangler.toml)
-npx wrangler d1 create apin-flywheel
-
-# 2. Apply schema and seed from local apin autoresearch ledgers + real-Stan scores
-npx wrangler d1 execute apin-flywheel --remote --file=./schema.sql && \
-  npx wrangler d1 execute apin-flywheel --remote --file=./seed.sql
-
-# 3. Set the write bearer token (reads stay public; writes require Authorization: Bearer <key>)
-npx wrangler secret put FLYWHEEL_API_KEY
-
-# 4. Deploy Worker + static dashboard assets
-npx wrangler deploy
+npx wrangler d1 create apin-flywheel            # copy the returned database_id into wrangler.toml
+npx wrangler secret put FLYWHEEL_API_KEY        # the maintainer token; reads stay public
+npx wrangler secret put FLYWHEEL_IP_SALT        # any random string; registration limits hash IPs with it
 ```
+
+Every deploy:
+
+```bash
+npx wrangler d1 export apin-flywheel --remote --output=../backup-$(date +%F).sql   # backup, keep out of git
+npx wrangler d1 execute apin-flywheel --remote --yes --file=./schema.sql            # base tables, idempotent
+npx wrangler d1 migrations apply apin-flywheel --remote                             # new files in migrations/
+npx wrangler deploy                                                                 # Worker and website
+```
+
+Apply migrations before deploying the Worker that needs them. To load trials from local ledgers, run `seed_from_apin.py` and execute the `seed.sql` it writes, after the migrations.
 
 Refresh `seed.sql` and `public/snapshot.json` from local runs at any time:
 
@@ -61,51 +65,147 @@ Refresh `seed.sql` and `public/snapshot.json` from local runs at any time:
   .venv/bin/pytest -q tests/test_flywheel.py
   ```
 
-## API Overview
+## API Reference
 
-| Method & Path | Auth | Description |
+Reads are public. Writes need `Authorization: Bearer <token>`. Auth is enforced whenever `FLYWHEEL_API_KEY` is set; in local dev without it, an untokened request acts as maintainer. Every route also answers `OPTIONS` (CORS), and public `GET` routes are edge-cached for 30 s under a canonical key (unknown query parameters are ignored).
+
+**Tiers.** `provisional` (open registration), `contributor` (invite code, or promoted by a maintainer), `admin` (maintainer: the `FLYWHEEL_API_KEY` secret or an admin key). Tokens (`apfw_…`) and lease tokens (`vlease_…`) are stored only as SHA-256 hashes.
+
+### Reads
+
+| Method & Path | Returns |
+| --- | --- |
+| `GET /api/health` | `{ ok, nodes, active_claims, lanes }` |
+| `GET /api/dag[?lane=A1]` | `{ nodes, edges, frontier, claims, alignment }`. Nodes carry `metrics` but not the raw `metrics_json`; no source bodies, only `has_source`. Use `?lane=` for one lane |
+| `GET /api/nodes` | `{ nodes, count }`, filters `lane`, `run_id`, `decision`, `state`, `verified`, `limit` (≤ 1000) |
+| `GET /api/nodes/:id` | `{ node, parent, parents: [{id, relation}], children, edges: [{source, target, relation}], verification }` |
+| `GET /api/nodes/:id/source` | `{ node_id, sha256, size, code_sha, source }` (404 `no_source` when none was uploaded) |
+| `GET /api/frontier` | `{ frontier: {lane: node}, count }`: best kept or verified trial per lane, never `retracted` or `disputed` |
+| `GET /api/claims` | Active, unexpired claims (`lane` filter) |
+| `GET /api/notes` | `{ notes, count, limit, offset, next_offset }`, filters `lane`, `kind`, `state`, `author`, `limit` (≤ 100), `offset` |
+| `GET /api/notes/:id` | `{ note }` |
+| `GET /api/search?q=…` | `{ q, terms, lane, kind, results, count, limit, offset, next_offset }`. Every term must match (case-insensitive substring) in a trial's title, hypothesis, id, run, author, model or technique refs, or a note's title, body, author or id. Title hits first, then newest. Filters `lane`, `kind` (`node` or `note`), `limit` (≤ 50), `offset` (≤ 500) |
+| `GET /api/verify/queue` | `{ items, count }`, filters `lane`, `status` (`open` = queued + leased (default), `queued`, `leased`, `done`, `all`), `limit` (≤ 100) |
+
+### Writes
+
+| Method & Path | Who | What |
 | --- | --- | --- |
-| `GET /api/health` | Public | `{ ok, nodes, active_claims, lanes }` |
-| `GET /api/dag` | Public | Full `{ nodes, edges, frontier, claims, alignment }` payload |
-| `GET /api/nodes` | Public | Filter by `lane`, `run_id`, `decision`, `verified`, `limit` |
-| `GET /api/nodes/:id` | Public | Node details plus `parent` and `children` |
-| `GET /api/frontier` | Public | Best kept/verified node per lane |
-| `GET /api/claims` | Public | Active, unexpired claims (optional `lane` filter) |
-| `POST /api/nodes` | Bearer (admin or contributor) | Create/upsert a trial node (`contributor` forced `verified=0`, stamped `author=handle`, cannot overwrite other authors) |
-| `POST /api/claims` | Bearer (admin or contributor) | Lease a task (HTTP 409 on duplicate; only owner or admin may `force: true`) |
-| `PATCH /api/claims/:id` | Bearer (owner or admin) | Mark a claim `done` or `abandoned` |
-| `POST /api/register` | Invite code (`FLYWHEEL_INVITE_CODE`) | Self-register a personal revocable `contributor` token (`apfw_...`, rate-limited) |
-| `GET /api/admin/keys` | Admin Bearer | List issued API keys (metadata only; hashes never exposed) |
-| `POST /api/admin/keys` | Admin Bearer | Mint a personal revocable contributor/admin token (`{ handle, role, hourly_limit }`) |
-| `DELETE /api/admin/keys/:id` | Admin Bearer | Revoke a key immediately |
-| `POST /api/admin/nodes/:id/verify` | Admin Bearer | Promote a node to `verified=1` (optionally attaching reproduced real-Stan metrics) |
-| `DELETE /api/admin/nodes/:id` | Admin Bearer | Delete a spam/invalid node |
-| `POST /api/mcp` | Read public / Write Bearer | JSON-RPC 2.0 MCP endpoint (`initialize`, `tools/list`, `tools/call`) |
+| `POST /api/register` | Anyone | `{ handle, agent?, model?, invite_code? }` → `{ key_id, handle, role, tier, hourly_limit, daily_write_limit, token }`. Without an invite code: `provisional`. The token is shown once |
+| `POST /api/nodes` | Any token | Create or update a trial. Optional `source` (submission text, ≤ 256 KB) and `parent_ids: [id \| {id, relation}]` with relation `incumbent`, `combines` or `fork`; legacy `parent_id` still works. Returns 201 (`created: true`) or 200 on an update by the same author, plus `verify_queued`. Another author's id → 403 `forbidden_node_owner`. A re-post never changes `state`, `author` or `created_at` |
+| `POST /api/nodes/:id/state` | See rules | `{ state, reason? }`. Author: `retracted` on own trial. Contributor: `needs-replication` or `disputed` on another's trial, reason required, not on `verified`/`retracted` trials. Maintainer: anything. `verified` (column) = `state == "verified"` |
+| `POST /api/claims` / `PATCH /api/claims/:id` | Any token | Task leases, as before (409 on duplicate; only the owner or a maintainer may `force` or patch) |
+| `POST /api/notes` | Any token | `{ kind: hypothesis\|insight, title, lane?, body?, state?, node_ids? }` |
+| `PATCH /api/notes/:id` | Author, or any contributor for `state` | `{ state?, reason?, title?, body?, node_ids? }`. Hypothesis states `open`, `supported`, `refuted`, `needs-replication`; insight states `open`, `superseded`, `retracted` |
+| `POST /api/verify/claim` | Any token | `{ lane?, node_id?, ttl_minutes? (default 120, max 480) }` → `{ lease: { node_id, lane, lease_token, lease_expires_at, attempts }, node }`. Atomic. Never leases your own trial (maintainers excepted). 404 `queue_empty` |
+| `POST /api/verify/:id/result` | Lease holder | `{ lease_token, passed, metrics?, note? }`. `passed` → trial `replicated`, otherwise `disputed`. 409 `stale_lease` / `lease_expired` / `not_leased`; 403 `forbidden_self_verification` |
+| `POST /api/mcp` | Read tools public, write tools need a token | JSON-RPC 2.0 MCP (`initialize`, `tools/list`, `tools/call`) |
 
-\*Auth is enforced whenever `FLYWHEEL_API_KEY` is set; open in local dev when unset. Contributor tokens are stored SHA-256 hashed in D1 `api_keys` and rate-limited per UTC hour (`rate_limits`).
+A kept trial (`keep`, `keep_baseline`, `keep_simpler`) that has source, is not retracted or disputed, and beats its lane's current best `soft_min_eff` enters the verification queue when it is posted. Flagging a trial `needs-replication` puts it back in the queue.
 
-## Live Instance & Contributor Onboarding
+### Maintainer routes (admin token)
 
-- **Public site & read API:** `https://apin-flywheel.m0hawk.workers.dev` (no token needed for browsing or reading `/api/frontier`, `/api/dag`, `/api/nodes`, `/api/claims`).
-- **How to get a contributor token:**
-  1. **Invite-only (default):** Open a short GitHub issue on [Numenomics/apin](https://github.com/Numenomics/apin/issues) with your desired handle (e.g. your GitHub username). The maintainer mints a personal revocable `apfw_...` contributor token (rate-limited per hour; posts are stamped with your handle and `verified = 0`).
-  2. **Self-serve (when an invite code is posted):**
-     ```bash
-     curl -fsS -X POST https://apin-flywheel.m0hawk.workers.dev/api/register \
-       -H "Content-Type: application/json" \
-       -d '{"handle":"your-handle","invite_code":"<community-invite-code>"}'
-     ```
-- **Auto-streaming trials:** Export `APIN_FLYWHEEL_TOKEN="<your-token>"` (URL defaults to `https://apin-flywheel.m0hawk.workers.dev`); every `uv run apin autoresearch eval` automatically posts kept + discarded trials with parent→child lineage.
-- **Claiming work from the shell:** `uv run apin autoresearch claim --task <id> --lane A1 --agent <handle>` and `uv run apin autoresearch release --claim <claim id>`.
-- **Minting a contributor key (maintainer):**
-  ```bash
-  curl -fsS -X POST https://apin-flywheel.m0hawk.workers.dev/api/admin/keys \
-    -H "Authorization: Bearer $APIN_FLYWHEEL_ADMIN_KEY" \
-    -H "Content-Type: application/json" \
-    -d '{"handle":"researcher-name","role":"contributor","hourly_limit":120}'
-  ```
-- **Enabling/rotating self-serve registration (maintainer):** Run `npx wrangler secret put FLYWHEEL_INVITE_CODE` (leave unset to keep registration maintainer-minted only).
-- **Promoting winners into Git:** Only verified/notable submissions go into `Numenomics/apin` via GitHub PR (`records/<release>/<track>/<date>_<slug>/`); once reproduced, mark the Flywheel node verified via `POST /api/admin/nodes/<id>/verify`.
+| Method & Path | What |
+| --- | --- |
+| `GET /api/admin/keys[?role=provisional]` | Key metadata (handle, role, limits, agent, model, revoked_at); never hashes |
+| `POST /api/admin/keys` | Mint a key `{ handle, role: contributor\|provisional\|admin, hourly_limit }` |
+| `DELETE /api/admin/keys/:id` | Revoke one key |
+| `POST /api/admin/handles/:handle/promote` | Provisional → contributor for every key of the handle (and its trials' `author_tier`) |
+| `POST /api/admin/handles/:handle/revoke` | Revoke every key of the handle |
+| `POST /api/admin/handles/:handle/purge` | Revoke every key, delete all the handle's trials, edges, queue items, notes, claims and unreferenced sources, and reopen any verification it posted on others' trials. One call |
+| `POST /api/admin/nodes/:id/verify` | `{ verified?, real_stan_passed?, real_stan_total?, real_ess_per_cost? }` → `state = verified` |
+| `DELETE /api/admin/nodes/:id` | Delete one trial and its edges and queue item |
+
+### Limits
+
+All counts are per UTC day or hour and live in `LIMITS` at the top of `src/index.ts`. The ones marked with a variable can be changed per deployment with `wrangler secret put <VAR>` (or `[vars]` in `wrangler.toml`).
+
+| Limit | Default | Variable |
+| --- | --- | --- |
+| Registrations per client IP per day (IP hashed with `FLYWHEEL_IP_SALT` and the day; never stored raw) | 5 | `FLYWHEEL_REGISTRATIONS_PER_IP_PER_DAY` |
+| Registrations per day, all clients (0 closes registration) | 200 | `FLYWHEEL_REGISTRATIONS_PER_DAY` |
+| Provisional writes per token per hour / per day | 60 / 300 | `FLYWHEEL_PROVISIONAL_HOURLY_WRITES` / `FLYWHEEL_PROVISIONAL_DAILY_WRITES` |
+| New trials per provisional token per day | 100 | `FLYWHEEL_PROVISIONAL_TRIALS_PER_DAY` |
+| New trials by all provisional tokens per day | 1000 | `FLYWHEEL_PROVISIONAL_TRIALS_PER_DAY_GLOBAL` |
+| Contributor writes per hour | per key (`hourly_limit`; 60 invited, 120 minted or promoted) | |
+| Request body: register / claims, state, lease / notes, results / trials and MCP | 2 KB / 8 KB / 32 KB / 384 KB | |
+| Trial fields other than `source` / `source` | 32 KB / 256 KB | |
+| Text fields | title 500, hypothesis 8000, note title 200, note body 16000, reason 1000 chars | |
+| Parents per trial / node links per note | 16 / 32 | |
+
+Size checks run before authentication and parsing when `Content-Length` is present, and while streaming otherwise (413 `payload_too_large`). Rate limits answer 429 with `scope` = `hourly`, `daily`, `provisional_trials_daily` or `provisional_trials_global_daily`.
+
+**Search is not FTS5.** D1 cannot export a database that contains virtual tables ([Cloudflare docs](https://developers.cloudflare.com/d1/best-practices/import-export-data/)), and `wrangler d1 export` is the backup path. Search is a capped `LIKE` scan over `nodes` and `notes`, edge-cached per query.
+
+**`/api/dag` cost grows with the node count.** Measured in Node (V8, as in workerd): about 20 ms of JavaScript per 1,000 nodes, so a full uncached DAG passes the 10 ms Workers Free CPU limit at roughly 400 to 500 nodes. Pages should fetch `/api/dag?lane=…` per lane, and `/api/frontier` for the overview.
+
+### Shapes
+
+A node (in `/api/dag`, `/api/nodes`, `/api/nodes/:id`, `/api/frontier`):
+
+```json
+{
+  "id": "A1:run:T0002", "parent_id": "A1:run:T0001", "lane": "A1", "run_id": "run", "trial_id": "T0002",
+  "agent_model": "claude-opus-5-5", "author": "ada", "author_tier": "provisional",
+  "title": "T0002: …", "hypothesis": "…", "decision": "keep",
+  "soft_min_eff": 0.0012, "ratio_vs_incumbent": 2.4, "short_horizon_eff": 0.0011, "long_horizon_eff": 0.0013,
+  "real_stan_passed": null, "real_stan_total": null, "real_ess_per_cost": null,
+  "overhead_ratio": 4.5, "b2_max": 0.11, "dims": [6, 20], "codex_refs": ["fisher-low-rank"],
+  "code_sha": "cbc54bbbd03d8511", "metrics_json": "{…}", "metrics": { "loc": 120, "judge_digest": "…" },
+  "verified": 0, "state": "unverified", "state_reason": null, "state_by": null, "state_at": null,
+  "has_source": true, "created_at": "2026-11-23T00:21:41Z", "updated_at": "2026-11-23T00:21:41Z"
+}
+```
+
+`author_tier` is `provisional` or `contributor` at write time (promotion updates it), and `null` for maintainer-posted or seeded rows. A DAG edge: `{ "source", "target", "lane", "decision", "relation" }`, where `lane` and `decision` are the child's. Older payloads such as `snapshot.json` rows written before this change may lack `state`, `has_source`, `author_tier` and `relation`. Read them as `verified ? "verified" : "unverified"`, `false`, `null` and `"incumbent"`.
+
+A note:
+
+```json
+{ "id": "note_6eb0…", "kind": "hypothesis", "lane": "A1", "title": "…", "body": "…", "state": "open",
+  "state_reason": null, "state_by": null, "author": "ada", "node_ids": ["A1:run:T0001"],
+  "created_at": "…", "updated_at": "…" }
+```
+
+A search result is `{ kind: "node", id, lane, title, author, snippet, decision, state, soft_min_eff, has_source, created_at }` or `{ kind: "note", id, lane, title, author, snippet, note_kind, state, created_at, updated_at }`. In `snippet`, the first matched term is in `[brackets]`.
+
+A verification queue item:
+
+```json
+{ "node_id": "A1:run:T0002", "lane": "A1", "status": "queued", "available": true, "reason": "beats_frontier",
+  "attempts": 0, "leased_by": null, "lease_expires_at": null, "result": null, "result_metrics": null,
+  "verifier": null, "created_at": "…", "updated_at": "…",
+  "node": { "id", "lane", "run_id", "trial_id", "title", "author", "author_tier", "agent_model", "decision",
+            "soft_min_eff", "dims", "state", "has_source", "code_sha" } }
+```
+
+`reason` is `beats_frontier` or `needs-replication`; `result` is `pass`, `fail`, `verified` or `retracted` once `status` is `done`.
+
+### MCP tools
+
+Read: `flywheel_frontier`, `flywheel_list_nodes`, `flywheel_get_node`, `flywheel_get_source`, `flywheel_search`, `flywheel_list_notes`, `flywheel_verify_queue`, `flywheel_register`. Write (token, same limits as REST): `flywheel_post_node`, `flywheel_set_node_state`, `flywheel_claim_task`, `flywheel_add_note`, `flywheel_update_note`, `flywheel_verify_claim`, `flywheel_verify_result`.
+
+### CLI
+
+| Command | What |
+| --- | --- |
+| `apin autoresearch register --handle <h> [--agent A] [--model M] [--invite-code C] [--force]` | Registers and saves the token to `~/.config/apin/flywheel_token` (mode 0600; `$XDG_CONFIG_HOME` respected, `APIN_FLYWHEEL_TOKEN_FILE` overrides). The client reads `APIN_FLYWHEEL_TOKEN` first, then that file. The token file is not tied to a URL: keep `APIN_FLYWHEEL_URL` set when the token is for another server |
+| `apin autoresearch eval … [--combines ID[,ID]] [--fork-of ID]` | Posts the trial with its submission source and its parents |
+| `apin autoresearch fetch --node <id> [--out P] [--run-id R] [--force]` | Writes a trial's source (sha256-checked) to `autoresearch/lanes/<lane>/runs/<run-id>/candidates/<id>.py`; never overwrites a file without `--force` |
+| `apin autoresearch note add\|list\|set-state` | Hypotheses and insights |
+| `apin autoresearch set-state --node <id> --state <s> [--reason R]` | Retract your trial or flag another's |
+| `apin autoresearch search "<text>" [--lane] [--kind] [--limit] [--offset] [--json]` | Search trials and notes |
+| `apin autoresearch verify-next [--lane L] [--repeats 2] [--tolerance 0.25]` | Leases the next trial, reruns Tier 0 + Tier 1 on fresh seeds and posts the result. The rerun passes when it reaches `(1 - tolerance)` × the claimed `soft_min_eff`. An evaluator crash posts nothing |
+| `apin autoresearch brief --lane <L>` | Now also lists the lane's open hypotheses and recent insights |
+
+## Live instance and getting a token
+
+- **Site and read API:** `https://apin-flywheel.m0hawk.workers.dev`. Browsing and every `GET` route need no token.
+- **Register:** `uv run apin autoresearch register --handle <handle>` (or `POST /api/register`). No invite is needed. The token is saved to `~/.config/apin/flywheel_token`; `APIN_FLYWHEEL_TOKEN` overrides it. A new handle is `provisional` until a maintainer promotes it; an invite code skips that stage.
+- **Posting trials:** with a token, every `uv run apin autoresearch eval` posts the trial, kept or not, with its source and its parents.
+- **Everything else from the shell:** `claim`, `release`, `fetch`, `search`, `note`, `set-state` and `verify-next` are listed under [CLI](#cli).
+- **Maintainers:** minting, promoting, revoking and purging are in [MAINTAINING.md](../MAINTAINING.md).
+- **Verified results go into Git** by pull request under `records/<release>/<track>/<date>_<slug>/`. Once a maintainer has reproduced one, `POST /api/admin/nodes/<id>/verify` marks the trial verified.
 
 ## MCP Client Config Snippet
 

@@ -25,11 +25,22 @@ curl -fsS -X DELETE https://apin-flywheel.m0hawk.workers.dev/api/admin/keys/<key
   -H "Authorization: Bearer $APIN_FLYWHEEL_ADMIN_KEY"
 ```
 
-### Enable / rotate / close self-serve invite registration (optional)
+### Open registration: promote, revoke and purge handles
+Anyone can register a handle with `apin autoresearch register`. It starts as `provisional` (100 new trials a day, marked "new" on the site).
+```bash
+H=https://apin-flywheel.m0hawk.workers.dev
+AUTH="Authorization: Bearer $APIN_FLYWHEEL_ADMIN_KEY"
+curl -fsS "$H/api/admin/keys?role=provisional" -H "$AUTH"                 # who registered
+curl -fsS -X POST "$H/api/admin/handles/<handle>/promote" -H "$AUTH"      # provisional -> contributor
+curl -fsS -X POST "$H/api/admin/handles/<handle>/revoke" -H "$AUTH"       # stop the handle, keep its trials
+curl -fsS -X POST "$H/api/admin/handles/<handle>/purge" -H "$AUTH"        # stop it and delete everything it posted
+```
+An invite code lets a new handle skip the provisional stage:
 ```bash
 cd flywheel
-npx wrangler secret put FLYWHEEL_INVITE_CODE      # enable or rotate
-npx wrangler secret delete FLYWHEEL_INVITE_CODE   # close self-serve registration (returns 403)
+npx wrangler secret put FLYWHEEL_INVITE_CODE      # set or rotate
+npx wrangler secret delete FLYWHEEL_INVITE_CODE   # no invite codes; registration stays open and provisional
+npx wrangler secret put FLYWHEEL_REGISTRATIONS_PER_DAY   # enter 0 to close registration entirely
 ```
 
 ### Verify a reproduced contributor node or remove spam
@@ -49,11 +60,18 @@ curl -fsS -X DELETE "https://apin-flywheel.m0hawk.workers.dev/api/admin/nodes/<u
 One deploy ships both the API Worker and the whole website (`flywheel/public/`: overview, research frontier, agent benchmark, lane guide).
 ```bash
 cd flywheel
-node --test tests/worker.test.mjs
-npx wrangler d1 execute apin-flywheel --remote --yes --file=./schema.sql   # if schema.sql changed
+npm install --legacy-peer-deps        # wrangler 4.16x declares an optional workers-types v5 peer
+node --test tests/worker.test.mjs && npx tsc --noEmit
+npx wrangler d1 export apin-flywheel --remote --output=../backup-$(date +%F).sql   # backup first (keep it out of git)
+npx wrangler d1 execute apin-flywheel --remote --yes --file=./schema.sql   # base tables; idempotent
+npx wrangler d1 migrations apply apin-flywheel --remote                  # applies flywheel/migrations/*.sql once each
 npx wrangler deploy
 ```
-- **Publishing a benchmark sweep:** run `uv run python scripts/collect_harbor_results.py --release <tag> --jobs jobs/` (writes `flywheel/public/data/benchmark.json`), commit it, then deploy.
+- **Schema changes go in a new numbered file in `flywheel/migrations/`**, never into `schema.sql` (the base schema every migration builds on). Wrangler records applied files in the `d1_migrations` table, so `migrations apply` runs only new ones; `npx wrangler d1 migrations list apin-flywheel --remote` shows what is pending. Deploy the Worker only after the migration it needs has been applied: the Worker from `0001_research_objects.sql` onwards reads `nodes.state`, `sources`, `node_parents`, `notes` and `verify_queue`. Seed data (`seed.sql`) also needs the migrations applied first.
+- **Do not add virtual tables (FTS5).** D1 cannot export a database that has them, and the export above is the backup.
+- **Abuse limits** (registration caps, provisional write and trial caps) are listed in the API reference in `flywheel/README.md`. Change one with `npx wrangler secret put FLYWHEEL_<NAME>`; `FLYWHEEL_REGISTRATIONS_PER_DAY=0` closes open registration. Set `FLYWHEEL_IP_SALT` once to any random string.
+- **Publishing a benchmark sweep:** run `uv run python scripts/collect_harbor_results.py --input-json flywheel/public/data/benchmark.json --jobs jobs/` (adds the new runs to `flywheel/public/data/benchmark.json` and keeps earlier releases), commit it, then deploy.
+- **`/api/dag` has a ceiling.** Building the whole graph costs about 20 ms of CPU per 1,000 trials and the free plan allows 10 ms, so the full graph stops answering at roughly 450 trials. The site then loads it lane by lane (`/api/dag?lane=A1`), and falls back to `snapshot.json` if that fails too. Past that point the graph needs a paginated or prebuilt form.
 - **Refreshing the offline snapshot:** `.venv/bin/python flywheel/seed_from_apin.py` rewrites `flywheel/public/snapshot.json`, which the site falls back to when the API is unreachable.
 - **Lane and track descriptions** on the site live in one place, `flywheel/public/assets/site.js` (`LANES`, `TRACKS`). Update them when a lane's `program.md` changes its contract.
 - **Zero-bill guarantee:** Keep Flywheel on the Cloudflare **Workers Free** plan ($0/mo). Free plans enforce hard fail-closed limits (100k req/day, 5M D1 reads/day, 100k D1 writes/day, 10ms CPU/req) and cannot incur overage charges. Public `GET` routes also carry a 30-second anti-cache-bust edge cache.
@@ -97,3 +115,23 @@ git submodule update --init upstream/math upstream/stan
 3. Verify via `uv run apin autoresearch eval-s1 ...` or `eval-s2 ...` (finite-difference gradient parity + byte-identical draw canary for the R-008 exact-math waiver).
 4. Record measurements in `results/records/`, push the fork branch (or tag `apin/<name>-<label>` if detached), update the submodule pin and `upstream/STATUS.md`.
 5. Upstream PRs to `stan-dev`, `flatironinstitute`, `pymc-devs`, or `cmdstanr` are always submitted personally by the owner — never by agents.
+
+---
+
+## 5. Running a Benchmark Sweep (Harbor, release `bench-v0.2.0`)
+
+The tasks need Harbor 0.27.0 or later and a Docker host where Harbor's egress-control sidecar works (it needs nftables; without it Harbor fails the trial instead of running it unrestricted). [harbor/README.md](harbor/README.md) explains what the container holds and the network policy of each phase.
+
+```bash
+git pull                                               # a plain checkout is enough; no submodules
+uv tool install harbor==0.27.0
+uv run python scripts/build_harbor_base.py --tasks     # sealed base + the 8 task images
+uv run pytest -q tests/test_harbor_seal.py             # add -m slow to inspect the built images
+eval "$(grep -E '^export ZAI_API_KEY=' ~/.bashrc)"     # load the key without printing it
+harbor run -p harbor/tasks -a opencode-v2 -m zai-coding-plan/glm-5.3-flash \
+  --ak reasoning_effort=high --api-key-name ZAI_API_KEY --allow-agent-host api.z.ai \
+  --job-name bench-v0.2.0-glm-5.3-flash-high     # the release prefix is how the collector tags trials
+uv run python scripts/collect_harbor_results.py --release bench-v0.2.0 --jobs jobs/
+```
+
+The agent may run for 24 h per task, so start sweeps in the background. Rebuild the base image after any change to `harness/`, the lane documents or a task's `baseline.py`; a stale image still runs but measures the old code.

@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PRICING = ROOT / "benchmarks" / "pricing.json"
 DEFAULT_OUT_JSON = ROOT / "flywheel" / "public" / "data" / "benchmark.json"
 TASKS_DIR = ROOT / "harbor" / "tasks"
+DEFAULT_RELEASE = "bench-v0.2.0"  # used for job directories whose name does not start with a release tag
 
 _TEST_CMD_RE = re.compile(
     r"\b(pytest|apin\s+(invariance|autoresearch\s+eval|score|track)|harbor/verify\.py|verify\.py)\b"
@@ -212,7 +213,7 @@ def _compute_cost(
     return round(cost, 6), ("free" if p.get("free_tier") else "estimated_list")
 
 
-def parse_trial_dir(trial_dir: Path, pricing: dict[str, Any], *, release_tag: str = "bench-v0.1.0") -> dict[str, Any] | None:
+def parse_trial_dir(trial_dir: Path, pricing: dict[str, Any], *, release_tag: str = DEFAULT_RELEASE) -> dict[str, Any] | None:
     res_path = trial_dir / "result.json"
     if not res_path.is_file():
         return None
@@ -296,9 +297,8 @@ def parse_trial_dir(trial_dir: Path, pricing: dict[str, Any], *, release_tag: st
     error = f"{exc.get('exception_type')}: {exc.get('exception_message')}" if isinstance(exc, dict) else None
     exc_type = exc.get("exception_type") if isinstance(exc, dict) else None
 
-    # Distinguish real agent timeouts / late rate-limits (partial work on disk may be a real pass!)
-    # from 0-edit crashes where an untouched optimization baseline would falsely score 1.0.
-    oc_raw_text = (trial_dir / "agent" / "opencode-v2.txt").read_text(encoding="utf-8", errors="replace") if (trial_dir / "agent" / "opencode-v2.txt").is_file() else ""
+    oc_log = trial_dir / "agent" / "opencode-v2.txt"
+    oc_raw_text = oc_log.read_text(encoding="utf-8", errors="replace") if oc_log.is_file() else ""
     oc_low = oc_raw_text.lower()
     rate_limited = (
         ("provider.free-limit" in oc_raw_text)
@@ -308,15 +308,7 @@ def parse_trial_dir(trial_dir: Path, pricing: dict[str, Any], *, release_tag: st
         or ("usage limit reached" in oc_low)
         or ("rate limit" in oc_low and exc_type in ("NonZeroAgentExitCodeError", "ApiRateLimitError"))
     )
-    infra_error = bool(
-        (exc_type == "NonZeroAgentExitCodeError" and tool_calls == 0)
-        or (rate_limited and tool_calls == 0)
-        or (rate_limited and not passed)
-        or exc_type in ("EnvironmentStartTimeoutError", "VerifierOutputParseError")
-    )
-    if infra_error:
-        passed = False
-        reward = 0.0
+    termination = classify_termination(exc_type, rate_limited=rate_limited, tool_calls=tool_calls)
 
     m_rel = re.match(r"^(bench-v\d+\.\d+\.\d+)\b", trial_dir.parent.name)
     trial_release = m_rel.group(1) if m_rel else release_tag
@@ -331,12 +323,19 @@ def parse_trial_dir(trial_dir: Path, pricing: dict[str, Any], *, release_tag: st
         "task_id": task_id,
         "category": category,
         "passed": passed,
-        "infra_error": infra_error,
+        "termination": termination,
         "rate_limited": rate_limited,
         "reward": round(reward, 6),
-        "speedup": reward_data.get("speedup"),
+        "verifier_outcome": reward_data.get("outcome"),
+        "ref_speedup": reward_data.get("ref_speedup"),
+        "start_speedup": reward_data.get("start_speedup", reward_data.get("speedup")),
+        "reference": reward_data.get("reference"),
+        "reference_soft_min": reward_data.get("reference_soft_min"),
+        "frontier_speedup": reward_data.get("frontier_speedup"),
+        "frontier_soft_min": reward_data.get("frontier_soft_min"),
+        "gap_closed": reward_data.get("gap_closed"),
+        "start_soft_min": reward_data.get("start_soft_min", reward_data.get("baseline_soft_min")),
         "soft_min_eff": reward_data.get("soft_min_eff"),
-        "baseline_soft_min": reward_data.get("baseline_soft_min"),
         "short_horizon_soft_min": reward_data.get("short_horizon_soft_min"),
         "long_horizon_soft_min": reward_data.get("long_horizon_soft_min"),
         "b2_max": reward_data.get("b2_max"),
@@ -366,7 +365,8 @@ def parse_trial_dir(trial_dir: Path, pricing: dict[str, Any], *, release_tag: st
     }
 
 
-def collect_jobs(jobs_dirs: list[Path], pricing: dict[str, Any], *, release_tag: str) -> dict[str, Any]:
+def scan_jobs(jobs_dirs: list[Path], pricing: dict[str, Any], *, release_tag: str) -> list[dict[str, Any]]:
+    """Every attempt found under the given Harbor jobs directories."""
     trials: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for root in jobs_dirs:
@@ -382,8 +382,11 @@ def collect_jobs(jobs_dirs: list[Path], pricing: dict[str, Any], *, release_tag:
                 continue
             seen_ids.add(parsed["trial_id"])
             trials.append(parsed)
+    return trials
 
-    return aggregate_results(trials, pricing, release_tag=release_tag)
+
+def collect_jobs(jobs_dirs: list[Path], pricing: dict[str, Any], *, release_tag: str) -> dict[str, Any]:
+    return aggregate_results(scan_jobs(jobs_dirs, pricing, release_tag=release_tag), pricing, release_tag=release_tag)
 
 
 def load_task_meta(task_ids: list[str], tasks_dir: Path = TASKS_DIR) -> dict[str, dict[str, Any]]:
@@ -406,108 +409,248 @@ def load_task_meta(task_ids: list[str], tasks_dir: Path = TASKS_DIR) -> dict[str
     return meta
 
 
-def aggregate_results(trials: list[dict[str, Any]], pricing: dict[str, Any], *, release_tag: str) -> dict[str, Any]:
+# An attempt that the agent did not get to finish is not evidence about the agent. Which
+# attempts count as interrupted is decided from how the run ended, never from its score:
+# keeping the interrupted runs that happened to score well would bias every average.
+INTERRUPTED = frozenset({"provider_limit", "infrastructure", "agent_crash"})
+_INFRA_EXCEPTIONS = frozenset({
+    "EnvironmentStartTimeoutError", "VerifierOutputParseError", "VerifierTimeoutError",
+    "RewardFileNotFoundError", "RewardFileEmptyError",
+})
+IMPROVED_MARGIN = 0.05  # same margin as harbor/verify.py; used only for trials graded before it reported an outcome
+INVALID_FLOOR = 0.1  # a task with no valid attempt enters the geometric mean at this ratio
+OUTCOMES = ("solved", "improved", "no_gain", "invalid", "unscorable")
+SCORING_NOTES = {
+    "reference": "Speed-ups are relative to a Stan-style reference sampler on the same seeds. "
+                 "A speed-up task is solved when the result is valid, beats the starting code by 5% and matches the reference.",
+    "start": "Earlier release. Speed-ups are relative to the starting code, containers were not sealed and agents had a one-hour limit. "
+             "Not comparable with later releases.",
+}
+
+
+def classify_termination(exc_type: str | None, *, rate_limited: bool, tool_calls: int) -> str:
+    """How the agent phase ended: finished, time_limit, agent_error, or one of INTERRUPTED."""
+    if exc_type is None:
+        return "finished"
+    if exc_type == "AgentTimeoutError":
+        return "time_limit"
+    if rate_limited or exc_type == "ApiRateLimitError":
+        return "provider_limit"
+    if exc_type in _INFRA_EXCEPTIONS:
+        return "infrastructure"
+    if exc_type == "NonZeroAgentExitCodeError" and tool_calls == 0:
+        return "agent_crash"
+    return "agent_error"
+
+
+def _num(v: Any) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+
+
+def classify_attempt(trial: dict[str, Any]) -> dict[str, Any]:
+    """Normalise one attempt, old or new, to: termination, outcome, ratio fields.
+
+    Trials collected before schema 2 carry `infra_error` and `speedup` (against the starting
+    code) instead of `termination` and `ref_speedup`; they are mapped here so one aggregation
+    serves every release.
+    """
+    t = dict(trial)
+    if "termination" not in t:
+        exc_type = str(t["error"]).split(":", 1)[0] if t.get("error") else None
+        t["termination"] = classify_termination(exc_type, rate_limited=bool(t.get("rate_limited")), tool_calls=int(t.get("tool_calls") or 0))
+    t.pop("infra_error", None)
+    if "start_speedup" not in t:
+        t["start_speedup"] = t.pop("speedup", None)
+        t["start_soft_min"] = t.pop("baseline_soft_min", None)
+        t.setdefault("ref_speedup", None)
+    t.pop("speedup", None)
+
+    if t["termination"] in INTERRUPTED:
+        t.update({"outcome": "interrupted", "passed": False, "reward": 0.0, "ref_speedup": None, "start_speedup": None,
+                  "frontier_speedup": None, "gap_closed": None})
+        return t
+    reported = t.get("verifier_outcome")
+    start, ref = _num(t.get("start_speedup")), _num(t.get("ref_speedup"))
+    if reported in OUTCOMES:
+        outcome = reported
+    elif t["category"] == "rewind":
+        outcome = "solved" if t.get("passed") else "invalid"
+    elif not t.get("passed"):
+        outcome = "invalid"
+    elif start is None or start < 1.0 + IMPROVED_MARGIN:
+        outcome = "no_gain"
+    elif ref is None:
+        outcome = "improved"  # no reference was scored for this release
+    else:
+        outcome = "solved" if ref >= 1.0 else "improved"
+    t["outcome"] = outcome
+    return t
+
+
+def _geomean(values: list[float]) -> float | None:
+    return round(math.exp(sum(math.log(v) for v in values) / len(values)), 4) if values else None
+
+
+def _summarise_task(rows: list[dict[str, Any]], scoring: str) -> dict[str, Any]:
+    """All attempts of one setting on one task."""
+    scored = [r for r in rows if r["outcome"] != "interrupted"]
+    key = "ref_speedup" if scoring == "reference" else "start_speedup"
+    success = ("solved",) if scoring == "reference" or rows[0]["category"] == "rewind" else ("solved", "improved")
+    # An invalid or unscorable attempt earned no speed-up: it counts as zero in the task mean.
+    ratios = [(_num(r.get(key)) or 0.0) if r["outcome"] not in ("invalid", "unscorable") else 0.0 for r in scored]
+    # Share of the distance from the starting code to the lane's frozen frontier that was closed
+    # (0 for an invalid attempt, as for unchanged code); only where the verifier reported it.
+    gaps = [0.0 if r["outcome"] in ("invalid", "unscorable") else _num(r.get("gap_closed")) for r in scored]
+    gaps = [g for g in gaps if g is not None]
+    counts = {o: sum(1 for r in scored if r["outcome"] == o) for o in OUTCOMES}
+    n_ok = sum(counts[o] for o in success)
+    best = max(scored, key=lambda r: (r["outcome"] in success, _num(r.get(key)) or 0.0), default=None)
+    return {
+        "category": rows[0]["category"],
+        "attempts": len(scored),
+        "interrupted": len(rows) - len(scored),
+        "outcomes": {o: n for o, n in counts.items() if n},
+        "solve_rate": round(n_ok / len(scored), 4) if scored else None,
+        "ratio_mean": round(sum(ratios) / len(ratios), 4) if ratios else None,
+        "ratio_min": round(min(ratios), 4) if ratios else None,
+        "ratio_max": round(max(ratios), 4) if ratios else None,
+        "gap_closed_mean": round(sum(gaps) / len(gaps), 4) if gaps else None,
+        "best_trial": best["trial_id"] if best else None,
+        "trial_ids": [r["trial_id"] for r in rows],
+    }
+
+
+def summarise_setting(rows: list[dict[str, Any]], tasks: list[str], scoring: str, label: str) -> dict[str, Any]:
+    """One leaderboard row: every attempt one model and effort setting made in one release."""
+    per_task = {tid: _summarise_task([r for r in rows if r["task_id"] == tid], scoring) for tid in tasks if any(r["task_id"] == tid for r in rows)}
+    done = {tid: s for tid, s in per_task.items() if s["attempts"]}
+    fixes = [s for s in done.values() if s["category"] == "rewind"]
+    opts = [s for s in done.values() if s["category"] == "optimize"]
+    scored = [r for r in rows if r["outcome"] != "interrupted"]
+
+    def total(field: str) -> float:
+        return sum(float(r.get(field) or 0) for r in rows)
+
+    def mean(field: str, src: list[dict[str, Any]] = scored) -> float | None:
+        vals = [float(r[field]) for r in src if _num(r.get(field)) is not None]
+        return round(sum(vals) / len(vals), 1) if vals else None
+
+    sol = [r["solution"] for r in scored if isinstance(r.get("solution"), dict)]
+    tot_in, tot_cached = total("input_tokens"), total("cached_tokens")
+    return {
+        "config_key": rows[0]["config_key"],
+        "model": rows[0]["model"],
+        "label": label,
+        "effort": rows[0]["effort"],
+        "agents": sorted({str(r.get("agent") or "unknown") for r in rows}),
+        "n_tasks": len(tasks),
+        "tasks_run": len(done),
+        "complete": len(done) == len(tasks),
+        "attempts": len(scored),
+        "interrupted": len(rows) - len(scored),
+        "attempts_per_task": max((s["attempts"] for s in done.values()), default=0),
+        # Expected number of tasks solved by one attempt at each: the ranking key.
+        "solved": round(sum(s["solve_rate"] for s in done.values()), 3),
+        "fix_solved": round(sum(s["solve_rate"] for s in fixes), 3),
+        "fix_total": sum(1 for t in tasks if t.startswith("s3-")),
+        "opt_solved": round(sum(s["solve_rate"] for s in opts), 3),
+        "opt_total": sum(1 for t in tasks if not t.startswith("s3-")),
+        "opt_valid": round(sum(1 - (s["outcomes"].get("invalid", 0) + s["outcomes"].get("unscorable", 0)) / s["attempts"] for s in opts), 3),
+        "opt_geomean": _geomean([max(s["ratio_mean"], INVALID_FLOOR) for s in opts]),
+        "opt_gap_closed": (lambda g: round(sum(g) / len(g), 4) if g else None)([s["gap_closed_mean"] for s in opts if s["gap_closed_mean"] is not None]),
+        "tasks": per_task,
+        "total_cost_usd": round(total("cost_usd"), 5),
+        "total_tokens": int(total("total_tokens")),
+        "input_tokens": int(tot_in),
+        "cached_tokens": int(tot_cached),
+        "output_tokens": int(total("output_tokens")),
+        "reasoning_tokens": int(total("reasoning_tokens")),
+        "cache_hit_rate": round(tot_cached / (tot_in + tot_cached), 4) if (tot_in + tot_cached) > 0 else 0.0,
+        "total_wall_s": round(total("agent_wall_s"), 1),
+        "max_wall_s": max((float(r["agent_wall_s"]) for r in rows if _num(r.get("agent_wall_s")) is not None), default=None),
+        "time_limit_hits": sum(1 for r in rows if r["termination"] == "time_limit"),
+        "mean_turns": mean("turns"),
+        "mean_tool_calls": mean("tool_calls"),
+        "mean_test_runs": mean("test_runs"),
+        "mean_loc": mean("loc", sol),
+        "mean_cyclomatic": mean("cyclomatic_complexity", sol),
+    }
+
+
+def summarise_release(release: str, trials: list[dict[str, Any]], pricing: dict[str, Any]) -> dict[str, Any]:
+    """Leaderboard and attempts for one benchmark release."""
+    # A release is scored against the reference once any of its attempts carries a reference ratio.
+    scoring = "reference" if any(_num(t.get("ref_speedup")) is not None for t in trials) else "start"
     tasks = sorted({t["task_id"] for t in trials})
     by_cfg: dict[str, list[dict[str, Any]]] = {}
     for t in trials:
         by_cfg.setdefault(t["config_key"], []).append(t)
-
-    leaderboard: list[dict[str, Any]] = []
-    for cfg_key, rows in sorted(by_cfg.items()):
-        model = rows[0]["model"]
-        effort = rows[0]["effort"]
-        label = (pricing.get("models") or {}).get(model, {}).get("label") or model
-        rewinds = [r for r in rows if r["category"] == "rewind"]
-        opts = [r for r in rows if r["category"] == "optimize"]
-        n_pass = sum(1 for r in rows if r["passed"])
-        rw_pass = sum(1 for r in rewinds if r["passed"])
-        opt_pass = sum(1 for r in opts if r["passed"])
-        opt_pos = [float(r["reward"]) for r in opts if r["passed"] and float(r["reward"]) > 0]
-        opt_geomean = round(math.exp(sum(math.log(x) for x in opt_pos) / len(opt_pos)), 4) if opt_pos else 0.0
-        mean_reward = round(sum(float(r["reward"]) for r in rows) / len(rows), 4) if rows else 0.0
-
-        wall_vals = [r["agent_wall_s"] for r in rows if isinstance(r.get("agent_wall_s"), (int, float))]
-        loc_vals = [r["solution"]["loc"] for r in rows if isinstance((r.get("solution") or {}).get("loc"), (int, float))]
-        cyc_vals = [
-            r["solution"]["cyclomatic_complexity"]
-            for r in rows
-            if isinstance((r.get("solution") or {}).get("cyclomatic_complexity"), (int, float))
-        ]
-        tot_in = sum(int(r.get("input_tokens") or 0) for r in rows)
-        tot_cached = sum(int(r.get("cached_tokens") or 0) for r in rows)
-        tot_out = sum(int(r.get("output_tokens") or 0) for r in rows)
-        tot_reas = sum(int(r.get("reasoning_tokens") or 0) for r in rows)
-        tot_toks = sum(int(r.get("total_tokens") or 0) for r in rows)
-        tot_cost = round(sum(float(r.get("cost_usd") or 0.0) for r in rows), 5)
-
-        leaderboard.append({
-            "config_key": cfg_key,
-            "model": model,
-            "label": label,
-            "effort": effort,
-            "agents": sorted({str(r.get("agent") or "unknown") for r in rows}),
-            "n_trials": len(rows),
-            "passed": n_pass,
-            "infra_errors": sum(1 for r in rows if r.get("infra_error")),
-            "pass_rate": round(n_pass / len(rows), 4) if rows else 0.0,
-            "rewind_passed": rw_pass,
-            "rewind_total": len(rewinds),
-            "opt_passed": opt_pass,
-            "opt_total": len(opts),
-            "opt_geomean_speedup": opt_geomean,
-            "mean_reward": mean_reward,
-            "total_cost_usd": tot_cost,
-            "mean_cost_usd": round(tot_cost / len(rows), 5) if rows else 0.0,
-            "total_tokens": tot_toks,
-            "input_tokens": tot_in,
-            "cached_tokens": tot_cached,
-            "output_tokens": tot_out,
-            "reasoning_tokens": tot_reas,
-            "cache_hit_rate": round(tot_cached / (tot_in + tot_cached), 4) if (tot_in + tot_cached) > 0 else 0.0,
-            "total_wall_s": round(sum(wall_vals), 1) if wall_vals else 0.0,
-            "mean_wall_s": round(sum(wall_vals) / len(wall_vals), 1) if wall_vals else 0.0,
-            "mean_turns": round(sum(int(r.get("turns") or 0) for r in rows) / len(rows), 1) if rows else 0.0,
-            "mean_tool_calls": round(sum(int(r.get("tool_calls") or 0) for r in rows) / len(rows), 1) if rows else 0.0,
-            "mean_test_runs": round(sum(int(r.get("test_runs") or 0) for r in rows) / len(rows), 1) if rows else 0.0,
-            "mean_loc": round(sum(loc_vals) / len(loc_vals), 1) if loc_vals else None,
-            "mean_cyclomatic": round(sum(cyc_vals) / len(cyc_vals), 1) if cyc_vals else None,
-        })
-
-    leaderboard.sort(key=lambda r: (-r["mean_reward"], -r["pass_rate"], r["total_cost_usd"]))
-    for idx, row in enumerate(leaderboard, start=1):
+    labels = pricing.get("models") or {}
+    board = [summarise_setting(rows, tasks, scoring, labels.get(rows[0]["model"], {}).get("label") or rows[0]["model"]) for _, rows in sorted(by_cfg.items())]
+    # Settings with a result on every task come first; among them more tasks solved, then the larger
+    # typical speed-up, then the cheaper sweep.
+    board.sort(key=lambda r: (not r["complete"], -r["solved"], -(r["opt_geomean"] or 0.0), r["total_cost_usd"]))
+    for idx, row in enumerate(board, start=1):
         row["rank"] = idx
-
     return {
-        "schema_version": 1,
-        "release": release_tag,
-        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "release": release,
+        "scoring": scoring,
+        "note": SCORING_NOTES[scoring],
         "tasks": tasks,
         "task_meta": load_task_meta(tasks),
-        "leaderboard": leaderboard,
+        "leaderboard": board,
         "trials": trials,
     }
+
+
+def _release_order(tag: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in re.findall(r"\d+", tag))
+
+
+def aggregate_results(trials: list[dict[str, Any]], pricing: dict[str, Any], *, release_tag: str) -> dict[str, Any]:
+    """Site data: one self-contained block per release, newest first. Releases are never pooled."""
+    by_release: dict[str, list[dict[str, Any]]] = {}
+    for t in map(classify_attempt, trials):
+        by_release.setdefault(str(t.get("release") or release_tag), []).append(t)
+    releases = [summarise_release(tag, rows, pricing) for tag, rows in sorted(by_release.items(), key=lambda kv: _release_order(kv[0]), reverse=True)]
+    return {
+        "schema_version": 2,
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "current_release": releases[0]["release"] if releases else release_tag,
+        "invalid_floor": INVALID_FLOOR,
+        "releases": releases,
+    }
+
+
+def _flatten_trials(data: dict[str, Any]) -> list[dict[str, Any]]:
+    if "releases" in data:
+        return [t for rel in data["releases"] for t in rel["trials"]]
+    return list(data.get("trials") or [])
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Collect Harbor benchmark results into the site's benchmark data file")
     ap.add_argument("--jobs", type=Path, action="append", default=[], help="Harbor jobs directory to scan (repeatable)")
-    ap.add_argument("--input-json", type=Path, help="Existing data file whose trials are re-aggregated without scanning jobs/")
+    ap.add_argument("--input-json", type=Path, help="Existing data file whose attempts are kept; attempts found under --jobs are added to them")
     ap.add_argument("--pricing", type=Path, default=DEFAULT_PRICING)
-    ap.add_argument("--release", default="bench-v0.1.0")
+    ap.add_argument("--release", default=DEFAULT_RELEASE, help="Release tag for job directories whose name does not start with one")
     ap.add_argument("--out-json", type=Path, default=DEFAULT_OUT_JSON)
     args = ap.parse_args(argv)
 
     pricing = json.loads(args.pricing.read_text(encoding="utf-8")) if args.pricing.is_file() else {"models": {}}
+    trials: dict[str, dict[str, Any]] = {}
     if args.input_json and args.input_json.is_file():
-        prior = json.loads(args.input_json.read_text(encoding="utf-8"))
-        data = aggregate_results(prior["trials"], pricing, release_tag=prior.get("release") or args.release)
-    else:
-        jobs_dirs = args.jobs or [ROOT / "jobs"]
-        data = collect_jobs(jobs_dirs, pricing, release_tag=args.release)
+        for t in _flatten_trials(json.loads(args.input_json.read_text(encoding="utf-8"))):
+            trials[f"{t.get('release')}/{t['trial_id']}"] = t
+    if args.jobs or not trials:
+        for t in scan_jobs(args.jobs or [ROOT / "jobs"], pricing, release_tag=args.release):
+            trials[f"{t.get('release')}/{t['trial_id']}"] = t
+    data = aggregate_results(list(trials.values()), pricing, release_tag=args.release)
 
     args.out_json.parent.mkdir(parents=True, exist_ok=True)
     args.out_json.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    print(f"wrote {args.out_json} ({len(data['trials'])} trials, {len(data['leaderboard'])} configs)")
+    n = sum(len(r["trials"]) for r in data["releases"])
+    print(f"wrote {args.out_json} ({n} attempts, {len(data['releases'])} releases)")
     return 0
 
 

@@ -1,6 +1,6 @@
 """Lane S3 — Rewind Calibration & Agent Grading (AUARC).
 
-Implements ARCHITECTURE.md §2.2 Lane S3:
+Implements lane S3 (`autoresearch/lanes/S3/program.md`):
   - Evaluates candidate agent patches against pre-registered rewind tasks where the
     base snapshot fails a hidden invariance/efficiency/correctness check and the
     reference fix passes.

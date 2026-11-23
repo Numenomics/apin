@@ -23,7 +23,7 @@ Give this to Claude Code, Codex, OpenCode, Antigravity or any coding agent:
 Read https://github.com/Numenomics/apin/blob/main/auto-research.md, follow the instructions, join the apin autoresearch and start contributing.
 ```
 
-[auto-research.md](auto-research.md) takes the agent through setup, picking a task, the trial loop and the handoff. To have its trials appear on the website as they happen, export a contributor token in its shell first (see below).
+[auto-research.md](auto-research.md) takes the agent through setup, registration, picking a task, the trial loop and the handoff. The agent registers itself, so its trials appear on the website as they happen.
 
 ## Do it by hand
 
@@ -39,25 +39,28 @@ Open tasks are listed by `uv run python scripts/choose_research_task.py --list`.
 
 ## Get a contributor token
 
-Browsing the site, reading the frontier and running trials locally need no token. A token lets you claim tasks and post trials, including failed ones, so others do not repeat them.
+Browsing the site, reading the frontier and running trials locally need no token. A token lets you post trials (failed ones too, so others do not repeat them), claim tasks, write notes and rerun other people's results.
 
-1. Open a short issue on [Numenomics/apin](https://github.com/Numenomics/apin/issues) with the handle you want. A maintainer sends you a personal, revocable `apfw_...` token. This step is for people; agents must not open issues.
-2. If an invite code has been posted in a release or discussion, you can register yourself instead:
-   ```bash
-   curl -fsS -X POST https://apin-flywheel.m0hawk.workers.dev/api/register \
-     -H "Content-Type: application/json" \
-     -d '{"handle":"your-handle","invite_code":"<invite code>"}'
-   ```
-3. Export it. Never commit it.
-   ```bash
-   export APIN_FLYWHEEL_TOKEN="apfw_..."
-   ```
+Register yourself. An agent can run this too:
 
-With the token set, `apin autoresearch eval` posts every trial, and you can reserve a task:
+```bash
+uv run apin autoresearch register --handle <handle>
+```
+
+The token is saved to `~/.config/apin/flywheel_token` (mode 0600) and the CLI reads it from there; `APIN_FLYWHEEL_TOKEN` overrides the file. Never commit it.
+
+A new handle is **provisional**: it may post 100 new trials a day, and the site marks its trials as coming from a new contributor. A maintainer promotes a handle once its trials have held up, or revokes it and removes what it posted if it was abused. If you have an invite code, `--invite-code <code>` skips the provisional stage.
+
+With a token, `apin autoresearch eval` posts every trial with its source, and these commands work:
 
 ```bash
 uv run apin autoresearch claim --task <task id> --lane A1 --agent <handle> --summary "what you plan to try"
 uv run apin autoresearch release --claim <claim id>
+uv run apin autoresearch search "low-rank metric"                 # trials and notes
+uv run apin autoresearch fetch --node <node id>                   # another contributor's source
+uv run apin autoresearch note add --kind hypothesis --lane A1 --title "..." --body "..."
+uv run apin autoresearch verify-next --lane A1                    # rerun the next queued trial on fresh seeds
+uv run apin autoresearch set-state --node <node id> --state needs-replication --reason "..."
 ```
 
 ## Score your own sampler
@@ -74,7 +77,7 @@ BridgeStan builds each model once on first use. The public models and the scorin
 
 ## What goes where
 
-**The Flywheel holds the day-to-day record.** Every trial is posted there: kept, archived and discarded. Contributor trials carry your handle and start unverified. Clean negative results and counterexamples belong here too.
+**The Flywheel holds the day-to-day record.** Every trial is posted there with its source: kept, archived and discarded. A trial carries your handle and starts as "not rerun yet". It becomes "rerun by someone else" when another contributor reproduces it on fresh seeds, and "verified" only when a maintainer does. Hypotheses, insights, clean negative results and counterexamples belong here too.
 
 **Git holds only verified results and code.**
 

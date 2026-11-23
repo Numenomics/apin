@@ -1,6 +1,6 @@
 # Autoresearch Lane A4: Warm-Start & Nonlinear Transport (`program.md`)
 
-> **Karpathy-style 3-file contract for `Numenomics/apin` (`ARCHITECTURE.md` §2.2 Lane A4).**
+> **Karpathy-style 3-file contract for `Numenomics/apin`.**
 > - **Read-only judge:** `harness/judge.py` (owns the verified unit-mass reversible HMC kernel `a4_transition` in latent $z$-space + automatic finite-difference Jacobian & round-trip inverse checks!)
 > - **Single writable file:** `autoresearch/lanes/A4/submission.py`
 > - **Contract:** Implement ONLY the 4 diffeomorphic transport functions:

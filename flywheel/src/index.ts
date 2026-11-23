@@ -1,3 +1,12 @@
+// apin Flywheel Worker: research DAG, sources, notes, search, verification queue,
+// claim ledger and MCP endpoint, on Cloudflare Workers Free + D1.
+//
+// Every operation is one `Op` function. The REST router and the MCP adapter both
+// call the same ops, so auth, rate limits, body caps and validation live in one place.
+//
+// This file is loaded directly by `node --test` (type stripping), so it uses only
+// erasable TypeScript: no enums, namespaces or constructor parameter properties.
+
 export interface D1Result<T = Record<string, unknown>> {
   results: T[];
   success: boolean;
@@ -28,13 +37,65 @@ export interface CacheLike {
   put(request: Request | string, response: Response): Promise<void>;
 }
 
+type EnvNumber = string | number | undefined;
+
 export interface Env {
   DB: D1DatabaseLike;
   ASSETS?: AssetsBindingLike;
   FLYWHEEL_API_KEY?: string;
   FLYWHEEL_INVITE_CODE?: string;
   CACHE?: CacheLike;
+  /** Salt for hashing client IPs in the registration cap. Optional. */
+  FLYWHEEL_IP_SALT?: string;
+  FLYWHEEL_REGISTRATIONS_PER_IP_PER_DAY?: EnvNumber;
+  /** Set to 0 to close open registration (invite-code registration is capped by it too). */
+  FLYWHEEL_REGISTRATIONS_PER_DAY?: EnvNumber;
+  FLYWHEEL_PROVISIONAL_HOURLY_WRITES?: EnvNumber;
+  FLYWHEEL_PROVISIONAL_DAILY_WRITES?: EnvNumber;
+  /** New trials one provisional token may create per UTC day. */
+  FLYWHEEL_PROVISIONAL_TRIALS_PER_DAY?: EnvNumber;
+  /** New trials all provisional tokens together may create per UTC day (bounds /api/dag growth). */
+  FLYWHEEL_PROVISIONAL_TRIALS_PER_DAY_GLOBAL?: EnvNumber;
 }
+
+/**
+ * Abuse and size limits. Counts can be overridden per deployment with the
+ * `FLYWHEEL_*` variables in `Env` (wrangler `[vars]` or `wrangler secret put`).
+ */
+export const LIMITS = {
+  registrationsPerIpPerDay: 5,
+  registrationsPerDay: 200,
+  provisionalHourlyWrites: 60,
+  provisionalDailyWrites: 300,
+  invitedHourlyWrites: 60,
+  promotedHourlyWrites: 120,
+  registerBodyBytes: 2 * 1024,
+  smallBodyBytes: 8 * 1024,
+  noteBodyBytes: 32 * 1024,
+  verifyResultBodyBytes: 32 * 1024,
+  nodeBodyBytes: 384 * 1024,
+  nodeMetaBytes: 32 * 1024,
+  sourceBytes: 256 * 1024,
+  titleChars: 500,
+  hypothesisChars: 8000,
+  shortFieldChars: 200,
+  noteTitleChars: 200,
+  noteBodyChars: 16000,
+  reasonChars: 1000,
+  maxParents: 16,
+  maxNoteLinks: 32,
+  leaseMinutesDefault: 120,
+  leaseMinutesMax: 480,
+  searchLimitMax: 50,
+  notesLimitMax: 100,
+  queueLimitMax: 100,
+  queryChars: 200,
+  searchOffsetMax: 500,
+  provisionalTrialsPerDay: 100,
+  provisionalTrialsPerDayGlobal: 1000,
+} as const;
+
+type Role = "admin" | "contributor" | "provisional";
 
 export interface ApiKeyRow {
   id: string;
@@ -44,10 +105,12 @@ export interface ApiKeyRow {
   hourly_limit: number;
   revoked_at: string | null;
   created_at: string;
+  agent?: string | null;
+  model?: string | null;
 }
 
 export interface AuthPrincipal {
-  role: "admin" | "contributor";
+  role: Role;
   keyId: string;
   handle: string;
   hourlyLimit: number;
@@ -79,13 +142,49 @@ export interface NodeRow {
   metrics_json: string | null;
   verified: number;
   created_at: string;
+  state?: string | null;
+  state_reason?: string | null;
+  state_by?: string | null;
+  state_at?: string | null;
+  source_sha?: string | null;
+  author_tier?: string | null;
+  updated_at?: string | null;
 }
 
-export interface NodeRecord extends Omit<NodeRow, "dims" | "codex_refs" | "verified"> {
+export interface NodeRecord {
+  id: string;
+  parent_id: string | null;
+  lane: string;
+  run_id: string;
+  trial_id: string | null;
+  agent_model: string | null;
+  author: string | null;
+  author_tier: string | null;
+  title: string | null;
+  hypothesis: string | null;
+  decision: string;
+  soft_min_eff: number | null;
+  ratio_vs_incumbent: number | null;
+  short_horizon_eff: number | null;
+  long_horizon_eff: number | null;
+  real_stan_passed: number | null;
+  real_stan_total: number | null;
+  real_ess_per_cost: number | null;
+  overhead_ratio: number | null;
+  b2_max: number | null;
   dims: number[] | null;
   codex_refs: string[];
+  code_sha: string | null;
+  metrics_json: string | null;
+  metrics: Record<string, unknown> | null;
   verified: number;
-  metrics?: Record<string, unknown> | null;
+  state: string;
+  state_reason: string | null;
+  state_by: string | null;
+  state_at: string | null;
+  has_source: boolean;
+  created_at: string;
+  updated_at: string | null;
 }
 
 export interface ClaimRow {
@@ -104,6 +203,7 @@ export interface DagEdge {
   target: string;
   lane: string;
   decision: string;
+  relation: string;
 }
 
 export interface AlignmentPoint {
@@ -124,6 +224,52 @@ export interface AlignmentPoint {
   verified: number;
 }
 
+interface NoteRow {
+  id: string;
+  kind: string;
+  lane: string | null;
+  title: string;
+  body: string | null;
+  state: string;
+  state_reason: string | null;
+  state_by: string | null;
+  author: string;
+  node_ids: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface QueueRow {
+  node_id: string;
+  lane: string;
+  status: string;
+  reason: string | null;
+  lease_token_hash: string | null;
+  leased_by: string | null;
+  lease_expires_at: string | null;
+  attempts: number;
+  result: string | null;
+  result_json: string | null;
+  verifier: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+type Args = Record<string, unknown>;
+
+interface Outcome {
+  status: number;
+  body: Record<string, unknown>;
+}
+
+interface OpContext {
+  env: Env;
+  request: Request;
+  principal: AuthPrincipal | null;
+}
+
+type Op = (ctx: OpContext, args: Args) => Promise<Outcome>;
+
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
@@ -132,9 +278,50 @@ const CORS_HEADERS: Record<string, string> = {
 
 const KEPT_DECISIONS = new Set(["keep", "keep_baseline", "keep_simpler"]);
 const VALID_CLAIM_PATCH_STATUSES = new Set(["done", "abandoned"]);
-const VALID_ROLES = new Set(["contributor", "admin"]);
+const VALID_ROLES = new Set(["contributor", "admin", "provisional"]);
+const NODE_STATES = new Set([
+  "unverified",
+  "needs-replication",
+  "replicated",
+  "verified",
+  "disputed",
+  "retracted",
+]);
+/** States a contributor may set on someone else's trial (with a reason). */
+const FLAG_STATES = new Set(["needs-replication", "disputed"]);
+/** States only a maintainer may move a trial out of. */
+const LOCKED_STATES = new Set(["verified", "retracted"]);
+/** Trials in these states never define a lane's frontier. */
+const FRONTIER_EXCLUDED_STATES = ["retracted", "disputed"];
+/** Node states a verification result may overwrite. */
+const RESULT_WRITABLE_STATES = ["unverified", "needs-replication", "replicated", "disputed"];
+const PARENT_RELATIONS = new Set(["incumbent", "combines", "fork"]);
+const NOTE_STATES: Record<string, string[]> = {
+  hypothesis: ["open", "supported", "refuted", "needs-replication"],
+  insight: ["open", "superseded", "retracted"],
+};
+const RESERVED_HANDLES = new Set([
+  "admin",
+  "root",
+  "root-admin",
+  "local-dev",
+  "maintainer",
+  "maintainers",
+  "system",
+  "flywheel",
+  "apin",
+  "anonymous",
+  "null",
+  "undefined",
+]);
+const HANDLE_RULE = "2-40 chars matching ^[a-zA-Z0-9][a-zA-Z0-9_.-]+$";
+const LANE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$/;
 
 const PUBLIC_READ_CACHE_SECONDS = 30;
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
 
 function jsonResponse(
   body: unknown,
@@ -151,35 +338,57 @@ function jsonResponse(
   });
 }
 
+function out(status: number, body: Record<string, unknown>): Outcome {
+  return { status, body };
+}
+
+function envLimit(value: EnvNumber, fallback: number): number {
+  if (value === undefined || value === null || value === "") return fallback;
+  const num = Number(value);
+  return Number.isFinite(num) && num >= 0 ? Math.trunc(num) : fallback;
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function utcDay(offsetDays = 0): string {
+  return new Date(Date.now() + offsetDays * 86_400_000).toISOString().slice(0, 10);
+}
+
 function getEdgeCache(env: Env): CacheLike | null {
   if (env.CACHE) return env.CACHE;
   const globalCaches = (globalThis as unknown as { caches?: { default?: CacheLike } }).caches;
   return globalCaches?.default ?? null;
 }
 
+function canonicalQuery(url: URL, allowed: readonly string[]): string {
+  const params = new URLSearchParams();
+  for (const key of allowed) {
+    const val = url.searchParams.get(key);
+    if (val !== null && val !== "") params.set(key, val);
+  }
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
+}
+
 function canonicalPublicCacheKey(url: URL): Request | null {
-  const { origin, pathname, searchParams } = url;
-  if (pathname === "/api/health" || pathname === "/api/dag" || pathname === "/api/frontier") {
-    return new Request(`${origin}${pathname}`, { method: "GET" });
-  }
-  if (pathname === "/api/claims") {
-    const lane = searchParams.get("lane");
-    const qs = lane ? `?lane=${encodeURIComponent(lane)}` : "";
-    return new Request(`${origin}${pathname}${qs}`, { method: "GET" });
-  }
+  const { origin, pathname } = url;
+  const key = (qs: string) => new Request(`${origin}${pathname}${qs}`, { method: "GET" });
+  if (pathname === "/api/health" || pathname === "/api/frontier") return key("");
+  if (pathname === "/api/dag") return key(canonicalQuery(url, ["lane"]));
+  if (pathname === "/api/claims") return key(canonicalQuery(url, ["lane"]));
   if (pathname === "/api/nodes") {
-    const allowed = ["lane", "run_id", "decision", "verified", "limit"] as const;
-    const params = new URLSearchParams();
-    for (const key of allowed) {
-      const val = searchParams.get(key);
-      if (val !== null && val !== "") params.set(key, val);
-    }
-    const qs = params.toString();
-    return new Request(`${origin}${pathname}${qs ? `?${qs}` : ""}`, { method: "GET" });
+    return key(canonicalQuery(url, ["lane", "run_id", "decision", "verified", "state", "limit"]));
   }
-  if (pathname.startsWith("/api/nodes/") && pathname.length > "/api/nodes/".length) {
-    return new Request(`${origin}${pathname}`, { method: "GET" });
+  if (pathname.startsWith("/api/nodes/") && pathname.length > "/api/nodes/".length) return key("");
+  if (pathname === "/api/search") {
+    return key(canonicalQuery(url, ["q", "lane", "kind", "limit", "offset"]));
   }
+  if (pathname === "/api/notes") {
+    return key(canonicalQuery(url, ["lane", "kind", "state", "author", "limit", "offset"]));
+  }
+  if (pathname.startsWith("/api/notes/") && pathname.length > "/api/notes/".length) return key("");
   return null;
 }
 
@@ -193,23 +402,27 @@ function timingSafeEqual(a: string, b: string): boolean {
 }
 
 function bytesToHex(bytes: Uint8Array): string {
-  let out = "";
+  let s = "";
   for (let i = 0; i < bytes.length; i += 1) {
-    out += bytes[i].toString(16).padStart(2, "0");
+    s += bytes[i].toString(16).padStart(2, "0");
   }
-  return out;
+  return s;
 }
 
-async function sha256Hex(input: string): Promise<string> {
-  const data = new TextEncoder().encode(input);
+async function sha256Hex(input: string | Uint8Array<ArrayBuffer>): Promise<string> {
+  const data = typeof input === "string" ? new TextEncoder().encode(input) : input;
   const digest = await crypto.subtle.digest("SHA-256", data);
   return bytesToHex(new Uint8Array(digest));
 }
 
-function generateApiToken(): string {
-  const bytes = new Uint8Array(30);
-  crypto.getRandomValues(bytes);
-  return `apfw_${bytesToHex(bytes)}`;
+function randomToken(prefix: string, bytes = 30): string {
+  const buf = new Uint8Array(bytes);
+  crypto.getRandomValues(buf);
+  return `${prefix}${bytesToHex(buf)}`;
+}
+
+function utf8Length(s: string): number {
+  return new TextEncoder().encode(s).length;
 }
 
 function sanitizeHandle(raw: unknown): string | null {
@@ -217,64 +430,6 @@ function sanitizeHandle(raw: unknown): string | null {
   if (!s) return null;
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,39}$/.test(s)) return null;
   return s;
-}
-
-async function authenticate(request: Request, env: Env): Promise<AuthPrincipal | null> {
-  const configuredKey = env.FLYWHEEL_API_KEY?.trim();
-  const authHeader = request.headers.get("Authorization") ?? "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
-
-  if (configuredKey && token.length > 0 && timingSafeEqual(token, configuredKey)) {
-    return { role: "admin", keyId: "root-admin", handle: "admin", hourlyLimit: Number.POSITIVE_INFINITY };
-  }
-
-  if (token.length > 0) {
-    const keyHash = await sha256Hex(token);
-    const row = await env.DB.prepare(
-      "SELECT id, key_hash, handle, role, hourly_limit, revoked_at, created_at FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL LIMIT 1"
-    )
-      .bind(keyHash)
-      .first<ApiKeyRow>();
-    if (row) {
-      const role = row.role === "admin" ? "admin" : "contributor";
-      const limit = Number.isFinite(Number(row.hourly_limit)) && Number(row.hourly_limit) > 0
-        ? Math.trunc(Number(row.hourly_limit))
-        : 120;
-      return {
-        role,
-        keyId: row.id,
-        handle: row.handle,
-        hourlyLimit: role === "admin" ? Number.POSITIVE_INFINITY : limit,
-      };
-    }
-  }
-
-  if (!configuredKey) {
-    return { role: "admin", keyId: "local-dev", handle: "admin", hourlyLimit: Number.POSITIVE_INFINITY };
-  }
-  return null;
-}
-
-async function checkAndConsumeRateLimit(
-  db: D1DatabaseLike,
-  principal: AuthPrincipal
-): Promise<{ allowed: boolean; count: number; limit: number }> {
-  if (principal.role === "admin" || !Number.isFinite(principal.hourlyLimit)) {
-    return { allowed: true, count: 0, limit: Number.POSITIVE_INFINITY };
-  }
-  const bucket = new Date().toISOString().slice(0, 13); // UTC hour YYYY-MM-DDTHH
-  await db
-    .prepare(
-      "INSERT INTO rate_limits (key_id, bucket, count) VALUES (?, ?, 1) ON CONFLICT(key_id, bucket) DO UPDATE SET count = count + 1"
-    )
-    .bind(principal.keyId, bucket)
-    .run();
-  const row = await db
-    .prepare("SELECT count FROM rate_limits WHERE key_id = ? AND bucket = ?")
-    .bind(principal.keyId, bucket)
-    .first<{ count: number }>();
-  const count = Number(row?.count ?? 1);
-  return { allowed: count <= principal.hourlyLimit, count, limit: principal.hourlyLimit };
 }
 
 function parseJsonSafe<T>(raw: string | null | undefined, fallback: T): T {
@@ -303,6 +458,10 @@ function toNullableString(value: unknown): string | null {
   return s.length > 0 ? s : null;
 }
 
+function toBool(value: unknown): boolean {
+  return value === true || value === 1 || value === "1" || value === "true";
+}
+
 function serializeJsonField(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   if (typeof value === "string") {
@@ -311,6 +470,176 @@ function serializeJsonField(value: unknown): string | null {
   }
   return JSON.stringify(value);
 }
+
+function clampLimit(raw: unknown, fallback: number, max: number): number {
+  const parsed = Math.trunc(Number(raw));
+  if (raw === undefined || raw === null || raw === "" || !Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return Math.min(parsed, max);
+}
+
+function clampOffset(raw: unknown): number {
+  const parsed = Math.trunc(Number(raw));
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 10_000) : 0;
+}
+
+/** Returns the first field whose string value exceeds its cap, or null. */
+function tooLongField(args: Args, caps: Record<string, number>): { field: string; max: number } | null {
+  for (const [field, max] of Object.entries(caps)) {
+    const val = args[field];
+    if (typeof val === "string" && val.length > max) return { field, max };
+  }
+  return null;
+}
+
+function placeholders(n: number): string {
+  return new Array(n).fill("?").join(", ");
+}
+
+function changesOf(res: D1Result): number {
+  return Number((res.meta as { changes?: number } | undefined)?.changes ?? 0);
+}
+
+// ---------------------------------------------------------------------------
+// Auth, rate limits and request bodies
+// ---------------------------------------------------------------------------
+
+function roleOf(raw: string): Role {
+  if (raw === "admin") return "admin";
+  if (raw === "provisional") return "provisional";
+  return "contributor";
+}
+
+async function authenticate(request: Request, env: Env): Promise<AuthPrincipal | null> {
+  const configuredKey = env.FLYWHEEL_API_KEY?.trim();
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+
+  if (configuredKey && token.length > 0 && timingSafeEqual(token, configuredKey)) {
+    return { role: "admin", keyId: "root-admin", handle: "admin", hourlyLimit: Number.POSITIVE_INFINITY };
+  }
+
+  if (token.length > 0) {
+    const keyHash = await sha256Hex(token);
+    const row = await env.DB.prepare(
+      "SELECT id, handle, role, hourly_limit FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL LIMIT 1"
+    )
+      .bind(keyHash)
+      .first<ApiKeyRow>();
+    if (row) {
+      const role = roleOf(row.role);
+      const limit = Number.isFinite(Number(row.hourly_limit)) && Number(row.hourly_limit) > 0
+        ? Math.trunc(Number(row.hourly_limit))
+        : 120;
+      return {
+        role,
+        keyId: row.id,
+        handle: row.handle,
+        hourlyLimit: role === "admin" ? Number.POSITIVE_INFINITY : limit,
+      };
+    }
+  }
+
+  if (!configuredKey) {
+    return { role: "admin", keyId: "local-dev", handle: "admin", hourlyLimit: Number.POSITIVE_INFINITY };
+  }
+  return null;
+}
+
+async function bumpCounter(db: D1DatabaseLike, key: string, bucket: string): Promise<number> {
+  const row = await db
+    .prepare(
+      "INSERT INTO rate_limits (key_id, bucket, count) VALUES (?, ?, 1) ON CONFLICT(key_id, bucket) DO UPDATE SET count = count + 1 RETURNING count"
+    )
+    .bind(key, bucket)
+    .first<{ count: number }>();
+  return Number(row?.count ?? 1);
+}
+
+/** Consumes one write from the token's hourly bucket and, for provisional tokens, its daily bucket. */
+async function consumeWrite(env: Env, principal: AuthPrincipal): Promise<Outcome | null> {
+  if (principal.role === "admin" || !Number.isFinite(principal.hourlyLimit)) return null;
+  const hourBucket = new Date().toISOString().slice(0, 13); // UTC hour YYYY-MM-DDTHH
+  const hourly = await bumpCounter(env.DB, principal.keyId, hourBucket);
+  if (hourly > principal.hourlyLimit) {
+    return out(429, { error: "rate_limit_exceeded", scope: "hourly", limit: principal.hourlyLimit, count: hourly });
+  }
+  if (principal.role === "provisional") {
+    const dailyLimit = envLimit(env.FLYWHEEL_PROVISIONAL_DAILY_WRITES, LIMITS.provisionalDailyWrites);
+    const daily = await bumpCounter(env.DB, `day:${principal.keyId}`, utcDay());
+    if (daily > dailyLimit) {
+      return out(429, { error: "rate_limit_exceeded", scope: "daily", limit: dailyLimit, count: daily });
+    }
+  }
+  return null;
+}
+
+/**
+ * New-trial budget for provisional tokens: per token and across all provisional tokens.
+ * Every trial is read by /api/dag, so this bounds how fast open registration can grow it.
+ */
+async function consumeProvisionalTrial(env: Env, principal: AuthPrincipal): Promise<Outcome | null> {
+  const day = utcDay();
+  const perToken = envLimit(env.FLYWHEEL_PROVISIONAL_TRIALS_PER_DAY, LIMITS.provisionalTrialsPerDay);
+  const mine = await bumpCounter(env.DB, `trials:${principal.keyId}`, day);
+  if (mine > perToken) {
+    return out(429, { error: "rate_limit_exceeded", scope: "provisional_trials_daily", limit: perToken, count: mine });
+  }
+  const globalCap = envLimit(env.FLYWHEEL_PROVISIONAL_TRIALS_PER_DAY_GLOBAL, LIMITS.provisionalTrialsPerDayGlobal);
+  const all = await bumpCounter(env.DB, "trials:provisional", day);
+  if (all > globalCap) {
+    return out(429, { error: "rate_limit_exceeded", scope: "provisional_trials_global_daily", limit: globalCap });
+  }
+  return null;
+}
+
+type BodyResult = { ok: true; value: Args } | { ok: false; outcome: Outcome };
+
+async function readJsonBody(request: Request, maxBytes: number, allowEmpty = false): Promise<BodyResult> {
+  const tooLarge: BodyResult = {
+    ok: false,
+    outcome: out(413, { error: "payload_too_large", max_bytes: maxBytes }),
+  };
+  const lengthHeader = request.headers.get("Content-Length");
+  if (lengthHeader !== null && Number(lengthHeader) > maxBytes) return tooLarge;
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  if (request.body) {
+    const reader = request.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return tooLarge;
+      }
+      chunks.push(value);
+    }
+  }
+  if (total === 0 && allowEmpty) return { ok: true, value: {} };
+  const buf = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buf.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(buf));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return { ok: true, value: parsed as Args };
+    }
+  } catch {
+    // fall through
+  }
+  return { ok: false, outcome: out(400, { error: "invalid_json" }) };
+}
+
+// ---------------------------------------------------------------------------
+// Node (trial) records
+// ---------------------------------------------------------------------------
 
 function deserializeNode(row: NodeRow): NodeRecord {
   const parsedDims = parseJsonSafe<unknown>(row.dims, null);
@@ -324,6 +653,7 @@ function deserializeNode(row: NodeRow): NodeRecord {
     : [];
 
   const parsedMetrics = parseJsonSafe<Record<string, unknown> | null>(row.metrics_json, null);
+  const verified = row.verified ? 1 : 0;
 
   return {
     id: row.id,
@@ -333,6 +663,7 @@ function deserializeNode(row: NodeRow): NodeRecord {
     trial_id: row.trial_id ?? null,
     agent_model: row.agent_model ?? null,
     author: row.author ?? null,
+    author_tier: row.author_tier ?? null,
     title: row.title ?? null,
     hypothesis: row.hypothesis ?? null,
     decision: row.decision,
@@ -350,8 +681,14 @@ function deserializeNode(row: NodeRow): NodeRecord {
     code_sha: row.code_sha ?? null,
     metrics_json: row.metrics_json ?? null,
     metrics: parsedMetrics,
-    verified: row.verified ? 1 : 0,
+    verified,
+    state: row.state ?? (verified ? "verified" : "unverified"),
+    state_reason: row.state_reason ?? null,
+    state_by: row.state_by ?? null,
+    state_at: row.state_at ?? null,
+    has_source: Boolean(row.source_sha),
     created_at: row.created_at,
+    updated_at: row.updated_at ?? null,
   };
 }
 
@@ -377,6 +714,7 @@ function compareFrontierCandidates(a: NodeRecord, b: NodeRecord): number {
 function computeFrontier(nodes: NodeRecord[]): Record<string, NodeRecord> {
   const byLane = new Map<string, NodeRecord[]>();
   for (const node of nodes) {
+    if (FRONTIER_EXCLUDED_STATES.includes(node.state)) continue;
     const list = byLane.get(node.lane) ?? [];
     list.push(node);
     byLane.set(node.lane, list);
@@ -427,192 +765,504 @@ function computeAlignment(nodes: NodeRecord[]): AlignmentPoint[] {
 }
 
 async function queryAllNodes(db: D1DatabaseLike): Promise<NodeRecord[]> {
-  const res = await db
-    .prepare("SELECT * FROM nodes ORDER BY created_at ASC, id ASC")
-    .all<NodeRow>();
+  const res = await db.prepare("SELECT * FROM nodes ORDER BY created_at ASC, id ASC").all<NodeRow>();
   return (res.results ?? []).map(deserializeNode);
 }
 
+async function getNodeRow(db: D1DatabaseLike, id: string): Promise<NodeRow | null> {
+  return db.prepare("SELECT * FROM nodes WHERE id = ?").bind(id).first<NodeRow>();
+}
+
+/** Every lineage edge whose endpoints both exist: node_parents plus legacy nodes.parent_id. */
+async function queryAllEdges(db: D1DatabaseLike, nodes: NodeRecord[], lane?: string | null): Promise<DagEdge[]> {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const res = lane
+    ? await db
+        .prepare(
+          "SELECT p.child, p.parent, p.relation FROM node_parents p JOIN nodes n ON n.id = p.child WHERE n.lane = ? ORDER BY p.child, p.parent, p.relation"
+        )
+        .bind(lane)
+        .all<{ child: string; parent: string; relation: string }>()
+    : await db
+        .prepare("SELECT child, parent, relation FROM node_parents ORDER BY child, parent, relation")
+        .all<{ child: string; parent: string; relation: string }>();
+  const seen = new Set<string>();
+  const edges: DagEdge[] = [];
+  const push = (parent: string, child: string, relation: string) => {
+    const target = byId.get(child);
+    if (!target || !byId.has(parent)) return;
+    const key = `${parent}\u0000${child}\u0000${relation}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    edges.push({ source: parent, target: child, lane: target.lane, decision: target.decision, relation });
+  };
+  for (const n of nodes) {
+    if (n.parent_id) push(n.parent_id, n.id, "incumbent");
+  }
+  for (const r of res.results ?? []) push(r.parent, r.child, r.relation);
+  return edges;
+}
+
 async function queryActiveClaims(db: D1DatabaseLike, lane?: string | null): Promise<ClaimRow[]> {
-  const nowIso = new Date().toISOString();
+  const now = nowIso();
   if (lane) {
     const res = await db
       .prepare(
         "SELECT * FROM claims WHERE status = 'active' AND expires_at > ? AND lane = ? ORDER BY created_at DESC"
       )
-      .bind(nowIso, lane)
+      .bind(now, lane)
       .all<ClaimRow>();
     return res.results ?? [];
   }
   const res = await db
-    .prepare(
-      "SELECT * FROM claims WHERE status = 'active' AND expires_at > ? ORDER BY created_at DESC"
-    )
-    .bind(nowIso)
+    .prepare("SELECT * FROM claims WHERE status = 'active' AND expires_at > ? ORDER BY created_at DESC")
+    .bind(now)
     .all<ClaimRow>();
   return res.results ?? [];
 }
 
-async function queryFilteredNodes(
-  db: D1DatabaseLike,
-  filters: {
-    lane?: string | null;
-    run_id?: string | null;
-    decision?: string | null;
-    verified?: string | boolean | number | null;
-    limit?: number | null;
-  }
-): Promise<NodeRecord[]> {
+async function queryFilteredNodes(db: D1DatabaseLike, filters: Args): Promise<NodeRecord[]> {
   const clauses: string[] = [];
   const params: unknown[] = [];
-
-  if (filters.lane) {
-    clauses.push("lane = ?");
-    params.push(filters.lane);
-  }
-  if (filters.run_id) {
-    clauses.push("run_id = ?");
-    params.push(filters.run_id);
-  }
-  if (filters.decision) {
-    clauses.push("decision = ?");
-    params.push(filters.decision);
-  }
-  if (filters.verified !== undefined && filters.verified !== null && filters.verified !== "") {
-    const vStr = String(filters.verified).toLowerCase();
-    const vInt = vStr === "1" || vStr === "true" ? 1 : 0;
-    clauses.push("verified = ?");
-    params.push(vInt);
-  }
-
-  let limit = 200;
-  if (filters.limit !== undefined && filters.limit !== null) {
-    const parsed = Math.trunc(Number(filters.limit));
-    if (Number.isFinite(parsed) && parsed > 0) {
-      limit = Math.min(parsed, 1000);
+  for (const col of ["lane", "run_id", "decision", "state"]) {
+    const val = toNullableString(filters[col]);
+    if (val) {
+      clauses.push(`${col} = ?`);
+      params.push(val);
     }
   }
-
+  const verified = filters.verified;
+  if (verified !== undefined && verified !== null && verified !== "") {
+    clauses.push("verified = ?");
+    params.push(toBool(String(verified).toLowerCase()) ? 1 : 0);
+  }
+  const limit = clampLimit(filters.limit, 200, 1000);
   const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
-  const sql = `SELECT * FROM nodes ${where} ORDER BY created_at DESC, id DESC LIMIT ?`;
   params.push(limit);
-
-  const res = await db.prepare(sql).bind(...params).all<NodeRow>();
+  const res = await db
+    .prepare(`SELECT * FROM nodes ${where} ORDER BY created_at DESC, id DESC LIMIT ?`)
+    .bind(...params)
+    .all<NodeRow>();
   return (res.results ?? []).map(deserializeNode);
 }
 
-async function insertNode(
-  db: D1DatabaseLike,
-  payload: Record<string, unknown>,
-  principal: AuthPrincipal
-): Promise<{ status: number; body: Record<string, unknown> }> {
+interface ParentEdge {
+  parent: string;
+  relation: string;
+}
+
+/** Legacy `parent_id` (relation incumbent) plus `parent_ids: [id | {id, relation}]`. */
+function parseParents(payload: Args, childId: string): { edges: ParentEdge[]; given: boolean } | Outcome {
+  const edges: ParentEdge[] = [];
+  const seen = new Set<string>();
+  const add = (parentRaw: unknown, relationRaw: unknown): Outcome | null => {
+    const parent = toNullableString(parentRaw);
+    if (!parent) return out(400, { error: "invalid_parent", detail: "parent id must be a non-empty string" });
+    if (parent.length > LIMITS.shortFieldChars) return out(400, { error: "field_too_long", field: "parent_ids" });
+    const relation = toNullableString(relationRaw) ?? "incumbent";
+    if (!PARENT_RELATIONS.has(relation)) {
+      return out(400, { error: "invalid_relation", allowed: [...PARENT_RELATIONS] });
+    }
+    if (parent === childId) return out(400, { error: "self_parent" });
+    const key = `${parent}\u0000${relation}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      edges.push({ parent, relation });
+    }
+    return null;
+  };
+
+  const hasLegacy = payload.parent_id !== undefined && payload.parent_id !== null && payload.parent_id !== "";
+  if (hasLegacy) {
+    const err = add(payload.parent_id, "incumbent");
+    if (err) return err;
+  }
+  const list = payload.parent_ids;
+  if (list !== undefined && list !== null) {
+    if (!Array.isArray(list)) return out(400, { error: "invalid_parent_ids", detail: "expected an array" });
+    if (list.length > LIMITS.maxParents) {
+      return out(400, { error: "too_many_parents", max: LIMITS.maxParents });
+    }
+    for (const item of list) {
+      const err = item && typeof item === "object"
+        ? add((item as Args).id, (item as Args).relation)
+        : add(item, "incumbent");
+      if (err) return err;
+    }
+  }
+  return { edges, given: hasLegacy || (Array.isArray(list) && list.length > 0) || "parent_id" in payload };
+}
+
+const NODE_DATA_COLUMNS = [
+  "parent_id", "lane", "run_id", "trial_id", "agent_model", "title", "hypothesis", "decision",
+  "soft_min_eff", "ratio_vs_incumbent", "short_horizon_eff", "long_horizon_eff", "overhead_ratio",
+  "b2_max", "dims", "codex_refs", "code_sha", "metrics_json",
+] as const;
+const NODE_ADMIN_COLUMNS = ["real_stan_passed", "real_stan_total", "real_ess_per_cost"] as const;
+
+async function frontierBest(db: D1DatabaseLike, lane: string, excludeId: string): Promise<number | null> {
+  const row = await db
+    .prepare(
+      `SELECT MAX(soft_min_eff) AS best FROM nodes
+       WHERE lane = ? AND id <> ? AND state NOT IN ('retracted', 'disputed')
+         AND (verified = 1 OR decision IN ('keep', 'keep_baseline', 'keep_simpler'))`
+    )
+    .bind(lane, excludeId)
+    .first<{ best: number | null }>();
+  return toFiniteNumber(row?.best);
+}
+
+/** A kept trial with source that beats its lane's frontier enters the verification queue. */
+async function maybeEnqueue(db: D1DatabaseLike, node: NodeRecord): Promise<boolean> {
+  if (!KEPT_DECISIONS.has(node.decision) || node.soft_min_eff === null || !node.has_source) return false;
+  if (LOCKED_STATES.has(node.state) || FRONTIER_EXCLUDED_STATES.includes(node.state)) return false;
+  const best = await frontierBest(db, node.lane, node.id);
+  if (best !== null && node.soft_min_eff <= best) return false;
+  const now = nowIso();
+  const res = await db
+    .prepare(
+      `INSERT OR IGNORE INTO verify_queue (node_id, lane, status, reason, attempts, created_at, updated_at)
+       VALUES (?, ?, 'queued', 'beats_frontier', 0, ?, ?)`
+    )
+    .bind(node.id, node.lane, now, now)
+    .run();
+  return changesOf(res) > 0;
+}
+
+const opPostNode: Op = async (ctx, payload) => {
+  const db = ctx.env.DB;
+  const principal = ctx.principal as AuthPrincipal;
+  const isAdmin = principal.role === "admin";
+
   const lane = toNullableString(payload.lane);
   const run_id = toNullableString(payload.run_id);
   const decision = toNullableString(payload.decision);
-
   if (!lane || !run_id || !decision) {
-    return {
-      status: 400,
-      body: { error: "missing_required_fields", required: ["lane", "run_id", "decision"] },
-    };
+    return out(400, { error: "missing_required_fields", required: ["lane", "run_id", "decision"] });
   }
 
-  const id = toNullableString(payload.id) ?? crypto.randomUUID();
+  const source = payload.source;
+  if (source !== undefined && source !== null && typeof source !== "string") {
+    return out(400, { error: "invalid_source", detail: "source must be a string" });
+  }
+  const metaBytes = utf8Length(JSON.stringify({ ...payload, source: null }));
+  if (metaBytes > LIMITS.nodeMetaBytes) {
+    return out(413, { error: "payload_too_large", detail: "trial fields excluding source", max_bytes: LIMITS.nodeMetaBytes });
+  }
+  const long = tooLongField(payload, {
+    id: LIMITS.shortFieldChars,
+    lane: 32,
+    run_id: LIMITS.shortFieldChars,
+    trial_id: LIMITS.shortFieldChars,
+    agent_model: LIMITS.shortFieldChars,
+    author: LIMITS.shortFieldChars,
+    decision: 64,
+    code_sha: 128,
+    title: LIMITS.titleChars,
+    hypothesis: LIMITS.hypothesisChars,
+  });
+  if (long) return out(400, { error: "field_too_long", ...long });
 
-  // Contributors cannot overwrite existing nodes owned by another author.
-  if (principal.role !== "admin") {
-    const existing = await db
-      .prepare("SELECT id, author FROM nodes WHERE id = ?")
-      .bind(id)
-      .first<{ id: string; author: string | null }>();
-    if (existing && existing.author !== principal.handle) {
-      return {
-        status: 403,
-        body: { error: "forbidden_node_owner", id, owner: existing.author },
-      };
+  const id = toNullableString(payload.id) ?? crypto.randomUUID();
+  const parents = parseParents(payload, id);
+  if ("status" in parents) return parents;
+
+  let sourceSha: string | null = null;
+  let sourceBytes: Uint8Array<ArrayBuffer> | null = null;
+  if (typeof source === "string" && source.length > 0) {
+    sourceBytes = new TextEncoder().encode(source);
+    if (sourceBytes.length > LIMITS.sourceBytes) {
+      return out(413, { error: "source_too_large", max_bytes: LIMITS.sourceBytes, bytes: sourceBytes.length });
+    }
+    sourceSha = await sha256Hex(sourceBytes);
+    const codeSha = toNullableString(payload.code_sha)?.toLowerCase();
+    if (codeSha && /^[0-9a-f]{8,64}$/.test(codeSha) && !sourceSha.startsWith(codeSha)) {
+      return out(400, { error: "code_sha_mismatch", code_sha: codeSha, source_sha256: sourceSha });
     }
   }
 
-  const created_at = toNullableString(payload.created_at) ?? new Date().toISOString();
-  const verifiedRaw = payload.verified;
-  const requestedVerified =
-    verifiedRaw === true || verifiedRaw === 1 || verifiedRaw === "1" || verifiedRaw === "true"
-      ? 1
-      : 0;
-  // Contributors are always forced to verified = 0 and stamped with their key handle.
-  const verified = principal.role === "admin" ? requestedVerified : 0;
-  const author = principal.role === "admin" ? toNullableString(payload.author) : principal.handle;
+  const existing = await db
+    .prepare("SELECT id, author FROM nodes WHERE id = ?")
+    .bind(id)
+    .first<{ id: string; author: string | null }>();
+  if (existing && !isAdmin && existing.author !== principal.handle) {
+    return out(403, { error: "forbidden_node_owner", id, owner: existing.author });
+  }
+  if (!existing && principal.role === "provisional") {
+    const capped = await consumeProvisionalTrial(ctx.env, principal);
+    if (capped) return capped;
+  }
 
-  const metricsJson =
-    payload.metrics_json !== undefined
-      ? serializeJsonField(payload.metrics_json)
-      : payload.metrics !== undefined
-        ? serializeJsonField(payload.metrics)
-        : null;
+  const now = nowIso();
+  if (sourceSha && sourceBytes) {
+    await db
+      .prepare("INSERT OR IGNORE INTO sources (sha256, body, size, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?)")
+      .bind(sourceSha, source, sourceBytes.length, principal.handle, now)
+      .run();
+  }
 
-  await db
+  const incumbent = parents.edges.find((e) => e.relation === "incumbent")?.parent ?? null;
+  const explicitVerified = isAdmin && payload.verified !== undefined;
+  const verified = isAdmin && toBool(payload.verified) ? 1 : 0;
+  const values: Record<string, unknown> = {
+    parent_id: toNullableString(payload.parent_id) ?? incumbent,
+    lane,
+    run_id,
+    trial_id: toNullableString(payload.trial_id),
+    agent_model: toNullableString(payload.agent_model),
+    title: toNullableString(payload.title),
+    hypothesis: toNullableString(payload.hypothesis),
+    decision,
+    soft_min_eff: toFiniteNumber(payload.soft_min_eff),
+    ratio_vs_incumbent: toFiniteNumber(payload.ratio_vs_incumbent),
+    short_horizon_eff: toFiniteNumber(payload.short_horizon_eff),
+    long_horizon_eff: toFiniteNumber(payload.long_horizon_eff),
+    overhead_ratio: toFiniteNumber(payload.overhead_ratio),
+    b2_max: toFiniteNumber(payload.b2_max),
+    dims: serializeJsonField(payload.dims),
+    codex_refs: serializeJsonField(payload.codex_refs ?? []),
+    code_sha: toNullableString(payload.code_sha),
+    metrics_json:
+      payload.metrics_json !== undefined
+        ? serializeJsonField(payload.metrics_json)
+        : payload.metrics !== undefined
+          ? serializeJsonField(payload.metrics)
+          : null,
+    real_stan_passed: isAdmin ? toFiniteInt(payload.real_stan_passed) : null,
+    real_stan_total: isAdmin ? toFiniteInt(payload.real_stan_total) : null,
+    real_ess_per_cost: isAdmin ? toFiniteNumber(payload.real_ess_per_cost) : null,
+    id,
+    author: isAdmin ? toNullableString(payload.author) : principal.handle,
+    author_tier: isAdmin ? null : principal.role,
+    verified,
+    state: verified ? "verified" : "unverified",
+    source_sha: sourceSha,
+    created_at: toNullableString(payload.created_at) ?? now,
+    updated_at: now,
+  };
+
+  // Idempotent upsert. A re-post by the same author updates the trial's data but never
+  // its research state, author or created_at; another author's row is never touched.
+  const columns = Object.keys(values);
+  const updates: string[] = NODE_DATA_COLUMNS
+    .filter((c) => c !== "parent_id" || parents.given)
+    .map((c) => `${c} = excluded.${c}`);
+  updates.push("source_sha = COALESCE(excluded.source_sha, nodes.source_sha)", "updated_at = excluded.updated_at");
+  if (isAdmin) {
+    for (const c of NODE_ADMIN_COLUMNS) updates.push(`${c} = COALESCE(excluded.${c}, nodes.${c})`);
+    updates.push("author = COALESCE(excluded.author, nodes.author)");
+    if (explicitVerified) {
+      updates.push(
+        "verified = excluded.verified",
+        "state = CASE WHEN excluded.verified = 1 THEN 'verified' WHEN nodes.state = 'verified' THEN 'unverified' ELSE nodes.state END"
+      );
+    }
+  }
+  const guard = isAdmin ? "" : " WHERE nodes.author IS excluded.author";
+  const res = await db
     .prepare(
-      `INSERT OR REPLACE INTO nodes (
-        id, parent_id, lane, run_id, trial_id, agent_model, author, title, hypothesis,
-        decision, soft_min_eff, ratio_vs_incumbent, short_horizon_eff, long_horizon_eff,
-        real_stan_passed, real_stan_total, real_ess_per_cost, overhead_ratio, b2_max,
-        dims, codex_refs, code_sha, metrics_json, verified, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO nodes (${columns.join(", ")}) VALUES (${placeholders(columns.length)})
+       ON CONFLICT(id) DO UPDATE SET ${updates.join(", ")}${guard}`
     )
-    .bind(
-      id,
-      toNullableString(payload.parent_id),
-      lane,
-      run_id,
-      toNullableString(payload.trial_id),
-      toNullableString(payload.agent_model),
-      author,
-      toNullableString(payload.title),
-      toNullableString(payload.hypothesis),
-      decision,
-      toFiniteNumber(payload.soft_min_eff),
-      toFiniteNumber(payload.ratio_vs_incumbent),
-      toFiniteNumber(payload.short_horizon_eff),
-      toFiniteNumber(payload.long_horizon_eff),
-      principal.role === "admin" ? toFiniteInt(payload.real_stan_passed) : null,
-      principal.role === "admin" ? toFiniteInt(payload.real_stan_total) : null,
-      principal.role === "admin" ? toFiniteNumber(payload.real_ess_per_cost) : null,
-      toFiniteNumber(payload.overhead_ratio),
-      toFiniteNumber(payload.b2_max),
-      serializeJsonField(payload.dims),
-      serializeJsonField(payload.codex_refs ?? []),
-      toNullableString(payload.code_sha),
-      metricsJson,
-      verified,
-      created_at
+    .bind(...columns.map((c) => values[c]))
+    .run();
+  if (changesOf(res) === 0) {
+    return out(403, { error: "forbidden_node_owner", id });
+  }
+
+  if (parents.given) {
+    if (existing) await db.prepare("DELETE FROM node_parents WHERE child = ?").bind(id).run();
+    if (parents.edges.length > 0) {
+      const binds: unknown[] = [];
+      for (const e of parents.edges) binds.push(id, e.parent, e.relation, now);
+      await db
+        .prepare(
+          `INSERT OR IGNORE INTO node_parents (child, parent, relation, created_at) VALUES ${parents.edges
+            .map(() => "(?, ?, ?, ?)")
+            .join(", ")}`
+        )
+        .bind(...binds)
+        .run();
+    }
+  }
+
+  const row = await getNodeRow(db, id);
+  const node = row ? deserializeNode(row) : null;
+  const queued = node ? await maybeEnqueue(db, node) : false;
+  return out(existing ? 200 : 201, { ok: true, created: !existing, node, verify_queued: queued });
+};
+
+const opListNodes: Op = async (ctx, args) => {
+  const nodes = await queryFilteredNodes(ctx.env.DB, args);
+  return out(200, { nodes, count: nodes.length });
+};
+
+const opFrontier: Op = async (ctx, args) => {
+  const frontier = computeFrontier(await queryAllNodes(ctx.env.DB));
+  const lane = toNullableString(args.lane);
+  if (lane) return out(200, { frontier: frontier[lane] ? { [lane]: frontier[lane] } : {} });
+  return out(200, { frontier, count: Object.keys(frontier).length });
+};
+
+const opGetNode: Op = async (ctx, args) => {
+  const db = ctx.env.DB;
+  const id = toNullableString(args.id);
+  if (!id) return out(400, { error: "missing_required_fields", required: ["id"] });
+  const row = await getNodeRow(db, id);
+  if (!row) return out(404, { error: "not_found" });
+  const node = deserializeNode(row);
+
+  const parentRes = await db
+    .prepare("SELECT parent AS id, relation FROM node_parents WHERE child = ? ORDER BY relation, parent")
+    .bind(id)
+    .all<{ id: string; relation: string }>();
+  const parents = parentRes.results ?? [];
+  if (node.parent_id && !parents.some((p) => p.id === node.parent_id && p.relation === "incumbent")) {
+    parents.unshift({ id: node.parent_id, relation: "incumbent" });
+  }
+  const childEdgeRes = await db
+    .prepare("SELECT child AS id, relation FROM node_parents WHERE parent = ?")
+    .bind(id)
+    .all<{ id: string; relation: string }>();
+  const childrenRes = await db
+    .prepare(
+      "SELECT * FROM nodes WHERE parent_id = ? OR id IN (SELECT child FROM node_parents WHERE parent = ?) ORDER BY created_at ASC, id ASC"
     )
+    .bind(id, id)
+    .all<NodeRow>();
+  const children = (childrenRes.results ?? []).map(deserializeNode);
+  const edges = parents.map((p) => ({ source: p.id, target: id, relation: p.relation }));
+  const childEdgeKeys = new Set<string>();
+  for (const e of childEdgeRes.results ?? []) {
+    childEdgeKeys.add(`${e.id}\u0000${e.relation}`);
+    edges.push({ source: id, target: e.id, relation: e.relation });
+  }
+  for (const c of children) {
+    if (c.parent_id === id && !childEdgeKeys.has(`${c.id}\u0000incumbent`)) {
+      edges.push({ source: id, target: c.id, relation: "incumbent" });
+    }
+  }
+  const parentRow = node.parent_id ? await getNodeRow(db, node.parent_id) : null;
+  const queue = await db
+    .prepare("SELECT * FROM verify_queue WHERE node_id = ?")
+    .bind(id)
+    .first<QueueRow>();
+
+  return out(200, {
+    node,
+    parent: parentRow ? deserializeNode(parentRow) : null,
+    parents,
+    children,
+    edges,
+    verification: queue ? publicQueueFields(queue) : null,
+  });
+};
+
+const opGetSource: Op = async (ctx, args) => {
+  const id = toNullableString(args.node_id ?? args.id);
+  if (!id) return out(400, { error: "missing_required_fields", required: ["node_id"] });
+  const row = await ctx.env.DB
+    .prepare("SELECT id, code_sha, source_sha FROM nodes WHERE id = ?")
+    .bind(id)
+    .first<{ id: string; code_sha: string | null; source_sha: string | null }>();
+  if (!row) return out(404, { error: "not_found" });
+  if (!row.source_sha) return out(404, { error: "no_source", node_id: id });
+  const src = await ctx.env.DB
+    .prepare("SELECT sha256, body, size FROM sources WHERE sha256 = ?")
+    .bind(row.source_sha)
+    .first<{ sha256: string; body: string; size: number }>();
+  if (!src) return out(404, { error: "no_source", node_id: id });
+  return out(200, {
+    node_id: id,
+    sha256: src.sha256,
+    size: Number(src.size),
+    code_sha: row.code_sha ?? null,
+    source: src.body,
+  });
+};
+
+const opSetNodeState: Op = async (ctx, args) => {
+  const db = ctx.env.DB;
+  const principal = ctx.principal as AuthPrincipal;
+  const id = toNullableString(args.id ?? args.node_id);
+  const state = toNullableString(args.state);
+  const reason = toNullableString(args.reason);
+  if (!id || !state) return out(400, { error: "missing_required_fields", required: ["id", "state"] });
+  if (!NODE_STATES.has(state)) return out(400, { error: "invalid_state", allowed: [...NODE_STATES] });
+  if (reason && reason.length > LIMITS.reasonChars) {
+    return out(400, { error: "field_too_long", field: "reason", max: LIMITS.reasonChars });
+  }
+  const row = await getNodeRow(db, id);
+  if (!row) return out(404, { error: "not_found" });
+  const node = deserializeNode(row);
+
+  if (principal.role !== "admin") {
+    const own = node.author === principal.handle;
+    if (own) {
+      if (state !== "retracted") {
+        return out(403, { error: "forbidden_state", detail: "authors may only retract their own trial", allowed: ["retracted"] });
+      }
+    } else {
+      if (principal.role === "provisional") {
+        return out(403, { error: "forbidden_tier", detail: "flagging another author's trial needs a contributor token" });
+      }
+      if (!FLAG_STATES.has(state)) {
+        return out(403, { error: "forbidden_state", allowed: [...FLAG_STATES] });
+      }
+      if (!reason) return out(400, { error: "reason_required" });
+      if (LOCKED_STATES.has(node.state)) {
+        return out(409, { error: "state_locked", state: node.state });
+      }
+    }
+  }
+
+  const now = nowIso();
+  await db
+    .prepare("UPDATE nodes SET state = ?, verified = ?, state_reason = ?, state_by = ?, state_at = ? WHERE id = ?")
+    .bind(state, state === "verified" ? 1 : 0, reason, principal.handle, now, id)
     .run();
 
-  const row = await db.prepare("SELECT * FROM nodes WHERE id = ?").bind(id).first<NodeRow>();
-  return {
-    status: 201,
-    body: { ok: true, node: row ? deserializeNode(row) : null },
-  };
-}
+  if (state === "needs-replication" && node.has_source) {
+    await db
+      .prepare(
+        `INSERT INTO verify_queue (node_id, lane, status, reason, attempts, created_at, updated_at)
+         VALUES (?, ?, 'queued', 'needs-replication', 0, ?, ?)
+         ON CONFLICT(node_id) DO UPDATE SET status = 'queued', reason = excluded.reason,
+           lease_token_hash = NULL, leased_by = NULL, lease_expires_at = NULL, updated_at = excluded.updated_at
+         WHERE verify_queue.status = 'done'`
+      )
+      .bind(id, node.lane, now, now)
+      .run();
+  } else if (LOCKED_STATES.has(state)) {
+    await db
+      .prepare(
+        "UPDATE verify_queue SET status = 'done', result = ?, lease_token_hash = NULL, updated_at = ? WHERE node_id = ? AND status <> 'done'"
+      )
+      .bind(state, now, id)
+      .run();
+  }
+
+  const updated = await getNodeRow(db, id);
+  return out(200, { ok: true, node: updated ? deserializeNode(updated) : null });
+};
+
+// ---------------------------------------------------------------------------
+// Claims (task leases)
+// ---------------------------------------------------------------------------
 
 function claimOwnedBy(agentField: string, handle: string): boolean {
   return agentField === handle || agentField.startsWith(`${handle}:`);
 }
 
-async function createClaim(
-  db: D1DatabaseLike,
-  payload: Record<string, unknown>,
-  principal: AuthPrincipal
-): Promise<{ status: number; body: Record<string, unknown> }> {
+const opCreateClaim: Op = async (ctx, payload) => {
+  const db = ctx.env.DB;
+  const principal = ctx.principal as AuthPrincipal;
   const task_id = toNullableString(payload.task_id);
   const lane = toNullableString(payload.lane);
   const rawAgent = toNullableString(payload.agent);
 
   if (!task_id || !lane || !rawAgent) {
-    return {
-      status: 400,
-      body: { error: "missing_required_fields", required: ["task_id", "lane", "agent"] },
-    };
+    return out(400, { error: "missing_required_fields", required: ["task_id", "lane", "agent"] });
   }
 
   const agent =
@@ -623,10 +1273,10 @@ async function createClaim(
         : `${principal.handle}:${rawAgent}`;
 
   const nowMs = Date.now();
-  const nowIso = new Date(nowMs).toISOString();
+  const now = new Date(nowMs).toISOString();
   const ttlRaw = payload.ttl_minutes === undefined ? 60 : Number(payload.ttl_minutes);
   if (!Number.isFinite(ttlRaw) || ttlRaw <= 0) {
-    return { status: 400, body: { error: "invalid_ttl_minutes" } };
+    return out(400, { error: "invalid_ttl_minutes" });
   }
   const ttlMinutes = Math.min(ttlRaw, principal.role === "admin" ? 1440 : 240);
   const force = payload.force === true;
@@ -635,28 +1285,20 @@ async function createClaim(
     .prepare(
       "SELECT * FROM claims WHERE task_id = ? AND status = 'active' AND expires_at > ? ORDER BY created_at DESC LIMIT 1"
     )
-    .bind(task_id, nowIso)
+    .bind(task_id, now)
     .first<ClaimRow>();
 
   if (existing && !force) {
-    return {
-      status: 409,
-      body: { error: "already_claimed", existing_claim: existing },
-    };
+    return out(409, { error: "already_claimed", existing_claim: existing });
   }
 
   if (existing && force) {
     if (principal.role !== "admin" && !claimOwnedBy(existing.agent, principal.handle)) {
-      return {
-        status: 403,
-        body: { error: "forbidden_force_claim", existing_claim: existing },
-      };
+      return out(403, { error: "forbidden_force_claim", existing_claim: existing });
     }
     await db
-      .prepare(
-        "UPDATE claims SET status = 'abandoned' WHERE task_id = ? AND status = 'active' AND expires_at > ?"
-      )
-      .bind(task_id, nowIso)
+      .prepare("UPDATE claims SET status = 'abandoned' WHERE task_id = ? AND status = 'active' AND expires_at > ?")
+      .bind(task_id, now)
       .run();
   }
 
@@ -669,74 +1311,921 @@ async function createClaim(
       `INSERT INTO claims (id, task_id, lane, agent, summary, status, expires_at, created_at)
        VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`
     )
-    .bind(id, task_id, lane, agent, summary, expiresAt, nowIso)
+    .bind(id, task_id, lane, agent, summary, expiresAt, now)
     .run();
 
   const claim = await db.prepare("SELECT * FROM claims WHERE id = ?").bind(id).first<ClaimRow>();
-  return { status: 201, body: { ok: true, claim } };
-}
+  return out(201, { ok: true, claim });
+};
 
-async function patchClaim(
-  db: D1DatabaseLike,
-  claimId: string,
-  payload: Record<string, unknown>,
-  principal: AuthPrincipal
-): Promise<{ status: number; body: Record<string, unknown> }> {
+const opPatchClaim: Op = async (ctx, payload) => {
+  const db = ctx.env.DB;
+  const principal = ctx.principal as AuthPrincipal;
+  const claimId = toNullableString(payload.id) ?? "";
   const statusVal = toNullableString(payload.status);
   if (!statusVal || !VALID_CLAIM_PATCH_STATUSES.has(statusVal)) {
-    return {
-      status: 400,
-      body: { error: "invalid_status", allowed: ["done", "abandoned"] },
-    };
+    return out(400, { error: "invalid_status", allowed: ["done", "abandoned"] });
   }
 
   const existing = await db.prepare("SELECT * FROM claims WHERE id = ?").bind(claimId).first<ClaimRow>();
-  if (!existing) {
-    return { status: 404, body: { error: "not_found" } };
-  }
+  if (!existing) return out(404, { error: "not_found" });
 
   if (principal.role !== "admin" && !claimOwnedBy(existing.agent, principal.handle)) {
-    return { status: 403, body: { error: "forbidden_claim_owner", owner: existing.agent } };
+    return out(403, { error: "forbidden_claim_owner", owner: existing.agent });
   }
 
-  const summary =
-    payload.summary !== undefined ? toNullableString(payload.summary) : existing.summary;
-
-  await db
-    .prepare("UPDATE claims SET status = ?, summary = ? WHERE id = ?")
-    .bind(statusVal, summary, claimId)
-    .run();
+  const summary = payload.summary !== undefined ? toNullableString(payload.summary) : existing.summary;
+  await db.prepare("UPDATE claims SET status = ?, summary = ? WHERE id = ?").bind(statusVal, summary, claimId).run();
 
   const updated = await db.prepare("SELECT * FROM claims WHERE id = ?").bind(claimId).first<ClaimRow>();
-  return { status: 200, body: { ok: true, claim: updated } };
+  return out(200, { ok: true, claim: updated });
+};
+
+const opListClaims: Op = async (ctx, args) => {
+  const claims = await queryActiveClaims(ctx.env.DB, toNullableString(args.lane));
+  return out(200, { claims, count: claims.length });
+};
+
+// ---------------------------------------------------------------------------
+// Notes: hypotheses and insights
+// ---------------------------------------------------------------------------
+
+function deserializeNote(row: NoteRow) {
+  const ids = parseJsonSafe<unknown>(row.node_ids, []);
+  return {
+    id: row.id,
+    kind: row.kind,
+    lane: row.lane ?? null,
+    title: row.title,
+    body: row.body ?? null,
+    state: row.state,
+    state_reason: row.state_reason ?? null,
+    state_by: row.state_by ?? null,
+    author: row.author,
+    node_ids: Array.isArray(ids) ? ids.map((x) => String(x)) : [],
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
 }
 
-const MCP_TOOLS = [
+function parseNodeIds(raw: unknown): string[] | Outcome {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) return out(400, { error: "invalid_node_ids", detail: "expected an array of node ids" });
+  if (raw.length > LIMITS.maxNoteLinks) return out(400, { error: "too_many_node_ids", max: LIMITS.maxNoteLinks });
+  const ids: string[] = [];
+  for (const item of raw) {
+    const s = toNullableString(item);
+    if (!s || s.length > LIMITS.shortFieldChars) return out(400, { error: "invalid_node_ids" });
+    if (!ids.includes(s)) ids.push(s);
+  }
+  return ids;
+}
+
+function validateNoteText(args: Args): Outcome | null {
+  const long = tooLongField(args, {
+    title: LIMITS.noteTitleChars,
+    body: LIMITS.noteBodyChars,
+    reason: LIMITS.reasonChars,
+  });
+  return long ? out(400, { error: "field_too_long", ...long }) : null;
+}
+
+const opCreateNote: Op = async (ctx, args) => {
+  const principal = ctx.principal as AuthPrincipal;
+  const kind = toNullableString(args.kind);
+  const title = toNullableString(args.title);
+  if (!kind || !title) return out(400, { error: "missing_required_fields", required: ["kind", "title"] });
+  const states = NOTE_STATES[kind];
+  if (!states) return out(400, { error: "invalid_kind", allowed: Object.keys(NOTE_STATES) });
+  const tooLong = validateNoteText(args);
+  if (tooLong) return tooLong;
+  const lane = toNullableString(args.lane);
+  if (lane && !LANE_RE.test(lane)) return out(400, { error: "invalid_lane" });
+  const state = toNullableString(args.state) ?? "open";
+  if (!states.includes(state)) return out(400, { error: "invalid_state", allowed: states });
+  const nodeIds = parseNodeIds(args.node_ids);
+  if (!Array.isArray(nodeIds)) return nodeIds;
+
+  const id = randomToken("note_", 9);
+  const now = nowIso();
+  await ctx.env.DB
+    .prepare(
+      `INSERT INTO notes (id, kind, lane, title, body, state, state_reason, state_by, author, node_ids, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`
+    )
+    .bind(id, kind, lane, title, toNullableString(args.body), state, principal.handle, JSON.stringify(nodeIds), now, now)
+    .run();
+  const row = await ctx.env.DB.prepare("SELECT * FROM notes WHERE id = ?").bind(id).first<NoteRow>();
+  return out(201, { ok: true, note: row ? deserializeNote(row) : null });
+};
+
+const opListNotes: Op = async (ctx, args) => {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  for (const col of ["lane", "kind", "state", "author"]) {
+    const val = toNullableString(args[col]);
+    if (val) {
+      clauses.push(`${col} = ?`);
+      params.push(val);
+    }
+  }
+  const limit = clampLimit(args.limit, 50, LIMITS.notesLimitMax);
+  const offset = clampOffset(args.offset);
+  const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+  const res = await ctx.env.DB
+    .prepare(`SELECT * FROM notes ${where} ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`)
+    .bind(...params, limit, offset)
+    .all<NoteRow>();
+  const notes = (res.results ?? []).map(deserializeNote);
+  return out(200, {
+    notes,
+    count: notes.length,
+    limit,
+    offset,
+    next_offset: notes.length === limit ? offset + limit : null,
+  });
+};
+
+const opGetNote: Op = async (ctx, args) => {
+  const id = toNullableString(args.id);
+  if (!id) return out(400, { error: "missing_required_fields", required: ["id"] });
+  const row = await ctx.env.DB.prepare("SELECT * FROM notes WHERE id = ?").bind(id).first<NoteRow>();
+  if (!row) return out(404, { error: "not_found" });
+  return out(200, { note: deserializeNote(row) });
+};
+
+const opUpdateNote: Op = async (ctx, args) => {
+  const db = ctx.env.DB;
+  const principal = ctx.principal as AuthPrincipal;
+  const id = toNullableString(args.id);
+  if (!id) return out(400, { error: "missing_required_fields", required: ["id"] });
+  const row = await db.prepare("SELECT * FROM notes WHERE id = ?").bind(id).first<NoteRow>();
+  if (!row) return out(404, { error: "not_found" });
+  const tooLong = validateNoteText(args);
+  if (tooLong) return tooLong;
+
+  const isAdmin = principal.role === "admin";
+  const own = row.author === principal.handle;
+  const sets: string[] = [];
+  const params: unknown[] = [];
+
+  const contentFields = ["title", "body", "node_ids"].filter((f) => args[f] !== undefined);
+  if (contentFields.length > 0) {
+    if (!own && !isAdmin) return out(403, { error: "forbidden_note_owner", owner: row.author });
+    if (args.title !== undefined) {
+      const title = toNullableString(args.title);
+      if (!title) return out(400, { error: "invalid_title" });
+      sets.push("title = ?");
+      params.push(title);
+    }
+    if (args.body !== undefined) {
+      sets.push("body = ?");
+      params.push(toNullableString(args.body));
+    }
+    if (args.node_ids !== undefined) {
+      const ids = parseNodeIds(args.node_ids);
+      if (!Array.isArray(ids)) return ids;
+      sets.push("node_ids = ?");
+      params.push(JSON.stringify(ids));
+    }
+  }
+  if (args.state !== undefined) {
+    const state = toNullableString(args.state);
+    const allowed = NOTE_STATES[row.kind] ?? [];
+    if (!state || !allowed.includes(state)) return out(400, { error: "invalid_state", allowed });
+    if (!own && !isAdmin && principal.role === "provisional") {
+      return out(403, { error: "forbidden_tier", detail: "changing another author's note needs a contributor token" });
+    }
+    sets.push("state = ?", "state_reason = ?", "state_by = ?");
+    params.push(state, toNullableString(args.reason), principal.handle);
+  }
+  if (sets.length === 0) return out(400, { error: "nothing_to_update", fields: ["state", "reason", "title", "body", "node_ids"] });
+
+  sets.push("updated_at = ?");
+  params.push(nowIso(), id);
+  await db.prepare(`UPDATE notes SET ${sets.join(", ")} WHERE id = ?`).bind(...params).run();
+  const updated = await db.prepare("SELECT * FROM notes WHERE id = ?").bind(id).first<NoteRow>();
+  return out(200, { ok: true, note: updated ? deserializeNote(updated) : null });
+};
+
+// ---------------------------------------------------------------------------
+// Search (LIKE over trials and notes)
+//
+// Not FTS5: D1 cannot export a database that contains virtual tables, and export is
+// the backup path. Every term must appear (AND); title hits rank first, then recency.
+// One search reads every node and note row, so results are capped and edge-cached.
+// ---------------------------------------------------------------------------
+
+const NODE_SEARCH_TEXT =
+  "(coalesce(title, '') || ' ' || coalesce(hypothesis, '') || ' ' || id || ' ' || run_id || ' ' || " +
+  "coalesce(author, '') || ' ' || coalesce(agent_model, '') || ' ' || coalesce(codex_refs, ''))";
+const NOTE_SEARCH_TEXT = "(title || ' ' || coalesce(body, '') || ' ' || author || ' ' || id)";
+
+function searchTerms(q: string): string[] {
+  return (q.match(/[\p{L}\p{N}_.:-]+/gu) ?? [])
+    .map((t) => t.slice(0, 64))
+    .filter((t, i, all) => all.indexOf(t) === i)
+    .slice(0, 6);
+}
+
+function likePattern(term: string): string {
+  return `%${term.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+}
+
+function makeSnippet(text: string, terms: string[], width = 80): string {
+  const lower = text.toLowerCase();
+  let at = -1;
+  let term = "";
+  for (const t of terms) {
+    const i = lower.indexOf(t.toLowerCase());
+    if (i >= 0 && (at < 0 || i < at)) {
+      at = i;
+      term = t;
+    }
+  }
+  if (at < 0) return text.slice(0, width * 2);
+  const start = Math.max(0, at - width);
+  const end = Math.min(text.length, at + term.length + width);
+  const hit = text.slice(at, at + term.length);
+  return `${start > 0 ? "…" : ""}${text.slice(start, at)}[${hit}]${text.slice(at + term.length, end)}${end < text.length ? "…" : ""}`;
+}
+
+const opSearch: Op = async (ctx, args) => {
+  const q = toNullableString(args.q);
+  if (!q) return out(400, { error: "missing_required_fields", required: ["q"] });
+  if (q.length > LIMITS.queryChars) return out(400, { error: "field_too_long", field: "q", max: LIMITS.queryChars });
+  const terms = searchTerms(q);
+  if (terms.length === 0) return out(400, { error: "empty_query" });
+  const lane = toNullableString(args.lane);
+  const kind = toNullableString(args.kind);
+  if (kind && kind !== "node" && kind !== "note") return out(400, { error: "invalid_kind", allowed: ["node", "note"] });
+  const limit = clampLimit(args.limit, 20, LIMITS.searchLimitMax);
+  const offset = Math.min(clampOffset(args.offset), LIMITS.searchOffsetMax);
+  const patterns = terms.map(likePattern);
+
+  const arm = (table: "nodes" | "notes"): { sql: string; params: unknown[] } => {
+    const text = table === "nodes" ? NODE_SEARCH_TEXT : NOTE_SEARCH_TEXT;
+    const where = patterns.map(() => `${text} LIKE ? ESCAPE '\\'`);
+    const params: unknown[] = [patterns[0], ...patterns];
+    if (lane) {
+      where.push("lane = ?");
+      params.push(lane);
+    }
+    const cols = table === "nodes"
+      ? "'node' AS kind, id, lane, title, author, decision, state, verified, soft_min_eff, source_sha, NULL AS note_kind, created_at, created_at AS updated_at, coalesce(hypothesis, '') AS text"
+      : "'note' AS kind, id, lane, title, author, NULL AS decision, state, 0 AS verified, NULL AS soft_min_eff, NULL AS source_sha, kind AS note_kind, created_at, updated_at, coalesce(body, '') AS text";
+    return {
+      sql: `SELECT ${cols}, (coalesce(title, '') LIKE ? ESCAPE '\\') AS title_hit FROM ${table} WHERE ${where.join(" AND ")}`,
+      params,
+    };
+  };
+  const arms = (kind ? [kind === "node" ? "nodes" : "notes"] : ["nodes", "notes"]).map((t) => arm(t as "nodes" | "notes"));
+  const res = await ctx.env.DB
+    .prepare(
+      `SELECT * FROM (${arms.map((a) => a.sql).join(" UNION ALL ")})
+       ORDER BY title_hit DESC, updated_at DESC, id DESC LIMIT ? OFFSET ?`
+    )
+    .bind(...arms.flatMap((a) => a.params), limit, offset)
+    .all<Record<string, unknown>>();
+  const rows = res.results ?? [];
+
+  const results = rows.map((r) => {
+    const title = (r.title as string | null) ?? null;
+    const text = String(r.text ?? "");
+    const inText = terms.some((t) => text.toLowerCase().includes(t.toLowerCase()));
+    const snippet = makeSnippet(inText ? text : title ?? text, terms);
+    const base = { kind: r.kind as string, id: r.id as string, lane: (r.lane as string | null) ?? null, title, author: (r.author as string | null) ?? null, snippet };
+    if (r.kind === "node") {
+      return {
+        ...base,
+        decision: r.decision as string,
+        state: (r.state as string | null) ?? (r.verified ? "verified" : "unverified"),
+        soft_min_eff: toFiniteNumber(r.soft_min_eff),
+        has_source: Boolean(r.source_sha),
+        created_at: r.created_at as string,
+      };
+    }
+    return {
+      ...base,
+      note_kind: r.note_kind as string,
+      state: r.state as string,
+      created_at: r.created_at as string,
+      updated_at: r.updated_at as string,
+    };
+  });
+  return out(200, {
+    q,
+    terms,
+    lane,
+    kind,
+    results,
+    count: results.length,
+    limit,
+    offset,
+    next_offset: rows.length === limit && offset + limit <= LIMITS.searchOffsetMax ? offset + limit : null,
+  });
+};
+
+// ---------------------------------------------------------------------------
+// Verification queue
+// ---------------------------------------------------------------------------
+
+function publicQueueFields(row: QueueRow) {
+  const now = nowIso();
+  return {
+    node_id: row.node_id,
+    lane: row.lane,
+    status: row.status,
+    available: row.status === "queued" || (row.status === "leased" && (row.lease_expires_at ?? "") <= now),
+    reason: row.reason ?? null,
+    attempts: Number(row.attempts ?? 0),
+    leased_by: row.leased_by ?? null,
+    lease_expires_at: row.lease_expires_at ?? null,
+    result: row.result ?? null,
+    result_metrics: parseJsonSafe<Record<string, unknown> | null>(row.result_json, null),
+    verifier: row.verifier ?? null,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function queueNodeSummary(n: NodeRecord) {
+  return {
+    id: n.id,
+    lane: n.lane,
+    run_id: n.run_id,
+    trial_id: n.trial_id,
+    title: n.title,
+    author: n.author,
+    author_tier: n.author_tier,
+    agent_model: n.agent_model,
+    decision: n.decision,
+    soft_min_eff: n.soft_min_eff,
+    dims: n.dims,
+    state: n.state,
+    has_source: n.has_source,
+    code_sha: n.code_sha,
+  };
+}
+
+const opVerifyQueue: Op = async (ctx, args) => {
+  const status = toNullableString(args.status) ?? "open";
+  const statuses = status === "open" ? ["queued", "leased"] : status === "all" ? ["queued", "leased", "done"] : [status];
+  if (!statuses.every((s) => ["queued", "leased", "done"].includes(s))) {
+    return out(400, { error: "invalid_status", allowed: ["open", "queued", "leased", "done", "all"] });
+  }
+  const lane = toNullableString(args.lane);
+  const limit = clampLimit(args.limit, 50, LIMITS.queueLimitMax);
+  const params: unknown[] = [...statuses];
+  let laneClause = "";
+  if (lane) {
+    laneClause = " AND q.lane = ?";
+    params.push(lane);
+  }
+  const res = await ctx.env.DB
+    .prepare(
+      `SELECT q.*, n.* , q.lane AS q_lane, q.created_at AS q_created_at, q.updated_at AS q_updated_at
+       FROM verify_queue q JOIN nodes n ON n.id = q.node_id
+       WHERE q.status IN (${placeholders(statuses.length)})${laneClause}
+       ORDER BY q.created_at ASC, q.node_id ASC LIMIT ?`
+    )
+    .bind(...params, limit)
+    .all<NodeRow & QueueRow & { q_lane: string; q_created_at: string; q_updated_at: string }>();
+  const items = (res.results ?? []).map((r) => ({
+    ...publicQueueFields({ ...r, lane: r.q_lane, created_at: r.q_created_at, updated_at: r.q_updated_at }),
+    node: queueNodeSummary(deserializeNode(r)),
+  }));
+  return out(200, { items, count: items.length });
+};
+
+const opVerifyClaim: Op = async (ctx, args) => {
+  const db = ctx.env.DB;
+  const principal = ctx.principal as AuthPrincipal;
+  const lane = toNullableString(args.lane);
+  const nodeId = toNullableString(args.node_id);
+  const ttlRaw = args.ttl_minutes === undefined ? LIMITS.leaseMinutesDefault : Number(args.ttl_minutes);
+  if (!Number.isFinite(ttlRaw) || ttlRaw <= 0) return out(400, { error: "invalid_ttl_minutes" });
+  const ttl = Math.min(ttlRaw, LIMITS.leaseMinutesMax);
+
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  const expires = new Date(nowMs + ttl * 60_000).toISOString();
+  const leaseToken = randomToken("vlease_", 24);
+  const leaseHash = await sha256Hex(leaseToken);
+
+  const pick: string[] = [
+    "(q.status = 'queued' OR (q.status = 'leased' AND q.lease_expires_at <= ?))",
+    "n.state NOT IN ('verified', 'retracted')",
+    "n.source_sha IS NOT NULL",
+  ];
+  const pickParams: unknown[] = [now];
+  if (principal.role !== "admin") {
+    pick.push("n.author IS NOT ?");
+    pickParams.push(principal.handle);
+  }
+  if (lane) {
+    pick.push("q.lane = ?");
+    pickParams.push(lane);
+  }
+  if (nodeId) {
+    pick.push("q.node_id = ?");
+    pickParams.push(nodeId);
+  }
+  // One statement: pick and lease atomically, so two verifiers never hold the same item.
+  const leased = await db
+    .prepare(
+      `UPDATE verify_queue SET status = 'leased', lease_token_hash = ?, leased_by = ?, lease_expires_at = ?,
+         attempts = attempts + 1, updated_at = ?
+       WHERE node_id = (
+         SELECT q.node_id FROM verify_queue q JOIN nodes n ON n.id = q.node_id
+         WHERE ${pick.join(" AND ")}
+         ORDER BY q.created_at ASC, q.node_id ASC LIMIT 1)
+       AND (status = 'queued' OR (status = 'leased' AND lease_expires_at <= ?))
+       RETURNING node_id, lane, lease_expires_at, attempts`
+    )
+    .bind(leaseHash, principal.handle, expires, now, ...pickParams, now)
+    .first<{ node_id: string; lane: string; lease_expires_at: string; attempts: number }>();
+
+  if (!leased) {
+    if (nodeId) {
+      const item = await db.prepare("SELECT * FROM verify_queue WHERE node_id = ?").bind(nodeId).first<QueueRow>();
+      if (!item) return out(404, { error: "not_queued", node_id: nodeId });
+      const node = await getNodeRow(db, nodeId);
+      if (node && principal.role !== "admin" && node.author === principal.handle) {
+        return out(403, { error: "forbidden_self_verification" });
+      }
+      return out(409, { error: "not_available", status: item.status, lease_expires_at: item.lease_expires_at });
+    }
+    return out(404, { error: "queue_empty", lane });
+  }
+  const row = await getNodeRow(db, leased.node_id);
+  return out(200, {
+    ok: true,
+    lease: {
+      node_id: leased.node_id,
+      lane: leased.lane,
+      lease_token: leaseToken,
+      lease_expires_at: leased.lease_expires_at,
+      attempts: Number(leased.attempts),
+    },
+    node: row ? deserializeNode(row) : null,
+  });
+};
+
+const opVerifyResult: Op = async (ctx, args) => {
+  const db = ctx.env.DB;
+  const principal = ctx.principal as AuthPrincipal;
+  const nodeId = toNullableString(args.node_id);
+  const leaseToken = toNullableString(args.lease_token);
+  if (!nodeId || !leaseToken || typeof args.passed !== "boolean") {
+    return out(400, { error: "missing_required_fields", required: ["node_id", "lease_token", "passed (boolean)"] });
+  }
+  const note = toNullableString(args.note);
+  if (note && note.length > LIMITS.reasonChars) return out(400, { error: "field_too_long", field: "note", max: LIMITS.reasonChars });
+  const metricsJson = args.metrics === undefined || args.metrics === null ? null : JSON.stringify(args.metrics);
+  if (metricsJson && metricsJson.length > 8 * 1024) return out(413, { error: "payload_too_large", field: "metrics", max_bytes: 8192 });
+
+  const nodeRow = await getNodeRow(db, nodeId);
+  if (!nodeRow) return out(404, { error: "not_found" });
+  if (principal.role !== "admin" && nodeRow.author === principal.handle) {
+    return out(403, { error: "forbidden_self_verification" });
+  }
+
+  const passed = args.passed === true;
+  const now = nowIso();
+  const leaseHash = await sha256Hex(leaseToken);
+  const holderClause = principal.role === "admin" ? "" : " AND leased_by = ?";
+  const holderParams = principal.role === "admin" ? [] : [principal.handle];
+  const done = await db
+    .prepare(
+      `UPDATE verify_queue SET status = 'done', result = ?, result_json = ?, verifier = ?,
+         lease_token_hash = NULL, updated_at = ?
+       WHERE node_id = ? AND status = 'leased' AND lease_token_hash = ? AND lease_expires_at > ?${holderClause}
+       RETURNING node_id`
+    )
+    .bind(passed ? "pass" : "fail", metricsJson, principal.handle, now, nodeId, leaseHash, now, ...holderParams)
+    .first<{ node_id: string }>();
+
+  if (!done) {
+    const item = await db.prepare("SELECT * FROM verify_queue WHERE node_id = ?").bind(nodeId).first<QueueRow>();
+    if (!item) return out(404, { error: "not_queued", node_id: nodeId });
+    if (item.status !== "leased") return out(409, { error: "not_leased", status: item.status });
+    if ((item.lease_expires_at ?? "") <= now) return out(409, { error: "lease_expired", lease_expires_at: item.lease_expires_at });
+    return out(409, { error: "stale_lease", detail: "lease token does not match the current lease" });
+  }
+
+  const newState = passed ? "replicated" : "disputed";
+  const reason = `independent rerun by ${principal.handle}: ${passed ? "pass" : "fail"}${note ? ` (${note})` : ""}`;
+  await db
+    .prepare(
+      `UPDATE nodes SET state = ?, verified = 0, state_reason = ?, state_by = ?, state_at = ?
+       WHERE id = ? AND state IN (${placeholders(RESULT_WRITABLE_STATES.length)})`
+    )
+    .bind(newState, reason.slice(0, LIMITS.reasonChars), principal.handle, now, nodeId, ...RESULT_WRITABLE_STATES)
+    .run();
+  const updated = await getNodeRow(db, nodeId);
+  return out(200, { ok: true, node_id: nodeId, result: passed ? "pass" : "fail", node: updated ? deserializeNode(updated) : null });
+};
+
+// ---------------------------------------------------------------------------
+// Registration and maintainer operations
+// ---------------------------------------------------------------------------
+
+const opRegister: Op = async (ctx, payload) => {
+  const { env, request } = ctx;
+  const handle = sanitizeHandle(payload.handle);
+  if (!handle) return out(400, { error: "invalid_handle", detail: HANDLE_RULE });
+  if (RESERVED_HANDLES.has(handle.toLowerCase())) return out(400, { error: "reserved_handle", handle });
+  const long = tooLongField(payload, { agent: 100, model: 100, invite_code: 200 });
+  if (long) return out(400, { error: "field_too_long", ...long });
+
+  let role: Role = "provisional";
+  let hourlyLimit = envLimit(env.FLYWHEEL_PROVISIONAL_HOURLY_WRITES, LIMITS.provisionalHourlyWrites);
+  const invite = toNullableString(payload.invite_code);
+  if (invite) {
+    const expected = env.FLYWHEEL_INVITE_CODE?.trim();
+    if (!expected || !timingSafeEqual(invite, expected)) return out(403, { error: "invalid_invite_code" });
+    role = "contributor";
+    hourlyLimit = LIMITS.invitedHourlyWrites;
+  }
+
+  // Caps before any write that could be abused: per hashed IP first, then global.
+  const day = utcDay();
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const salt = env.FLYWHEEL_IP_SALT ?? "apin-flywheel";
+  const ipHash = (await sha256Hex(`${salt}|${day}|${ip}`)).slice(0, 32);
+  const perIp = envLimit(env.FLYWHEEL_REGISTRATIONS_PER_IP_PER_DAY, LIMITS.registrationsPerIpPerDay);
+  const ipCount = await bumpCounter(env.DB, `reg-ip:${ipHash}`, day);
+  if (ipCount > perIp) return out(429, { error: "registration_ip_cap", limit: perIp, retry_after: "tomorrow (UTC)" });
+  const global = envLimit(env.FLYWHEEL_REGISTRATIONS_PER_DAY, LIMITS.registrationsPerDay);
+  const globalCount = await bumpCounter(env.DB, "reg-global", day);
+  if (globalCount > global) return out(429, { error: "registration_daily_cap", limit: global });
+
+  const id = crypto.randomUUID();
+  const token = randomToken("apfw_");
+  const keyHash = await sha256Hex(token);
+  const now = nowIso();
+  // Atomic: a handle is taken if any key (even revoked) or any trial author already uses it.
+  const res = await env.DB
+    .prepare(
+      `INSERT INTO api_keys (id, key_hash, handle, role, hourly_limit, revoked_at, created_at, agent, model)
+       SELECT ?, ?, ?, ?, ?, NULL, ?, ?, ?
+       WHERE NOT EXISTS (SELECT 1 FROM api_keys WHERE lower(handle) = lower(?))
+         AND NOT EXISTS (SELECT 1 FROM nodes WHERE lower(author) = lower(?))`
+    )
+    .bind(
+      id, keyHash, handle, role, hourlyLimit, now,
+      toNullableString(payload.agent), toNullableString(payload.model), handle, handle
+    )
+    .run();
+  if (changesOf(res) === 0) return out(409, { error: "handle_already_registered", handle });
+
+  // Old counter buckets are no longer needed (hourly and daily buckets share this table).
+  await env.DB.prepare("DELETE FROM rate_limits WHERE bucket < ?").bind(utcDay(-2)).run();
+
+  return out(201, {
+    ok: true,
+    key_id: id,
+    handle,
+    role,
+    tier: role,
+    hourly_limit: hourlyLimit,
+    daily_write_limit:
+      role === "provisional"
+        ? envLimit(env.FLYWHEEL_PROVISIONAL_DAILY_WRITES, LIMITS.provisionalDailyWrites)
+        : null,
+    token,
+    note: "Save this token now; it is stored hashed and cannot be shown again.",
+  });
+};
+
+const opAdminListKeys: Op = async (ctx, args) => {
+  const role = toNullableString(args.role);
+  const sql = `SELECT id, handle, role, hourly_limit, revoked_at, created_at, agent, model FROM api_keys${
+    role ? " WHERE role = ?" : ""
+  } ORDER BY created_at DESC`;
+  const stmt = ctx.env.DB.prepare(sql);
+  const res = await (role ? stmt.bind(role) : stmt).all<Omit<ApiKeyRow, "key_hash">>();
+  return out(200, { keys: res.results ?? [], count: (res.results ?? []).length });
+};
+
+const opAdminMintKey: Op = async (ctx, payload) => {
+  const handle = sanitizeHandle(payload.handle);
+  if (!handle) return out(400, { error: "invalid_handle", detail: HANDLE_RULE });
+  const role = toNullableString(payload.role) ?? "contributor";
+  if (!VALID_ROLES.has(role)) return out(400, { error: "invalid_role", allowed: [...VALID_ROLES] });
+  const limitRaw = payload.hourly_limit === undefined ? 120 : Number(payload.hourly_limit);
+  if (!Number.isFinite(limitRaw) || limitRaw < 1 || limitRaw > 10000) {
+    return out(400, { error: "invalid_hourly_limit" });
+  }
+  const hourlyLimit = Math.trunc(limitRaw);
+  const id = crypto.randomUUID();
+  const token = randomToken("apfw_");
+  const keyHash = await sha256Hex(token);
+  const now = nowIso();
+  await ctx.env.DB
+    .prepare(
+      "INSERT INTO api_keys (id, key_hash, handle, role, hourly_limit, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?)"
+    )
+    .bind(id, keyHash, handle, role, hourlyLimit, now)
+    .run();
+  return out(201, { ok: true, key_id: id, handle, role, hourly_limit: hourlyLimit, token, created_at: now });
+};
+
+const opAdminRevokeKey: Op = async (ctx, args) => {
+  const keyId = toNullableString(args.id) ?? "";
+  const existing = await ctx.env.DB.prepare("SELECT id FROM api_keys WHERE id = ?").bind(keyId).first<{ id: string }>();
+  if (!existing) return out(404, { error: "not_found" });
+  const now = nowIso();
+  await ctx.env.DB.prepare("UPDATE api_keys SET revoked_at = ? WHERE id = ?").bind(now, keyId).run();
+  return out(200, { ok: true, key_id: keyId, revoked_at: now });
+};
+
+const opAdminHandle: Op = async (ctx, args) => {
+  const db = ctx.env.DB;
+  const handle = toNullableString(args.handle) ?? "";
+  const action = args.action;
+  const keys = await db
+    .prepare("SELECT id FROM api_keys WHERE lower(handle) = lower(?)")
+    .bind(handle)
+    .all<{ id: string }>();
+  if ((keys.results ?? []).length === 0) return out(404, { error: "not_found", handle });
+  const now = nowIso();
+  if (action === "purge") {
+    // Revoke every key of the handle and delete everything it posted, in one call.
+    const revoked = await db
+      .prepare("UPDATE api_keys SET revoked_at = ? WHERE lower(handle) = lower(?) AND revoked_at IS NULL")
+      .bind(now, handle)
+      .run();
+    const owned = "SELECT id FROM nodes WHERE lower(author) = lower(?)";
+    await db.prepare(`DELETE FROM node_parents WHERE child IN (${owned}) OR parent IN (${owned})`).bind(handle, handle).run();
+    await db.prepare(`DELETE FROM verify_queue WHERE node_id IN (${owned})`).bind(handle).run();
+    const nodes = await db.prepare("DELETE FROM nodes WHERE lower(author) = lower(?)").bind(handle).run();
+    const notes = await db.prepare("DELETE FROM notes WHERE lower(author) = lower(?)").bind(handle).run();
+    const claims = await db
+      .prepare("DELETE FROM claims WHERE lower(agent) = lower(?) OR lower(agent) LIKE lower(?) ESCAPE '\\'")
+      .bind(handle, `${handle.replace(/[\\%_]/g, (c) => `\\${c}`)}:%`)
+      .run();
+    const sources = await db
+      .prepare(
+        "DELETE FROM sources WHERE lower(uploaded_by) = lower(?) AND sha256 NOT IN (SELECT source_sha FROM nodes WHERE source_sha IS NOT NULL)"
+      )
+      .bind(handle)
+      .run();
+    // Lease results this handle posted on others' trials are reopened, not trusted.
+    await db
+      .prepare(
+        `UPDATE nodes SET state = 'unverified', state_reason = NULL, state_by = NULL, state_at = NULL
+         WHERE state IN ('replicated', 'disputed', 'needs-replication') AND lower(state_by) = lower(?)`
+      )
+      .bind(handle)
+      .run();
+    await db
+      .prepare(
+        `UPDATE verify_queue SET status = 'queued', result = NULL, result_json = NULL, verifier = NULL,
+           lease_token_hash = NULL, leased_by = NULL, lease_expires_at = NULL, updated_at = ?
+         WHERE lower(verifier) = lower(?) OR lower(leased_by) = lower(?)`
+      )
+      .bind(now, handle, handle)
+      .run();
+    return out(200, {
+      ok: true,
+      handle,
+      revoked: changesOf(revoked),
+      deleted: {
+        nodes: changesOf(nodes),
+        notes: changesOf(notes),
+        claims: changesOf(claims),
+        sources: changesOf(sources),
+      },
+    });
+  }
+  if (action === "revoke") {
+    const res = await db
+      .prepare("UPDATE api_keys SET revoked_at = ? WHERE lower(handle) = lower(?) AND revoked_at IS NULL")
+      .bind(now, handle)
+      .run();
+    return out(200, { ok: true, handle, revoked: changesOf(res), revoked_at: now });
+  }
+  const res = await db
+    .prepare(
+      `UPDATE api_keys SET role = 'contributor', hourly_limit = MAX(hourly_limit, ?)
+       WHERE lower(handle) = lower(?) AND role = 'provisional' AND revoked_at IS NULL`
+    )
+    .bind(LIMITS.promotedHourlyWrites, handle)
+    .run();
+  await db
+    .prepare("UPDATE nodes SET author_tier = 'contributor' WHERE lower(author) = lower(?) AND author_tier = 'provisional'")
+    .bind(handle)
+    .run();
+  return out(200, { ok: true, handle, role: "contributor", promoted: changesOf(res) });
+};
+
+const opAdminVerifyNode: Op = async (ctx, payload) => {
+  const db = ctx.env.DB;
+  const nodeId = toNullableString(payload.id) ?? "";
+  const existing = await getNodeRow(db, nodeId);
+  if (!existing) return out(404, { error: "not_found" });
+  const verified = payload.verified === false || payload.verified === 0 ? 0 : 1;
+  const pick = <T>(key: string, conv: (v: unknown) => T, fallback: T): T =>
+    payload[key] !== undefined ? conv(payload[key]) : fallback;
+  const stanPassed = pick("real_stan_passed", toFiniteInt, existing.real_stan_passed);
+  const stanTotal = pick("real_stan_total", toFiniteInt, existing.real_stan_total);
+  const stanEss = pick("real_ess_per_cost", toFiniteNumber, existing.real_ess_per_cost);
+  const state = verified ? "verified" : (existing.state === "verified" ? "unverified" : existing.state ?? "unverified");
+  const now = nowIso();
+  await db
+    .prepare(
+      `UPDATE nodes SET verified = ?, state = ?, state_by = ?, state_at = ?,
+         real_stan_passed = ?, real_stan_total = ?, real_ess_per_cost = ? WHERE id = ?`
+    )
+    .bind(verified, state, (ctx.principal as AuthPrincipal).handle, now, stanPassed, stanTotal, stanEss, nodeId)
+    .run();
+  if (verified) {
+    await db
+      .prepare("UPDATE verify_queue SET status = 'done', result = 'verified', lease_token_hash = NULL, updated_at = ? WHERE node_id = ? AND status <> 'done'")
+      .bind(now, nodeId)
+      .run();
+  }
+  const updated = await getNodeRow(db, nodeId);
+  return out(200, { ok: true, node: updated ? deserializeNode(updated) : null });
+};
+
+const opAdminDeleteNode: Op = async (ctx, args) => {
+  const db = ctx.env.DB;
+  const nodeId = toNullableString(args.id) ?? "";
+  const existing = await db.prepare("SELECT id FROM nodes WHERE id = ?").bind(nodeId).first<{ id: string }>();
+  if (!existing) return out(404, { error: "not_found" });
+  await db.prepare("DELETE FROM nodes WHERE id = ?").bind(nodeId).run();
+  await db.prepare("DELETE FROM node_parents WHERE child = ? OR parent = ?").bind(nodeId, nodeId).run();
+  await db.prepare("DELETE FROM verify_queue WHERE node_id = ?").bind(nodeId).run();
+  return out(200, { ok: true, deleted: nodeId });
+};
+
+const opHealth: Op = async (ctx) => {
+  const db = ctx.env.DB;
+  const nodeCountRow = await db.prepare("SELECT COUNT(*) AS count FROM nodes").first<{ count: number }>();
+  const claimCountRow = await db
+    .prepare("SELECT COUNT(*) AS count FROM claims WHERE status = 'active' AND expires_at > ?")
+    .bind(nowIso())
+    .first<{ count: number }>();
+  const lanesRes = await db.prepare("SELECT DISTINCT lane FROM nodes ORDER BY lane ASC").all<{ lane: string }>();
+  return out(200, {
+    ok: true,
+    nodes: Number(nodeCountRow?.count ?? 0),
+    active_claims: Number(claimCountRow?.count ?? 0),
+    lanes: (lanesRes.results ?? []).map((r) => r.lane),
+  });
+};
+
+/**
+ * The whole research graph, or one lane of it (`?lane=A1`). This is the most expensive
+ * read: every node is deserialized and serialized under the 10 ms CPU cap, so DAG nodes
+ * carry the parsed `metrics` but not the duplicate raw `metrics_json` string (node detail,
+ * /api/nodes and /api/frontier still have it).
+ */
+const opDag: Op = async (ctx, args) => {
+  const lane = toNullableString(args.lane);
+  const all = lane
+    ? ((await ctx.env.DB
+        .prepare("SELECT * FROM nodes WHERE lane = ? ORDER BY created_at ASC, id ASC")
+        .bind(lane)
+        .all<NodeRow>()).results ?? []).map(deserializeNode)
+    : await queryAllNodes(ctx.env.DB);
+  const edges = await queryAllEdges(ctx.env.DB, all, lane);
+  const frontier = computeFrontier(all);
+  const alignment = computeAlignment(all);
+  const nodes = all.map(({ metrics_json: _raw, ...rest }) => rest);
+  return out(200, {
+    nodes,
+    edges,
+    frontier,
+    claims: await queryActiveClaims(ctx.env.DB, lane),
+    alignment,
+  });
+};
+
+// ---------------------------------------------------------------------------
+// MCP
+// ---------------------------------------------------------------------------
+
+interface McpTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  write: boolean;
+  op: Op;
+}
+
+const str = { type: "string" };
+const LANE_PROP = { type: "string", description: "Lane id, e.g. A0, A1, A2, A3, A4." };
+
+const MCP_TOOLS: McpTool[] = [
   {
     name: "flywheel_frontier",
     description: "Return the current best kept/verified apin research frontier node per lane.",
     inputSchema: {
       type: "object",
-      properties: {
-        lane: { type: "string", description: "Optional lane filter (e.g. A0, A1, A2, A3)." },
-      },
+      properties: { lane: { type: "string", description: "Optional lane filter (e.g. A0, A1, A2, A3)." } },
       additionalProperties: false,
     },
+    write: false,
+    op: opFrontier,
   },
   {
     name: "flywheel_list_nodes",
-    description: "List apin research DAG nodes with optional lane, run_id, decision, verified, and limit filters.",
+    description: "List apin research DAG nodes with optional lane, run_id, decision, state, verified, and limit filters.",
     inputSchema: {
       type: "object",
       properties: {
-        lane: { type: "string" },
-        run_id: { type: "string" },
-        decision: { type: "string" },
+        lane: str,
+        run_id: str,
+        decision: str,
+        state: str,
         verified: { type: "boolean" },
         limit: { type: "integer", minimum: 1, maximum: 1000 },
       },
       additionalProperties: false,
     },
+    write: false,
+    op: opListNodes,
+  },
+  {
+    name: "flywheel_get_node",
+    description: "Read one trial with all its parents (incumbent/combines/fork), children and verification status.",
+    inputSchema: { type: "object", required: ["id"], properties: { id: str }, additionalProperties: false },
+    write: false,
+    op: opGetNode,
+  },
+  {
+    name: "flywheel_get_source",
+    description: "Fetch the submission source a trial was scored with, to adopt or rerun it.",
+    inputSchema: { type: "object", required: ["node_id"], properties: { node_id: str }, additionalProperties: false },
+    write: false,
+    op: opGetSource,
+  },
+  {
+    name: "flywheel_search",
+    description: "Full-text search over trials (hypothesis, title, run, author, technique refs) and notes.",
+    inputSchema: {
+      type: "object",
+      required: ["q"],
+      properties: {
+        q: str,
+        lane: LANE_PROP,
+        kind: { type: "string", enum: ["node", "note"] },
+        limit: { type: "integer", minimum: 1, maximum: LIMITS.searchLimitMax },
+        offset: { type: "integer", minimum: 0 },
+      },
+      additionalProperties: false,
+    },
+    write: false,
+    op: opSearch,
+  },
+  {
+    name: "flywheel_list_notes",
+    description: "List hypotheses and insights, newest first, filtered by lane, kind, state or author.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        lane: LANE_PROP,
+        kind: { type: "string", enum: ["hypothesis", "insight"] },
+        state: str,
+        author: str,
+        limit: { type: "integer", minimum: 1, maximum: LIMITS.notesLimitMax },
+        offset: { type: "integer", minimum: 0 },
+      },
+      additionalProperties: false,
+    },
+    write: false,
+    op: opListNotes,
+  },
+  {
+    name: "flywheel_verify_queue",
+    description: "List kept trials waiting for an independent rerun.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        lane: LANE_PROP,
+        status: { type: "string", enum: ["open", "queued", "leased", "done", "all"] },
+        limit: { type: "integer", minimum: 1, maximum: LIMITS.queueLimitMax },
+      },
+      additionalProperties: false,
+    },
+    write: false,
+    op: opVerifyQueue,
+  },
+  {
+    name: "flywheel_register",
+    description: "Register a handle and receive a personal provisional token (shown once). No token needed.",
+    inputSchema: {
+      type: "object",
+      required: ["handle"],
+      properties: { handle: str, agent: str, model: str, invite_code: str },
+      additionalProperties: false,
+    },
+    write: false,
+    op: opRegister,
   },
   {
     name: "flywheel_claim_task",
@@ -745,33 +2234,44 @@ const MCP_TOOLS = [
       type: "object",
       required: ["task_id", "lane", "agent"],
       properties: {
-        task_id: { type: "string" },
-        lane: { type: "string" },
-        agent: { type: "string" },
-        summary: { type: "string" },
+        task_id: str,
+        lane: str,
+        agent: str,
+        summary: str,
         ttl_minutes: { type: "number", default: 60 },
         force: { type: "boolean", default: false },
       },
       additionalProperties: false,
     },
+    write: true,
+    op: opCreateClaim,
   },
   {
     name: "flywheel_post_node",
-    description: "Record a new apin autoresearch trial node into the Flywheel DAG.",
+    description:
+      "Record an apin autoresearch trial. Optional `source` (the submission text, <= 256 KB) and `parent_ids` ([{id, relation: incumbent|combines|fork}]).",
     inputSchema: {
       type: "object",
       required: ["lane", "run_id", "decision"],
       properties: {
-        id: { type: "string" },
-        parent_id: { type: "string" },
-        lane: { type: "string" },
-        run_id: { type: "string" },
-        trial_id: { type: "string" },
-        agent_model: { type: "string" },
-        author: { type: "string" },
-        title: { type: "string" },
-        hypothesis: { type: "string" },
-        decision: { type: "string" },
+        id: str,
+        parent_id: str,
+        parent_ids: {
+          type: "array",
+          items: {
+            type: "object",
+            required: ["id"],
+            properties: { id: str, relation: { type: "string", enum: [...PARENT_RELATIONS] } },
+          },
+        },
+        lane: str,
+        run_id: str,
+        trial_id: str,
+        agent_model: str,
+        author: str,
+        title: str,
+        hypothesis: str,
+        decision: str,
         soft_min_eff: { type: "number" },
         ratio_vs_incumbent: { type: "number" },
         short_horizon_eff: { type: "number" },
@@ -782,41 +2282,102 @@ const MCP_TOOLS = [
         overhead_ratio: { type: "number" },
         b2_max: { type: "number" },
         dims: { type: "array", items: { type: "integer" } },
-        codex_refs: { type: "array", items: { type: "string" } },
-        code_sha: { type: "string" },
-        metrics_json: { type: "string" },
+        codex_refs: { type: "array", items: str },
+        code_sha: str,
+        metrics_json: str,
+        source: str,
         verified: { type: "boolean" },
       },
       additionalProperties: true,
     },
+    write: true,
+    op: opPostNode,
+  },
+  {
+    name: "flywheel_set_node_state",
+    description:
+      "Change a trial's research state: authors may retract their own; contributors may flag another's as needs-replication or disputed (reason required); maintainers set anything.",
+    inputSchema: {
+      type: "object",
+      required: ["id", "state"],
+      properties: { id: str, state: { type: "string", enum: [...NODE_STATES] }, reason: str },
+      additionalProperties: false,
+    },
+    write: true,
+    op: opSetNodeState,
+  },
+  {
+    name: "flywheel_add_note",
+    description: "Record a hypothesis or an insight, optionally linked to trial ids.",
+    inputSchema: {
+      type: "object",
+      required: ["kind", "title"],
+      properties: {
+        kind: { type: "string", enum: ["hypothesis", "insight"] },
+        lane: LANE_PROP,
+        title: str,
+        body: str,
+        state: str,
+        node_ids: { type: "array", items: str },
+      },
+      additionalProperties: false,
+    },
+    write: true,
+    op: opCreateNote,
+  },
+  {
+    name: "flywheel_update_note",
+    description:
+      "Update a note. State (hypothesis: open|supported|refuted|needs-replication; insight: open|superseded|retracted) by its author or any contributor; title/body/node_ids by its author.",
+    inputSchema: {
+      type: "object",
+      required: ["id"],
+      properties: { id: str, state: str, reason: str, title: str, body: str, node_ids: { type: "array", items: str } },
+      additionalProperties: false,
+    },
+    write: true,
+    op: opUpdateNote,
+  },
+  {
+    name: "flywheel_verify_claim",
+    description: "Lease the next queued trial to rerun (never your own). Returns a lease_token needed to post the result.",
+    inputSchema: {
+      type: "object",
+      properties: { lane: LANE_PROP, node_id: str, ttl_minutes: { type: "number", default: LIMITS.leaseMinutesDefault } },
+      additionalProperties: false,
+    },
+    write: true,
+    op: opVerifyClaim,
+  },
+  {
+    name: "flywheel_verify_result",
+    description: "Post the result of an independent rerun: passed=true sets the trial replicated, false sets it disputed.",
+    inputSchema: {
+      type: "object",
+      required: ["node_id", "lease_token", "passed"],
+      properties: { node_id: str, lease_token: str, passed: { type: "boolean" }, metrics: { type: "object" }, note: str },
+      additionalProperties: false,
+    },
+    write: true,
+    op: opVerifyResult,
   },
 ];
 
-const MCP_WRITE_TOOLS = new Set(["flywheel_claim_task", "flywheel_post_node"]);
-
 async function handleMcp(request: Request, env: Env): Promise<Response> {
-  let body: Record<string, unknown>;
-  try {
-    body = (await request.json()) as Record<string, unknown>;
-  } catch {
-    return jsonResponse(
-      { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } },
-      400
-    );
+  const parsed = await readJsonBody(request, LIMITS.nodeBodyBytes);
+  if (!parsed.ok) {
+    const code = parsed.outcome.status === 413 ? -32600 : -32700;
+    const message = parsed.outcome.status === 413 ? "Request too large" : "Parse error";
+    return jsonResponse({ jsonrpc: "2.0", id: null, error: { code, message } }, parsed.outcome.status);
   }
-
+  const body = parsed.value;
   const rpcId = body.id ?? null;
   const method = typeof body.method === "string" ? body.method : "";
-  const params = (body.params && typeof body.params === "object"
-    ? body.params
-    : {}) as Record<string, unknown>;
+  const params = (body.params && typeof body.params === "object" ? body.params : {}) as Args;
+  const rpcError = (code: number, message: string, status: number) =>
+    jsonResponse({ jsonrpc: "2.0", id: rpcId, error: { code, message } }, status);
 
-  if (body.jsonrpc !== "2.0" || !method) {
-    return jsonResponse(
-      { jsonrpc: "2.0", id: rpcId, error: { code: -32600, message: "Invalid Request" } },
-      400
-    );
-  }
+  if (body.jsonrpc !== "2.0" || !method) return rpcError(-32600, "Invalid Request", 400);
 
   if (method === "initialize") {
     return jsonResponse({
@@ -825,152 +2386,200 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
       result: {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {} },
-        serverInfo: { name: "apin-flywheel", version: "0.1.0" },
+        serverInfo: { name: "apin-flywheel", version: "0.2.0" },
       },
     });
   }
-
   if (method === "notifications/initialized" || method === "ping") {
     return jsonResponse({ jsonrpc: "2.0", id: rpcId, result: {} });
   }
-
   if (method === "tools/list") {
     return jsonResponse({
       jsonrpc: "2.0",
       id: rpcId,
-      result: { tools: MCP_TOOLS },
+      result: { tools: MCP_TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) },
     });
   }
-
   if (method === "tools/call") {
     const toolName = typeof params.name === "string" ? params.name : "";
-    const args = (params.arguments && typeof params.arguments === "object"
-      ? params.arguments
-      : {}) as Record<string, unknown>;
-
-    if (!MCP_TOOLS.some((t) => t.name === toolName)) {
-      return jsonResponse(
-        {
-          jsonrpc: "2.0",
-          id: rpcId,
-          error: { code: -32602, message: `Unknown tool: ${toolName}` },
-        },
-        400
-      );
-    }
+    const args = (params.arguments && typeof params.arguments === "object" ? params.arguments : {}) as Args;
+    const tool = MCP_TOOLS.find((t) => t.name === toolName);
+    if (!tool) return rpcError(-32602, `Unknown tool: ${toolName}`, 400);
 
     let principal: AuthPrincipal | null = null;
-    if (MCP_WRITE_TOOLS.has(toolName)) {
+    if (tool.write) {
       principal = await authenticate(request, env);
-      if (!principal) {
-        return jsonResponse(
-          {
-            jsonrpc: "2.0",
-            id: rpcId,
-            error: { code: -32001, message: "Unauthorized: valid Bearer token required" },
-          },
-          401
-        );
-      }
-      const rl = await checkAndConsumeRateLimit(env.DB, principal);
-      if (!rl.allowed) {
-        return jsonResponse(
-          {
-            jsonrpc: "2.0",
-            id: rpcId,
-            error: { code: -32029, message: `Rate limit exceeded (${rl.limit}/hour)` },
-          },
-          429
-        );
-      }
+      if (!principal) return rpcError(-32001, "Unauthorized: valid Bearer token required", 401);
+      const limited = await consumeWrite(env, principal);
+      if (limited) return rpcError(-32029, `Rate limit exceeded (${String(limited.body.limit)}/${String(limited.body.scope)})`, 429);
     }
-
-    if (toolName === "flywheel_frontier") {
-      const nodes = await queryAllNodes(env.DB);
-      const frontier = computeFrontier(nodes);
-      const laneFilter = toNullableString(args.lane);
-      const data = laneFilter
-        ? { frontier: frontier[laneFilter] ? { [laneFilter]: frontier[laneFilter] } : {} }
-        : { frontier };
-      return jsonResponse({
-        jsonrpc: "2.0",
-        id: rpcId,
-        result: {
-          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-          structuredContent: data,
-          isError: false,
-        },
-      });
-    }
-
-    if (toolName === "flywheel_list_nodes") {
-      const nodes = await queryFilteredNodes(env.DB, {
-        lane: toNullableString(args.lane),
-        run_id: toNullableString(args.run_id),
-        decision: toNullableString(args.decision),
-        verified: args.verified as string | boolean | number | null | undefined,
-        limit: args.limit as number | null | undefined,
-      });
-      const data = { nodes, count: nodes.length };
-      return jsonResponse({
-        jsonrpc: "2.0",
-        id: rpcId,
-        result: {
-          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-          structuredContent: data,
-          isError: false,
-        },
-      });
-    }
-
-    if (toolName === "flywheel_claim_task") {
-      const outcome = await createClaim(env.DB, args, principal as AuthPrincipal);
-      const isError = outcome.status >= 400;
-      return jsonResponse({
-        jsonrpc: "2.0",
-        id: rpcId,
-        result: {
-          content: [{ type: "text", text: JSON.stringify(outcome.body, null, 2) }],
-          structuredContent: outcome.body,
-          isError,
-        },
-      });
-    }
-
-    if (toolName === "flywheel_post_node") {
-      const outcome = await insertNode(env.DB, args, principal as AuthPrincipal);
-      const isError = outcome.status >= 400;
-      return jsonResponse({
-        jsonrpc: "2.0",
-        id: rpcId,
-        result: {
-          content: [{ type: "text", text: JSON.stringify(outcome.body, null, 2) }],
-          structuredContent: outcome.body,
-          isError,
-        },
-      });
-    }
-  }
-
-  return jsonResponse(
-    {
+    const outcome = await tool.op({ env, request, principal }, args);
+    return jsonResponse({
       jsonrpc: "2.0",
       id: rpcId,
-      error: { code: -32601, message: `Method not found: ${method}` },
-    },
-    404
-  );
+      result: {
+        content: [{ type: "text", text: JSON.stringify(outcome.body, null, 2) }],
+        structuredContent: outcome.body,
+        isError: outcome.status >= 400,
+      },
+    });
+  }
+  return rpcError(-32601, `Method not found: ${method}`, 404);
 }
 
-async function parseJsonBody(request: Request): Promise<Record<string, unknown> | null> {
+// ---------------------------------------------------------------------------
+// REST router
+// ---------------------------------------------------------------------------
+
+type Access = "public" | "write" | "admin";
+
+interface Route {
+  method: string;
+  pattern: RegExp;
+  /** Names for the pattern's capture groups, merged into the op's args. */
+  params?: string[];
+  access: Access;
+  /** Max request body in bytes; absent means the route takes no body (args come from the query). */
+  body?: number;
+  allowEmptyBody?: boolean;
+  op: Op;
+}
+
+const ROUTES: Route[] = [
+  { method: "GET", pattern: /^\/api\/health$/, access: "public", op: opHealth },
+  { method: "GET", pattern: /^\/api\/dag$/, access: "public", op: opDag },
+  { method: "GET", pattern: /^\/api\/frontier$/, access: "public", op: opFrontier },
+  { method: "GET", pattern: /^\/api\/nodes$/, access: "public", op: opListNodes },
+  { method: "GET", pattern: /^\/api\/nodes\/([^/]+)\/source$/, params: ["node_id"], access: "public", op: opGetSource },
+  { method: "GET", pattern: /^\/api\/nodes\/([^/]+)$/, params: ["id"], access: "public", op: opGetNode },
+  { method: "GET", pattern: /^\/api\/claims$/, access: "public", op: opListClaims },
+  { method: "GET", pattern: /^\/api\/search$/, access: "public", op: opSearch },
+  { method: "GET", pattern: /^\/api\/notes$/, access: "public", op: opListNotes },
+  { method: "GET", pattern: /^\/api\/notes\/([^/]+)$/, params: ["id"], access: "public", op: opGetNote },
+  { method: "GET", pattern: /^\/api\/verify\/queue$/, access: "public", op: opVerifyQueue },
+  { method: "POST", pattern: /^\/api\/register$/, access: "public", body: LIMITS.registerBodyBytes, op: opRegister },
+
+  { method: "POST", pattern: /^\/api\/nodes$/, access: "write", body: LIMITS.nodeBodyBytes, op: opPostNode },
+  {
+    method: "POST",
+    pattern: /^\/api\/nodes\/([^/]+)\/state$/,
+    params: ["id"],
+    access: "write",
+    body: LIMITS.smallBodyBytes,
+    op: opSetNodeState,
+  },
+  { method: "POST", pattern: /^\/api\/claims$/, access: "write", body: LIMITS.smallBodyBytes, op: opCreateClaim },
+  {
+    method: "PATCH",
+    pattern: /^\/api\/claims\/([^/]+)$/,
+    params: ["id"],
+    access: "write",
+    body: LIMITS.smallBodyBytes,
+    op: opPatchClaim,
+  },
+  { method: "POST", pattern: /^\/api\/notes$/, access: "write", body: LIMITS.noteBodyBytes, op: opCreateNote },
+  {
+    method: "PATCH",
+    pattern: /^\/api\/notes\/([^/]+)$/,
+    params: ["id"],
+    access: "write",
+    body: LIMITS.noteBodyBytes,
+    op: opUpdateNote,
+  },
+  {
+    method: "POST",
+    pattern: /^\/api\/verify\/claim$/,
+    access: "write",
+    body: LIMITS.smallBodyBytes,
+    allowEmptyBody: true,
+    op: opVerifyClaim,
+  },
+  {
+    method: "POST",
+    pattern: /^\/api\/verify\/([^/]+)\/result$/,
+    params: ["node_id"],
+    access: "write",
+    body: LIMITS.verifyResultBodyBytes,
+    op: opVerifyResult,
+  },
+
+  { method: "GET", pattern: /^\/api\/admin\/keys$/, access: "admin", op: opAdminListKeys },
+  { method: "POST", pattern: /^\/api\/admin\/keys$/, access: "admin", body: LIMITS.smallBodyBytes, op: opAdminMintKey },
+  { method: "DELETE", pattern: /^\/api\/admin\/keys\/([^/]+)$/, params: ["id"], access: "admin", op: opAdminRevokeKey },
+  {
+    method: "POST",
+    pattern: /^\/api\/admin\/handles\/([^/]+)\/(promote|revoke|purge)$/,
+    params: ["handle", "action"],
+    access: "admin",
+    body: LIMITS.smallBodyBytes,
+    allowEmptyBody: true,
+    op: opAdminHandle,
+  },
+  {
+    method: "POST",
+    pattern: /^\/api\/admin\/nodes\/([^/]+)\/verify$/,
+    params: ["id"],
+    access: "admin",
+    body: LIMITS.smallBodyBytes,
+    allowEmptyBody: true,
+    op: opAdminVerifyNode,
+  },
+  { method: "DELETE", pattern: /^\/api\/admin\/nodes\/([^/]+)$/, params: ["id"], access: "admin", op: opAdminDeleteNode },
+];
+
+function safeDecode(raw: string): string | null {
   try {
-    const data = await request.json();
-    return data && typeof data === "object" && !Array.isArray(data)
-      ? (data as Record<string, unknown>)
-      : null;
+    return decodeURIComponent(raw);
   } catch {
     return null;
   }
+}
+
+async function dispatch(request: Request, env: Env, url: URL, method: string): Promise<Response | null> {
+  for (const route of ROUTES) {
+    if (route.method !== method) continue;
+    const m = route.pattern.exec(url.pathname);
+    if (!m) continue;
+
+    const pathArgs: Args = {};
+    for (let i = 0; i < (route.params ?? []).length; i += 1) {
+      const decoded = safeDecode(m[i + 1]);
+      if (decoded === null) return jsonResponse({ error: "invalid_path" }, 400);
+      pathArgs[(route.params as string[])[i]] = decoded;
+    }
+
+    // Cheap checks first: declared body size, then auth, then the write budget, then the body.
+    if (route.body !== undefined) {
+      const declared = request.headers.get("Content-Length");
+      if (declared !== null && Number(declared) > route.body) {
+        return jsonResponse({ error: "payload_too_large", max_bytes: route.body }, 413);
+      }
+    }
+    let principal: AuthPrincipal | null = null;
+    if (route.access !== "public") {
+      principal = await authenticate(request, env);
+      if (!principal) return jsonResponse({ error: "unauthorized" }, 401);
+      if (route.access === "admin" && principal.role !== "admin") {
+        return jsonResponse({ error: "forbidden_admin_only" }, 403);
+      }
+      if (route.access === "write") {
+        const limited = await consumeWrite(env, principal);
+        if (limited) return jsonResponse(limited.body, limited.status);
+      }
+    }
+
+    let args: Args;
+    if (route.body !== undefined) {
+      const parsed = await readJsonBody(request, route.body, route.allowEmptyBody ?? false);
+      if (!parsed.ok) return jsonResponse(parsed.outcome.body, parsed.outcome.status);
+      args = parsed.value;
+    } else {
+      args = Object.fromEntries(url.searchParams.entries());
+    }
+    const outcome = await route.op({ env, request, principal }, { ...args, ...pathArgs });
+    return jsonResponse(outcome.body, outcome.status);
+  }
+  return null;
 }
 
 export async function handleRequest(
@@ -979,381 +2588,54 @@ export async function handleRequest(
   ctx?: ExecutionContextLike
 ): Promise<Response> {
   const url = new URL(request.url);
-  const { pathname, searchParams } = url;
+  const { pathname } = url;
   const method = request.method.toUpperCase();
 
-  if (pathname.startsWith("/api/")) {
-    if (method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: CORS_HEADERS });
-    }
-
-    const cacheKey = method === "GET" ? canonicalPublicCacheKey(url) : null;
-    const edgeCache = cacheKey ? getEdgeCache(env) : null;
-    if (cacheKey && edgeCache) {
-      const cached = await edgeCache.match(cacheKey);
-      if (cached) {
-        return cached;
-      }
-    }
-
-    const finalizePublicRead = (resp: Response): Response => {
-      if (!cacheKey || resp.status !== 200) return resp;
-      const headers = new Headers(resp.headers);
-      headers.set(
-        "Cache-Control",
-        `public, max-age=${PUBLIC_READ_CACHE_SECONDS}, s-maxage=${PUBLIC_READ_CACHE_SECONDS}`
-      );
-      const cachedResp = new Response(resp.body, { status: resp.status, headers });
-      if (edgeCache) {
-        const putPromise = edgeCache.put(cacheKey, cachedResp.clone());
-        if (ctx) {
-          ctx.waitUntil(putPromise);
-        } else {
-          putPromise.catch(() => {});
-        }
-      }
-      return cachedResp;
-    };
-
-    try {
-      if (pathname === "/api/health" && method === "GET") {
-        const nowIso = new Date().toISOString();
-        const nodeCountRow = await env.DB.prepare("SELECT COUNT(*) AS count FROM nodes").first<{
-          count: number;
-        }>();
-        const claimCountRow = await env.DB.prepare(
-          "SELECT COUNT(*) AS count FROM claims WHERE status = 'active' AND expires_at > ?"
-        )
-          .bind(nowIso)
-          .first<{ count: number }>();
-        const lanesRes = await env.DB.prepare(
-          "SELECT DISTINCT lane FROM nodes ORDER BY lane ASC"
-        ).all<{ lane: string }>();
-
-        return finalizePublicRead(
-          jsonResponse({
-            ok: true,
-            nodes: Number(nodeCountRow?.count ?? 0),
-            active_claims: Number(claimCountRow?.count ?? 0),
-            lanes: (lanesRes.results ?? []).map((r) => r.lane),
-          })
-        );
-      }
-
-      if (pathname === "/api/dag" && method === "GET") {
-        const nodes = await queryAllNodes(env.DB);
-        const nodeIds = new Set(nodes.map((n) => n.id));
-        const edges: DagEdge[] = nodes
-          .filter((n) => n.parent_id !== null && nodeIds.has(n.parent_id))
-          .map((n) => ({
-            source: n.parent_id as string,
-            target: n.id,
-            lane: n.lane,
-            decision: n.decision,
-          }));
-        const frontier = computeFrontier(nodes);
-        const claims = await queryActiveClaims(env.DB);
-        const alignment = computeAlignment(nodes);
-
-        return finalizePublicRead(
-          jsonResponse({
-            nodes,
-            edges,
-            frontier,
-            claims,
-            alignment,
-          })
-        );
-      }
-
-      if (pathname === "/api/frontier" && method === "GET") {
-        const nodes = await queryAllNodes(env.DB);
-        const frontier = computeFrontier(nodes);
-        return finalizePublicRead(
-          jsonResponse({
-            frontier,
-            count: Object.keys(frontier).length,
-          })
-        );
-      }
-
-      if (pathname === "/api/nodes" && method === "GET") {
-        const limitParam = searchParams.get("limit");
-        const nodes = await queryFilteredNodes(env.DB, {
-          lane: searchParams.get("lane"),
-          run_id: searchParams.get("run_id"),
-          decision: searchParams.get("decision"),
-          verified: searchParams.get("verified"),
-          limit: limitParam !== null ? Number(limitParam) : null,
-        });
-        return finalizePublicRead(jsonResponse({ nodes, count: nodes.length }));
-      }
-
-      if (pathname.startsWith("/api/nodes/") && method === "GET") {
-        const rawId = pathname.slice("/api/nodes/".length);
-        const nodeId = decodeURIComponent(rawId);
-        const row = await env.DB.prepare("SELECT * FROM nodes WHERE id = ?")
-          .bind(nodeId)
-          .first<NodeRow>();
-        if (!row) {
-          return jsonResponse({ error: "not_found" }, 404);
-        }
-        const node = deserializeNode(row);
-        const childrenRes = await env.DB.prepare(
-          "SELECT * FROM nodes WHERE parent_id = ? ORDER BY created_at ASC, id ASC"
-        )
-          .bind(nodeId)
-          .all<NodeRow>();
-        const parentRow = node.parent_id
-          ? await env.DB.prepare("SELECT * FROM nodes WHERE id = ?")
-              .bind(node.parent_id)
-              .first<NodeRow>()
-          : null;
-
-        return finalizePublicRead(
-          jsonResponse({
-            node,
-            parent: parentRow ? deserializeNode(parentRow) : null,
-            children: (childrenRes.results ?? []).map(deserializeNode),
-          })
-        );
-      }
-
-      if (pathname === "/api/register" && method === "POST") {
-        const expectedInvite = env.FLYWHEEL_INVITE_CODE?.trim();
-        if (!expectedInvite) {
-          return jsonResponse({ error: "registration_closed" }, 403);
-        }
-        const payload = await parseJsonBody(request);
-        if (!payload) {
-          return jsonResponse({ error: "invalid_json" }, 400);
-        }
-        const invite = toNullableString(payload.invite_code);
-        if (!invite || !timingSafeEqual(invite, expectedInvite)) {
-          return jsonResponse({ error: "invalid_invite_code" }, 403);
-        }
-        const handle = sanitizeHandle(payload.handle);
-        if (!handle) {
-          return jsonResponse(
-            { error: "invalid_handle", detail: "2-40 chars matching ^[a-zA-Z0-9][a-zA-Z0-9_.-]+$" },
-            400
-          );
-        }
-        const dup = await env.DB.prepare(
-          "SELECT id FROM api_keys WHERE lower(handle) = lower(?) AND revoked_at IS NULL LIMIT 1"
-        )
-          .bind(handle)
-          .first<{ id: string }>();
-        if (dup) {
-          return jsonResponse({ error: "handle_already_registered", handle }, 409);
-        }
-        const id = crypto.randomUUID();
-        const token = generateApiToken();
-        const keyHash = await sha256Hex(token);
-        const nowIso = new Date().toISOString();
-        const hourlyLimit = 60;
-        await env.DB.prepare(
-          "INSERT INTO api_keys (id, key_hash, handle, role, hourly_limit, revoked_at, created_at) VALUES (?, ?, ?, 'contributor', ?, NULL, ?)"
-        )
-          .bind(id, keyHash, handle, hourlyLimit, nowIso)
-          .run();
-        return jsonResponse(
-          {
-            ok: true,
-            key_id: id,
-            handle,
-            role: "contributor",
-            hourly_limit: hourlyLimit,
-            token,
-            note: "Save this token now; it is stored hashed and cannot be shown again.",
-          },
-          201
-        );
-      }
-
-      if (pathname === "/api/admin/keys" && method === "GET") {
-        const principal = await authenticate(request, env);
-        if (!principal) return jsonResponse({ error: "unauthorized" }, 401);
-        if (principal.role !== "admin") return jsonResponse({ error: "forbidden_admin_only" }, 403);
-        const res = await env.DB.prepare(
-          "SELECT id, handle, role, hourly_limit, revoked_at, created_at FROM api_keys ORDER BY created_at DESC"
-        ).all<Omit<ApiKeyRow, "key_hash">>();
-        return jsonResponse({ keys: res.results ?? [], count: (res.results ?? []).length });
-      }
-
-      if (pathname === "/api/admin/keys" && method === "POST") {
-        const principal = await authenticate(request, env);
-        if (!principal) return jsonResponse({ error: "unauthorized" }, 401);
-        if (principal.role !== "admin") return jsonResponse({ error: "forbidden_admin_only" }, 403);
-        const payload = await parseJsonBody(request);
-        if (!payload) return jsonResponse({ error: "invalid_json" }, 400);
-        const handle = sanitizeHandle(payload.handle);
-        if (!handle) {
-          return jsonResponse(
-            { error: "invalid_handle", detail: "2-40 chars matching ^[a-zA-Z0-9][a-zA-Z0-9_.-]+$" },
-            400
-          );
-        }
-        const role = toNullableString(payload.role) ?? "contributor";
-        if (!VALID_ROLES.has(role)) {
-          return jsonResponse({ error: "invalid_role", allowed: ["contributor", "admin"] }, 400);
-        }
-        const limitRaw = payload.hourly_limit === undefined ? 120 : Number(payload.hourly_limit);
-        if (!Number.isFinite(limitRaw) || limitRaw < 1 || limitRaw > 10000) {
-          return jsonResponse({ error: "invalid_hourly_limit" }, 400);
-        }
-        const hourlyLimit = Math.trunc(limitRaw);
-        const id = crypto.randomUUID();
-        const token = generateApiToken();
-        const keyHash = await sha256Hex(token);
-        const nowIso = new Date().toISOString();
-        await env.DB.prepare(
-          "INSERT INTO api_keys (id, key_hash, handle, role, hourly_limit, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?)"
-        )
-          .bind(id, keyHash, handle, role, hourlyLimit, nowIso)
-          .run();
-        return jsonResponse(
-          { ok: true, key_id: id, handle, role, hourly_limit: hourlyLimit, token, created_at: nowIso },
-          201
-        );
-      }
-
-      if (pathname.startsWith("/api/admin/keys/") && method === "DELETE") {
-        const principal = await authenticate(request, env);
-        if (!principal) return jsonResponse({ error: "unauthorized" }, 401);
-        if (principal.role !== "admin") return jsonResponse({ error: "forbidden_admin_only" }, 403);
-        const keyId = decodeURIComponent(pathname.slice("/api/admin/keys/".length));
-        const existing = await env.DB.prepare("SELECT id FROM api_keys WHERE id = ?")
-          .bind(keyId)
-          .first<{ id: string }>();
-        if (!existing) return jsonResponse({ error: "not_found" }, 404);
-        const nowIso = new Date().toISOString();
-        await env.DB.prepare("UPDATE api_keys SET revoked_at = ? WHERE id = ?")
-          .bind(nowIso, keyId)
-          .run();
-        return jsonResponse({ ok: true, key_id: keyId, revoked_at: nowIso });
-      }
-
-      if (pathname.startsWith("/api/admin/nodes/") && pathname.endsWith("/verify") && method === "POST") {
-        const principal = await authenticate(request, env);
-        if (!principal) return jsonResponse({ error: "unauthorized" }, 401);
-        if (principal.role !== "admin") return jsonResponse({ error: "forbidden_admin_only" }, 403);
-        const rawId = pathname.slice("/api/admin/nodes/".length, -"/verify".length);
-        const nodeId = decodeURIComponent(rawId);
-        const existing = await env.DB.prepare("SELECT * FROM nodes WHERE id = ?")
-          .bind(nodeId)
-          .first<NodeRow>();
-        if (!existing) return jsonResponse({ error: "not_found" }, 404);
-        const payload = (await parseJsonBody(request)) ?? {};
-        const verified = payload.verified === false || payload.verified === 0 ? 0 : 1;
-        const stanPassed =
-          payload.real_stan_passed !== undefined
-            ? toFiniteInt(payload.real_stan_passed)
-            : existing.real_stan_passed;
-        const stanTotal =
-          payload.real_stan_total !== undefined
-            ? toFiniteInt(payload.real_stan_total)
-            : existing.real_stan_total;
-        const stanEss =
-          payload.real_ess_per_cost !== undefined
-            ? toFiniteNumber(payload.real_ess_per_cost)
-            : existing.real_ess_per_cost;
-        await env.DB.prepare(
-          "UPDATE nodes SET verified = ?, real_stan_passed = ?, real_stan_total = ?, real_ess_per_cost = ? WHERE id = ?"
-        )
-          .bind(verified, stanPassed, stanTotal, stanEss, nodeId)
-          .run();
-        const updated = await env.DB.prepare("SELECT * FROM nodes WHERE id = ?")
-          .bind(nodeId)
-          .first<NodeRow>();
-        return jsonResponse({ ok: true, node: updated ? deserializeNode(updated) : null });
-      }
-
-      if (pathname.startsWith("/api/admin/nodes/") && method === "DELETE") {
-        const principal = await authenticate(request, env);
-        if (!principal) return jsonResponse({ error: "unauthorized" }, 401);
-        if (principal.role !== "admin") return jsonResponse({ error: "forbidden_admin_only" }, 403);
-        const nodeId = decodeURIComponent(pathname.slice("/api/admin/nodes/".length));
-        const existing = await env.DB.prepare("SELECT id FROM nodes WHERE id = ?")
-          .bind(nodeId)
-          .first<{ id: string }>();
-        if (!existing) return jsonResponse({ error: "not_found" }, 404);
-        await env.DB.prepare("DELETE FROM nodes WHERE id = ?").bind(nodeId).run();
-        return jsonResponse({ ok: true, deleted: nodeId });
-      }
-
-      if (pathname === "/api/nodes" && method === "POST") {
-        const principal = await authenticate(request, env);
-        if (!principal) {
-          return jsonResponse({ error: "unauthorized" }, 401);
-        }
-        const rl = await checkAndConsumeRateLimit(env.DB, principal);
-        if (!rl.allowed) {
-          return jsonResponse({ error: "rate_limit_exceeded", limit: rl.limit, count: rl.count }, 429);
-        }
-        const payload = await parseJsonBody(request);
-        if (!payload) {
-          return jsonResponse({ error: "invalid_json" }, 400);
-        }
-        const outcome = await insertNode(env.DB, payload, principal);
-        return jsonResponse(outcome.body, outcome.status);
-      }
-
-      if (pathname === "/api/claims" && method === "GET") {
-        const claims = await queryActiveClaims(env.DB, searchParams.get("lane"));
-        return finalizePublicRead(jsonResponse({ claims, count: claims.length }));
-      }
-
-      if (pathname === "/api/claims" && method === "POST") {
-        const principal = await authenticate(request, env);
-        if (!principal) {
-          return jsonResponse({ error: "unauthorized" }, 401);
-        }
-        const rl = await checkAndConsumeRateLimit(env.DB, principal);
-        if (!rl.allowed) {
-          return jsonResponse({ error: "rate_limit_exceeded", limit: rl.limit, count: rl.count }, 429);
-        }
-        const payload = await parseJsonBody(request);
-        if (!payload) {
-          return jsonResponse({ error: "invalid_json" }, 400);
-        }
-        const outcome = await createClaim(env.DB, payload, principal);
-        return jsonResponse(outcome.body, outcome.status);
-      }
-
-      if (pathname.startsWith("/api/claims/") && method === "PATCH") {
-        const principal = await authenticate(request, env);
-        if (!principal) {
-          return jsonResponse({ error: "unauthorized" }, 401);
-        }
-        const rl = await checkAndConsumeRateLimit(env.DB, principal);
-        if (!rl.allowed) {
-          return jsonResponse({ error: "rate_limit_exceeded", limit: rl.limit, count: rl.count }, 429);
-        }
-        const claimId = decodeURIComponent(pathname.slice("/api/claims/".length));
-        const payload = await parseJsonBody(request);
-        if (!payload) {
-          return jsonResponse({ error: "invalid_json" }, 400);
-        }
-        const outcome = await patchClaim(env.DB, claimId, payload, principal);
-        return jsonResponse(outcome.body, outcome.status);
-      }
-
-      if (pathname === "/api/mcp" && method === "POST") {
-        return await handleMcp(request, env);
-      }
-
-      return jsonResponse({ error: "not_found", path: pathname }, 404);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return jsonResponse({ error: "internal_error", message }, 500);
-    }
+  if (!pathname.startsWith("/api/")) {
+    if (env.ASSETS) return env.ASSETS.fetch(request);
+    return jsonResponse({ error: "not_found", path: pathname }, 404);
+  }
+  if (method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS_HEADERS });
   }
 
-  if (env.ASSETS) {
-    return env.ASSETS.fetch(request);
+  const cacheKey = method === "GET" ? canonicalPublicCacheKey(url) : null;
+  const edgeCache = cacheKey ? getEdgeCache(env) : null;
+  if (cacheKey && edgeCache) {
+    const cached = await edgeCache.match(cacheKey);
+    if (cached) return cached;
   }
-  return jsonResponse({ error: "not_found", path: pathname }, 404);
+
+  const finalizePublicRead = (resp: Response): Response => {
+    if (!cacheKey || resp.status !== 200) return resp;
+    const headers = new Headers(resp.headers);
+    headers.set(
+      "Cache-Control",
+      `public, max-age=${PUBLIC_READ_CACHE_SECONDS}, s-maxage=${PUBLIC_READ_CACHE_SECONDS}`
+    );
+    const cachedResp = new Response(resp.body, { status: resp.status, headers });
+    if (edgeCache) {
+      const putPromise = edgeCache.put(cacheKey, cachedResp.clone());
+      if (ctx) {
+        ctx.waitUntil(putPromise);
+      } else {
+        putPromise.catch(() => {});
+      }
+    }
+    return cachedResp;
+  };
+
+  try {
+    if (pathname === "/api/mcp" && method === "POST") {
+      return await handleMcp(request, env);
+    }
+    const resp = await dispatch(request, env, url, method);
+    if (resp) return finalizePublicRead(resp);
+    return jsonResponse({ error: "not_found", path: pathname }, 404);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return jsonResponse({ error: "internal_error", message }, 500);
+  }
 }
 
 export default {

@@ -105,16 +105,17 @@
 
   const KEPT = new Set(["keep", "keep_baseline", "keep_simpler"]);
 
+  /* glyph: "keep" (on the kept line), "open" (scored, not kept), "tick" (never scored). */
   const DECISIONS = {
     keep: { label: "kept", glyph: "keep", note: "Passed every check and beat the incumbent" },
-    keep_baseline: { label: "baseline", glyph: "base", note: "First passing trial of a run; later trials are compared to it" },
-    keep_simpler: { label: "kept, simpler", glyph: "simpler", note: "Tied the incumbent with less code" },
+    keep_baseline: { label: "baseline", glyph: "keep", note: "First passing trial of a run; later trials are compared to it" },
+    keep_simpler: { label: "kept, simpler", glyph: "keep", note: "Tied the incumbent with less code" },
     keep_incumbent_failed: { label: "kept, unpaired", glyph: "keep", note: "Passed while the paired incumbent failed; not a proven gain" },
-    archive_only: { label: "archived", glyph: "archive", note: "Passed, did not beat the incumbent, best in its niche" },
-    discard_no_gain: { label: "no gain", glyph: "discard", note: "Passed but did not beat the incumbent" },
-    discard_tier0: { label: "failed checks", glyph: "discard", note: "Failed lint, replay or the invariance smoke test" },
-    discard_tier1: { label: "failed accuracy", glyph: "discard", note: "Failed an accuracy or replay gate on the target suite" },
-    discard_duplicate: { label: "duplicate", glyph: "discard", note: "Same code as an earlier trial" },
+    archive_only: { label: "archived", glyph: "open", note: "Passed, did not beat the incumbent, best in its niche" },
+    discard_no_gain: { label: "no gain", glyph: "open", note: "Passed but did not beat the incumbent" },
+    discard_tier0: { label: "failed checks", glyph: "tick", note: "Failed lint, replay or the invariance smoke test" },
+    discard_tier1: { label: "failed accuracy", glyph: "tick", note: "Failed an accuracy or replay gate on the target suite" },
+    discard_duplicate: { label: "duplicate", glyph: "tick", note: "Same code as an earlier trial" },
   };
 
   /* ---------- tiny DOM helpers ---------- */
@@ -224,23 +225,21 @@
     return hit ? hit.name : lane;
   }
 
-  /* One glyph per decision, used by the graph, its legend and the ledger. */
+  /* The three marks of the trial charts, reused by their legends and the ledger. */
   function glyph(kind, color, size) {
     const s = size || 14;
     const c = color || "currentColor";
     const open = `<svg viewBox="-8 -8 16 16" width="${s}" height="${s}" aria-hidden="true">`;
-    if (kind === "base") return `${open}<rect x="-5" y="-5" width="10" height="10" rx="1.5" fill="${c}"/></svg>`;
-    if (kind === "simpler") return `${open}<path d="M0-6.5L6.5 0 0 6.5-6.5 0z" fill="${c}"/></svg>`;
-    if (kind === "archive") return `${open}<circle r="4.4" fill="none" stroke="${c}" stroke-width="2"/></svg>`;
-    if (kind === "discard") return `${open}<path d="M-3.4-3.4l6.8 6.8M3.4-3.4l-6.8 6.8" stroke="${c}" stroke-width="1.8" stroke-linecap="round" opacity="0.7"/></svg>`;
-    if (kind === "verified") return `${open}<circle r="6.4" fill="none" stroke="${c}" stroke-width="1.6"/><circle r="3.2" fill="${c}"/></svg>`;
-    return `${open}<circle r="5.2" fill="${c}"/></svg>`;
+    if (kind === "open") return `${open}<circle r="3.4" fill="none" stroke="${c}" stroke-width="1.4"/></svg>`;
+    if (kind === "tick") return `${open}<path d="M0-4.5V4.5" stroke="${c}" stroke-width="1.6" stroke-linecap="round"/></svg>`;
+    if (kind === "verified") return `${open}<circle r="6.2" fill="none" stroke="${c}" stroke-width="1.1"/><circle r="3" fill="${c}"/></svg>`;
+    if (kind === "line") return `${open}<path d="M-7 3H-1V-3H7" fill="none" stroke="${c}" stroke-width="1.5"/></svg>`;
+    return `${open}<circle r="3.6" fill="${c}"/></svg>`;
   }
-
   function decisionMark(decision, lane) {
-    const d = DECISIONS[decision] || { label: decision, glyph: "discard" };
-    const color = d.glyph === "discard" ? "var(--ink-3)" : laneColor(lane);
-    return `<span class="status${d.glyph === "discard" ? " mute" : ""}" title="${esc(d.note || "")}">${glyph(d.glyph, color, 13)}${esc(d.label)}</span>`;
+    const d = DECISIONS[decision] || { label: decision, glyph: "tick" };
+    const quiet = d.glyph !== "keep";
+    return `<span class="status${quiet ? " mute" : ""}" title="${esc(d.note || "")}">${glyph(d.glyph, quiet ? "var(--ink-3)" : laneColor(lane), 13)}${esc(d.label)}</span>`;
   }
 
   /* ---------- tooltip ---------- */
@@ -358,32 +357,84 @@
   }
 
   /* The research graph: live from the Flywheel API, or the snapshot shipped with the site. */
+  /* What has happened to a trial since it was posted. */
+  const STATES = {
+    unverified: { label: "not rerun yet", tone: "mute", note: "Nobody but its author has run this trial." },
+    "needs-replication": { label: "rerun requested", tone: "warn", note: "A contributor asked for an independent rerun." },
+    replicated: { label: "rerun by someone else", tone: "good", note: "An independent rerun on fresh seeds reached the claimed efficiency." },
+    verified: { label: "verified by a maintainer", tone: "good", note: "A maintainer reproduced it." },
+    disputed: { label: "disputed", tone: "bad", note: "A rerun did not reach the claimed efficiency, or a contributor flagged it." },
+    retracted: { label: "retracted", tone: "mute", note: "Its author withdrew it." },
+  };
+  const RELATIONS = { incumbent: "scored against", combines: "combines", fork: "forked from" };
+
+  /* The trial graph. The live API is tried whole, then lane by lane (each lane fits the Worker's
+     CPU limit long after the whole graph stops fitting), then the snapshot shipped with the site. */
   async function loadGraph() {
     let data = null;
     let source = "live";
     try {
       data = await getJSON("/api/dag");
     } catch {
-      source = "snapshot";
-      data = await getJSON("/snapshot.json");
+      try {
+        const parts = await Promise.all(LANES.map((l) => getJSON("/api/dag?lane=" + encodeURIComponent(l.id))));
+        data = { nodes: [], edges: [], frontier: {}, claims: [], alignment: [] };
+        for (const part of parts) {
+          for (const key of ["nodes", "edges", "claims", "alignment"]) data[key].push(...(part[key] || []));
+          Object.assign(data.frontier, part.frontier || {});
+        }
+      } catch {
+        source = "snapshot";
+        data = await getJSON("/snapshot.json");
+      }
     }
-    const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+    /* Rows written before trials had a state or stored source lack those fields. */
+    const nodes = (Array.isArray(data.nodes) ? data.nodes : []).map((n) => ({
+      ...n,
+      state: n.state || (n.verified === 1 ? "verified" : "unverified"),
+      has_source: Boolean(n.has_source),
+      author_tier: n.author_tier || null,
+    }));
+    const edges = (Array.isArray(data.edges) ? data.edges : []).map((e) => ({ ...e, relation: e.relation || "incumbent" }));
     const graph = {
       source,
       nodes,
-      edges: Array.isArray(data.edges) ? data.edges : [],
+      edges,
       frontier: data.frontier || {},
       claims: Array.isArray(data.claims) ? data.claims : [],
       alignment: Array.isArray(data.alignment) ? data.alignment : [],
       byId: new Map(nodes.map((n) => [n.id, n])),
+      parents: new Map(),
       children: new Map(),
     };
+    const link = (map, key, value) => (map.has(key) ? map.get(key).push(value) : map.set(key, [value]));
+    for (const e of edges) {
+      link(graph.parents, e.target, { id: e.source, relation: e.relation });
+      link(graph.children, e.source, { id: e.target, relation: e.relation });
+    }
     for (const n of nodes) {
-      if (!n.parent_id) continue;
-      if (!graph.children.has(n.parent_id)) graph.children.set(n.parent_id, []);
-      graph.children.get(n.parent_id).push(n);
+      if (n.parent_id && !(graph.parents.get(n.id) || []).some((p) => p.id === n.parent_id)) {
+        link(graph.parents, n.id, { id: n.parent_id, relation: "incumbent" });
+        link(graph.children, n.parent_id, { id: n.id, relation: "incumbent" });
+      }
     }
     return graph;
+  }
+
+  /* Hypotheses, insights and the rerun queue exist only on the live Flywheel. */
+  async function loadNotes() {
+    try {
+      return (await getJSON("/api/notes?limit=100")).notes || [];
+    } catch {
+      return null;
+    }
+  }
+  async function loadQueue() {
+    try {
+      return (await getJSON("/api/verify/queue?limit=50")).items || [];
+    } catch {
+      return null;
+    }
   }
 
   /* Per-lane summary used by the home, frontier and lanes pages. */
@@ -437,57 +488,98 @@
       const y = h - 3 - ((v - lo) / span) * (h - 6);
       return (i ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1);
     });
-    return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="Best efficiency over trials, rising from ${fmt.eff(values[0])} to ${fmt.eff(values[values.length - 1])}"><path d="${pts.join(" ")}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+    return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="Best efficiency over trials, rising from ${fmt.eff(values[0])} to ${fmt.eff(values[values.length - 1])}"><path d="${pts.join(" ")}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
   }
 
   /* ---------- agent benchmark helpers (shared by the overview and the leaderboard) ---------- */
 
   const benchIndex = new WeakMap();
+  /* Benchmark data helpers. `rel` is one release block of /data/benchmark.json: releases are
+     scored under different rules and are never mixed. A "cell" is one setting on one task,
+     summed over all its attempts. */
   const bench = {
-    /* Fix tasks first, then speed-up tasks; alphabetical inside each group. */
-    tasks(data) {
-      const kind = (id) => bench.meta(data, id).category;
-      return [...(data.tasks || [])].sort((a, b) => (kind(a) === kind(b) ? a.localeCompare(b) : kind(a) === "rewind" ? -1 : 1));
+    release(data, tag) {
+      const list = (data && data.releases) || [];
+      return list.find((r) => r.release === tag) || list[0] || null;
     },
-    meta(data, taskId) {
-      const m = (data.task_meta || {})[taskId] || {};
+    /* Fix tasks first, then speed-up tasks; alphabetical inside each group. */
+    tasks(rel) {
+      const kind = (id) => bench.meta(rel, id).category;
+      return [...(rel.tasks || [])].sort((a, b) => (kind(a) === kind(b) ? a.localeCompare(b) : kind(a) === "rewind" ? -1 : 1));
+    },
+    meta(rel, taskId) {
+      const m = (rel.task_meta || {})[taskId] || {};
       return {
         id: taskId,
         category: m.category || (taskId.startsWith("s3-") ? "rewind" : "optimize"),
         title: m.title || taskId,
         lane: m.lane || null,
         difficulty: m.difficulty || null,
-        agent_timeout_s: m.agent_timeout_s || null,
       };
     },
-    trial(data, configKey, taskId) {
-      if (!benchIndex.has(data)) {
-        benchIndex.set(data, new Map((data.trials || []).map((t) => [t.config_key + "||" + t.task_id, t])));
+    trials(rel, configKey, taskId) {
+      if (!benchIndex.has(rel)) {
+        const map = new Map();
+        for (const t of rel.trials || []) {
+          const key = t.config_key + "||" + t.task_id;
+          if (map.has(key)) map.get(key).push(t);
+          else map.set(key, [t]);
+        }
+        benchIndex.set(rel, map);
       }
-      return benchIndex.get(data).get(configKey + "||" + taskId) || null;
+      return benchIndex.get(rel).get(configKey + "||" + taskId) || [];
     },
-    state(t) {
-      if (!t) return "none";
-      if (t.infra_error) return "infra";
-      return t.passed ? "pass" : "fail";
+    cell(row, taskId) {
+      return (row.tasks || {})[taskId] || null;
     },
-    outcome(data, t) {
-      const st = bench.state(t);
-      const kind = bench.meta(data, t.task_id).category;
-      if (st === "infra") return t.rate_limited ? "did not run: provider rate limit" : "did not run: infrastructure error";
-      if (st === "fail") return kind === "rewind" ? "bug not fixed" : "failed the checks, scores 0";
-      return kind === "rewind" ? "bug fixed" : `${fmt.times(t.reward)} the baseline`;
+    /* none: never attempted. unfinished: every attempt was cut off. Then, over the scored
+       attempts: solved (all), partly (some), unsolved (valid but none solved), invalid (all failed). */
+    state(cell) {
+      if (!cell) return "none";
+      if (!cell.attempts) return "unfinished";
+      if (cell.solve_rate >= 1) return "solved";
+      if (cell.solve_rate > 0) return "partly";
+      const o = cell.outcomes || {};
+      return (o.invalid || 0) + (o.unscorable || 0) >= cell.attempts ? "invalid" : "unsolved";
     },
-    pips(data, row) {
-      const tasks = bench.tasks(data);
+    against(rel) {
+      return rel.scoring === "reference" ? "the Stan-style reference" : "the starting code";
+    },
+    solvedCount(cell) {
+      return Math.round((cell.solve_rate || 0) * cell.attempts);
+    },
+    label(rel, taskId, cell) {
+      const st = bench.state(cell);
+      if (st === "none") return "not run";
+      if (st === "unfinished") return "did not finish";
+      const many = cell.attempts > 1 ? `, solved in ${bench.solvedCount(cell)} of ${cell.attempts} attempts` : "";
+      if (bench.meta(rel, taskId).category === "rewind") return (st === "solved" ? "bug fixed" : st === "partly" ? "bug fixed in some attempts" : "bug not fixed") + many;
+      if (st === "invalid") return "failed the checks" + many;
+      return `${fmt.times(cell.ratio_mean)} ${bench.against(rel)}${st === "unsolved" ? ", not solved" : ""}${many}`;
+    },
+    /* One attempt, in words. */
+    outcome(rel, t) {
+      const ends = { provider_limit: "the model provider cut it off", infrastructure: "the infrastructure failed", agent_crash: "the agent never started" };
+      if (t.outcome === "interrupted") return `did not finish: ${ends[t.termination] || "interrupted"}`;
+      if (bench.meta(rel, t.task_id).category === "rewind") return t.outcome === "solved" ? "bug fixed" : "bug not fixed";
+      if (t.outcome === "invalid") return "failed the checks";
+      if (t.outcome === "unscorable") return "could not be scored";
+      const start = isNum(t.start_speedup) ? `${fmt.times(t.start_speedup)} the starting code` : "no ratio recorded";
+      if (rel.scoring !== "reference") return t.outcome === "no_gain" ? `no gain: ${start}` : `improved: ${start}`;
+      const ref = `${fmt.times(t.ref_speedup)} the Stan-style reference`;
+      if (t.outcome === "solved") return `solved: ${ref}, ${start}`;
+      if (t.outcome === "improved") return `improved, but below the reference: ${ref}, ${start}`;
+      return `no gain: ${start}, ${ref}`;
+    },
+    pips(rel, row) {
+      const tasks = bench.tasks(rel);
+      const cls = { solved: "", partly: "part", unsolved: "open", invalid: "fail", unfinished: "infra", none: "none" };
       let html = '<span class="pips">';
       tasks.forEach((id, i) => {
-        if (i > 0 && bench.meta(data, id).category !== bench.meta(data, tasks[i - 1]).category) html += '<span class="gap"></span>';
-        const t = bench.trial(data, row.config_key, id);
-        const st = bench.state(t);
-        const cls = st === "pass" ? "" : st;
-        const label = t ? `${id}: ${bench.outcome(data, t)}` : `${id}: not run`;
-        html += `<button type="button" class="${cls}" ${t ? `data-run="${esc(row.config_key + "||" + id)}"` : "disabled"} title="${esc(label)}" aria-label="${esc(label)}"></button>`;
+        if (i > 0 && bench.meta(rel, id).category !== bench.meta(rel, tasks[i - 1]).category) html += '<span class="gap"></span>';
+        const cell = bench.cell(row, id);
+        const label = `${id}: ${bench.label(rel, id, cell)}`;
+        html += `<button type="button" class="${cls[bench.state(cell)]}" ${cell ? `data-run="${esc(row.config_key + "||" + id)}"` : "disabled"} title="${esc(label)}" aria-label="${esc(label)}"></button>`;
       });
       return html + "</span>";
     },
@@ -609,6 +701,10 @@
     cmd,
     getJSON,
     loadGraph,
+    loadNotes,
+    loadQueue,
+    STATES,
+    RELATIONS,
     laneSummaries,
     sparkline,
     watchWidth,

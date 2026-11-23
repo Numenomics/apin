@@ -24,7 +24,8 @@
   const Z = 2.576;
   const GATE = 0.1;
   const BUDGET = 600000;
-  const PER_FRAME = 120; /* about six seconds to a verdict at 60 frames a second */
+  const PER_FRAME = 120; /* steps per 60 Hz frame: about six seconds to a typical verdict */
+  const MAX_ANIMATED_MS = 12000; /* a slow chain is finished off-screen instead of animating on */
 
   const field = $("#plot-field");
   const draws = $("#plot-draws");
@@ -79,16 +80,30 @@
     return { px, py };
   }
 
+  /* The chain is cheap (two log-density calls per step), but it must never run where nobody
+     can see it. It starts when the figure scrolls into view, pauses when it leaves or the tab
+     is hidden, runs once, and then stops for good. Resizing or switching theme repaints the
+     draws already made instead of sampling again. */
+  let visible = false;
+  let animatedMs = 0;
+  let lastTime = 0;
+
+  function paint() {
+    run.map = drawField();
+    const { ctx } = sizeCanvas(draws);
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--ink").trim();
+    ctx.globalAlpha = 0.32;
+    run.ctx = ctx;
+    for (let i = 0; i < run.pts.length; i += 2) ctx.fillRect(run.map.px(run.pts[i]) - 0.7, run.map.py(run.pts[i + 1]) - 0.7, 1.4, 1.4);
+  }
+
   function start() {
     cancelAnimationFrame(frame);
-    const map = drawField();
-    const { ctx } = sizeCanvas(draws);
-    const css = getComputedStyle(document.documentElement);
-    ctx.fillStyle = css.getPropertyValue("--ink").trim();
-    ctx.globalAlpha = 0.32;
+    frame = 0;
     run = {
-      map,
-      ctx,
+      map: null,
+      ctx: null,
+      pts: [],
       x: -3.4,
       y: 6.5,
       lp: logp(-3.4, 6.5),
@@ -100,13 +115,27 @@
       bound: null,
       verdict: "unproven",
     };
+    animatedMs = 0;
+    paint();
     report();
-    if (still) {
-      while (run.verdict === "unproven" && run.n < BUDGET) advance(PER_FRAME);
-      report();
-    } else {
-      frame = requestAnimationFrame(tick);
-    }
+    if (still) finish();
+    else resume();
+  }
+
+  function finish() {
+    while (run.verdict === "unproven") advance(PER_FRAME * 50);
+    report();
+  }
+
+  function resume() {
+    if (frame || !visible || document.hidden || !run || run.verdict !== "unproven") return;
+    lastTime = 0;
+    frame = requestAnimationFrame(tick);
+  }
+
+  function pause() {
+    cancelAnimationFrame(frame);
+    frame = 0;
   }
 
   function advance(steps) {
@@ -131,7 +160,10 @@
         r.batchMeans[1].push(r.batchSum[1] / BATCH);
         r.batchSum = [0, 0];
       }
-      if (i % 8 === 0) r.ctx.fillRect(r.map.px(r.x) - 0.7, r.map.py(r.y) - 0.7, 1.4, 1.4);
+      if (r.n % 8 === 0) {
+        r.pts.push(r.x, r.y);
+        r.ctx.fillRect(r.map.px(r.x) - 0.7, r.map.py(r.y) - 0.7, 1.4, 1.4);
+      }
     }
     const k = r.batchMeans[0].length;
     if (k >= 20) {
@@ -168,20 +200,44 @@
     }
   }
 
-  function tick() {
-    advance(PER_FRAME);
-    report();
-    if (run.verdict === "unproven") frame = requestAnimationFrame(tick);
+  function tick(now) {
+    frame = 0;
+    /* Step by elapsed time, so a 120 Hz screen does the same work per second as a 60 Hz one. */
+    const dt = lastTime ? Math.min(now - lastTime, 50) : 16.7;
+    lastTime = now;
+    animatedMs += dt;
+    if (animatedMs > MAX_ANIMATED_MS) finish();
+    else {
+      advance(Math.max(1, Math.round((PER_FRAME * dt) / 16.7)));
+      report();
+    }
+    resume();
   }
 
-  $("#r-again").addEventListener("click", start);
-  apin.onTheme(start);
+  $("#r-again").addEventListener("click", () => {
+    start();
+  });
+  apin.onTheme(() => run && paint());
   let resizeTimer = 0;
   window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(start, 200);
+    resizeTimer = setTimeout(() => run && paint(), 200);
   });
-  start();
+  document.addEventListener("visibilitychange", () => (document.hidden ? pause() : resume()));
+  if ("IntersectionObserver" in window) {
+    new IntersectionObserver(
+      (entries) => {
+        visible = entries[0].isIntersecting;
+        if (!visible) pause();
+        else if (!run) start();
+        else resume();
+      },
+      { threshold: 0.2 }
+    ).observe(draws);
+  } else {
+    visible = true;
+    start();
+  }
 
   /* ---------- frontier summary ---------- */
 
@@ -221,21 +277,28 @@
 
   /* ---------- benchmark summary ---------- */
 
+  /* The task blocks open their runs on the benchmark page. */
+  $("#board-table").addEventListener("click", (e) => {
+    if (e.target.closest("[data-run]")) location.href = "/benchmark/";
+  });
+
   apin
     .getJSON("/data/benchmark.json")
     .then((data) => {
-      const board = data.leaderboard || [];
-      $("#board-note").textContent = `Release ${data.release}: ${board.length} model and effort settings, ${data.trials.length} runs across ${data.tasks.length} tasks.`;
+      const rel = apin.bench.release(data, data.current_release);
+      const board = rel.leaderboard || [];
+      const whole = (r, v) => fmt.num(v, r.attempts_per_task > 1 ? 1 : 0);
+      $("#board-note").textContent = `Release ${rel.release}: ${board.length} model and effort settings, ${rel.trials.length} runs across ${rel.tasks.length} tasks.`;
       $("#board-table").innerHTML =
-        "<thead><tr><th></th><th>Model</th><th>Effort</th><th>Tasks, fixes then speed-ups</th><th class='num'>Passed</th>" +
+        "<thead><tr><th></th><th>Model</th><th>Effort</th><th>Tasks, fixes then speed-ups</th><th class='num'>Solved</th>" +
         "<th class='num'>Typical speed-up</th><th class='num'>Cost of the sweep</th></tr></thead><tbody>" +
         board
           .slice(0, 6)
           .map(
             (r) =>
               `<tr><td class="rank">${r.rank}</td><td>${esc(r.label)}</td><td><span class="tag">${esc(r.effort)}</span></td>` +
-              `<td>${apin.bench.pips(data, r)}</td><td class="num">${r.passed} of ${r.n_trials}</td>` +
-              `<td class="num">${r.opt_geomean_speedup ? fmt.times(r.opt_geomean_speedup) : "—"}</td><td class="num">${fmt.usd(r.total_cost_usd)}</td></tr>`
+              `<td>${apin.bench.pips(rel, r)}</td><td class="num">${whole(r, r.solved)} of ${r.n_tasks}</td>` +
+              `<td class="num">${r.opt_geomean ? fmt.times(r.opt_geomean) : "—"}</td><td class="num">${fmt.usd(r.total_cost_usd)}</td></tr>`
           )
           .join("") +
         "</tbody>";

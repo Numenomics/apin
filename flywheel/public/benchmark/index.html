@@ -57,7 +57,8 @@
         border-radius: 2px;
         background: transparent;
         color: var(--ink);
-        font: 500 0.8rem var(--mono);
+        font: 500 0.94rem var(--sans);
+        font-variant-numeric: lining-nums tabular-nums;
         cursor: pointer;
         display: inline-flex;
         align-items: center;
@@ -85,6 +86,24 @@
         background: repeating-linear-gradient(135deg, var(--rule) 0 2px, transparent 2px 6px);
       }
       .heat.none { cursor: default; color: var(--ink-3); border-style: dashed; }
+      .heat.flat { color: var(--ink-3); }
+      .heat small {
+        font-size: 0.72rem;
+        opacity: 0.8;
+      }
+      #release-note {
+        max-width: var(--measure);
+        font-size: 0.96rem;
+        color: var(--ink-2);
+      }
+      #release-note.is-old {
+        border-left: 2px solid var(--warn-mark, var(--ink-3));
+        padding-left: 12px;
+      }
+      .chips button[aria-current="true"] {
+        border-color: var(--ink);
+        color: var(--ink);
+      }
       .ramp {
         white-space: nowrap;
         display: inline-flex;
@@ -136,7 +155,7 @@
       <header class="page-head">
         <h1>Agent benchmark</h1>
         <p class="lede">
-          Eight tasks taken from real sampler work: three bugs to fix and five samplers to make faster. Every model starts from the same code in the same container with the same time limit, and is graded on seeds it never saw.
+          Eight tasks taken from real sampler work: three bugs to fix and five samplers to make faster. Every model starts from the same code in the same sealed container, works for as long as it wants, and is graded on seeds it never saw.
         </p>
         <p class="meta-line" id="meta">Loading results.</p>
       </header>
@@ -145,9 +164,12 @@
         <div class="section-head">
           <div>
             <h2 id="board-h">Leaderboard</h2>
-            <p>One row per model and reasoning-effort setting. Ranked by mean reward, then tasks passed, then cost.</p>
+            <p>One row per model and reasoning-effort setting. Ranked by tasks solved, then typical speed-up, then cost. Settings with unfinished tasks come last.</p>
+            <p id="release-note"></p>
           </div>
           <div class="filters">
+            <label class="sr-only" for="f-release">Release</label>
+            <select id="f-release" hidden></select>
             <label class="sr-only" for="f-model">Model</label>
             <select id="f-model"><option value="">All models</option></select>
             <label class="sr-only" for="f-effort">Effort</label>
@@ -156,7 +178,7 @@
         </div>
         <div class="table-scroll"><table class="data" id="board"></table></div>
         <p class="caption">
-          Each block in the Tasks column is one run: the three fixes, then the five speed-ups. Select one to open that run. Typical speed-up is the geometric mean over the speed-up tasks that passed. Each task was run once per setting in this release, so no spread is shown.
+          Each block in the Tasks column is one task: the three fixes, then the five speed-ups. A filled block is solved, an outlined one is valid but not solved, a red one failed the checks and a hatched one did not finish. Select a block to open its runs. When a task was attempted more than once, Solved counts the share of attempts that solved it. <span id="speedup-rule"></span>
         </p>
       </section>
 
@@ -173,7 +195,7 @@
           <div class="legend" id="scatter-legend"></div>
           <div id="scatter-box"><svg class="chart" id="scatter" role="img" aria-labelledby="cost-h"></svg></div>
           <figcaption class="caption">
-            Mean reward over the eight tasks against the total spent on them. The dashed line joins the settings that no other setting beats on both axes. The same numbers are in the leaderboard above.
+            Tasks solved against the total spent on the sweep. The dotted line joins the settings that no other setting beats on both axes. No run has a time or token budget, so read a result next to what it cost.
           </figcaption>
         </figure>
       </section>
@@ -182,12 +204,12 @@
         <div class="section-head">
           <div>
             <h2 id="matrix-h">Task by task</h2>
-            <p>Each task is a directory under <code>harbor/tasks/</code> with instructions, a frozen starting file and a hidden verifier. Select a cell to see that run: its score per target shape, tokens, time and the agent's closing note.</p>
+            <p>Each task is a directory under <code>harbor/tasks/</code> with instructions, a frozen starting file and a hidden verifier. A coloured cell is solved; a plain number is a valid result that is not. Select a cell to see its runs: the score per target shape, tokens, time and the agent's closing note.</p>
           </div>
           <div class="ramp" aria-hidden="true">
             <span>1×</span>
             <span class="steps"><i style="background:var(--seq-1)"></i><i style="background:var(--seq-2)"></i><i style="background:var(--seq-3)"></i><i style="background:var(--seq-4)"></i><i style="background:var(--seq-5)"></i><i style="background:var(--seq-6)"></i></span>
-            <span>8× the baseline</span>
+            <span id="ramp-top">4× the reference</span>
           </div>
         </div>
         <div class="table-scroll"><table class="data matrix" id="matrix"></table></div>
@@ -198,11 +220,12 @@
           <div class="stack">
             <h2 id="score-h" style="font-size:1.6rem">How a run is scored</h2>
             <ul class="rules">
-              <li><strong>Fix tasks pay 1 or 0.</strong> The agent gets a sampler with a real bug. The reward is 1 if the repaired kernel passes a hidden invariance check, and 0 otherwise.</li>
-              <li><strong>Speed-up tasks pay a ratio.</strong> The reward is the candidate's efficiency divided by the frozen baseline's, measured on hidden seeds. Any failed invariance or replay check makes it 0.</li>
+              <li><strong>A fix task is solved or not.</strong> The agent gets a sampler with a real bug. The task is solved if the repaired kernel passes a hidden invariance check.</li>
+              <li><strong>A speed-up task is measured against a Stan-style reference.</strong> The verifier scores three files on the same hidden seeds: the agent's, the starting code and a reference built the way Stan builds its sampler. The number shown is the agent's efficiency divided by the reference's.</li>
+              <li><strong>Solving a speed-up task takes three things.</strong> The result passes every validity check, it beats the starting code by at least 5%, and it is at least as efficient as the reference. Returning the starting code unchanged solves nothing.</li>
               <li><strong>The weakest shape sets the efficiency.</strong> Efficiency is a soft minimum over target classes (a power mean with exponent −4), so a gain on easy Gaussians cannot pay for a loss on funnels.</li>
-              <li><strong>Mean reward mixes both kinds.</strong> It averages eight rewards, so one large speed-up can outweigh a failed task. Read it next to the Passed column.</li>
-              <li><strong>Runs that never started count as 0.</strong> Rate limits and container failures are drawn hatched so they are not mistaken for a wrong answer.</li>
+              <li><strong>A run that was cut off is not scored.</strong> If the model provider or the infrastructure ends a run, it is drawn hatched and left out of every count, whatever it had produced. It is never a zero and never a pass.</li>
+              <li><strong>Nothing leaks in.</strong> The container holds only the harness and the starting code. During the run it can reach the model provider and nothing else.</li>
             </ul>
           </div>
           <div class="stack">

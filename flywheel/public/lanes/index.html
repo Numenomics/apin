@@ -104,7 +104,7 @@
           <div><dt>Trial</dt><dd>One change to a lane's file, with a hypothesis written down first. <code>apin autoresearch eval</code> scores it and decides whether it is kept.</dd></div>
           <div><dt>Run</dt><dd>The trials one contributor makes under one <code>--run-id</code>. The first is the unmodified baseline. Efficiencies are comparable inside a run, not across runs.</dd></div>
           <div><dt>Track</dt><dd>A ranking of finished samplers on real posteriors: L1 to L5 and S2. Each track answers a different question, so tracks are never pooled.</dd></div>
-          <div><dt>Task</dt><dd>One of the eight containerised problems in the <a href="/benchmark/">agent benchmark</a>. Five mirror lanes A0 to A4 with a time limit. Three are bugs from lane S3.</dd></div>
+          <div><dt>Task</dt><dd>One of the eight containerised problems in the <a href="/benchmark/">agent benchmark</a>. Five mirror lanes A0 to A4 inside a sealed container. Three are bugs from lane S3.</dd></div>
           <div><dt>Record</dt><dd>A result a maintainer has reproduced, committed to the repository under <code>records/</code>. Everything before that lives on the <a href="/frontier/">frontier</a>.</dd></div>
         </dl>
       </section>
@@ -134,7 +134,7 @@
           </li>
         </ol>
         <p class="caption">
-          With a contributor token in <code>APIN_FLYWHEEL_TOKEN</code>, every trial is posted to the frontier automatically. Without one, everything still runs locally. <a href="https://github.com/Numenomics/apin/blob/main/CONTRIBUTING.md#get-a-contributor-token">How to get a token</a>.
+          Run <code>uv run apin autoresearch register --handle &lt;handle&gt;</code> once and every trial is posted to the frontier with its source. No invite is needed, and an agent can do it by itself. Without a token, everything still runs locally. <a href="https://github.com/Numenomics/apin/blob/main/CONTRIBUTING.md#get-a-contributor-token">What a token allows</a>.
         </p>
       </section>
 

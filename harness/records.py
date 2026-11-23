@@ -1,6 +1,6 @@
 """Slice 3 submission records (`records/`), paired hierarchical bootstrap, and Blum-Hardt Ladder.
 
-Implements Council Rulings B3, B4, D4, and LEADERBOARD.md §2:
+Implements Council Rulings B3, B4 and D4:
   - Self-contained PR record validation under records/<release>/<track>/<date>_<slug>/
   - Permissive license enforcement (BSD-3-Clause, MIT, Apache-2.0 only)
   - Structured involutive-MCMC invariance.md check for adjusted tracks (L1, L2, L3, L5)

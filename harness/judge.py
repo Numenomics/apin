@@ -1,6 +1,6 @@
 """Read-only judge module (Karpathy 3-file contract) & Lane A1 fixed HMC transition kernel.
 
-Contract (`autoresearch/lanes/A1/program.md` & `ARCHITECTURE.md` §2.2):
+Contract (`autoresearch/lanes/A1/program.md`):
   - `harness/judge.py` is read-only to autoresearch agents; its digest (together with
     `logdensity.py`, `ipc.py`, `shapes.py`, `invariance.py`, and `autoresearch.py`) is
     recorded on every trial row in `ledger.jsonl`.

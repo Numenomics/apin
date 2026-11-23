@@ -25,6 +25,12 @@ def _load_seed_module():
     return mod
 
 
+@pytest.fixture(autouse=True)
+def _isolated_token_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Never read the developer's real ~/.config/apin/flywheel_token."""
+    monkeypatch.setenv("APIN_FLYWHEEL_TOKEN_FILE", str(tmp_path / "no-token-here"))
+
+
 class _FakeResponse:
     def __init__(self, payload: dict[str, Any], status: int = 200) -> None:
         self._raw = json.dumps(payload).encode("utf-8")
@@ -281,12 +287,20 @@ def test_seed_from_apin_generates_valid_snapshot_and_sql(tmp_path: Path) -> None
     assert snapshot["frontier"]["A1"]["verified"] == 1
     assert snapshot["alignment"][0]["real_stan_pass_rate"] == pytest.approx(2 / 3)
 
-    # Verify generated seed.sql executes cleanly against flywheel/schema.sql in sqlite3
+    assert all(e["relation"] == "incumbent" for e in snapshot["edges"])
+    assert snapshot["frontier"]["A1"]["state"] == "verified"
+    assert all(n["has_source"] is False and "state" in n for n in snapshot["nodes"])
+
+    # Verify generated seed.sql executes cleanly against flywheel/schema.sql + migrations in sqlite3
     schema_sql = (REPO_ROOT / "flywheel" / "schema.sql").read_text(encoding="utf-8")
     seed_sql = (out_dir / "seed.sql").read_text(encoding="utf-8")
     conn = sqlite3.connect(":memory:")
     conn.executescript(schema_sql)
+    for mig in sorted((REPO_ROOT / "flywheel" / "migrations").glob("*.sql")):
+        conn.executescript(mig.read_text(encoding="utf-8"))
     conn.executescript(seed_sql)
+    # A trial disputed on the live Flywheel stays disputed when the seed is re-applied.
+    conn.execute("UPDATE nodes SET state = 'disputed' WHERE id = 'A1:glm53_a1_1h:T0003'")
     # Re-run to verify idempotency
     conn.executescript(seed_sql)
     count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
@@ -295,6 +309,10 @@ def test_seed_from_apin_generates_valid_snapshot_and_sql(tmp_path: Path) -> None
         "SELECT id, real_stan_passed, real_stan_total, verified FROM nodes WHERE verified = 1"
     ).fetchone()
     assert verified_row == ("A1:glm53_a1_1h:T0002", 2, 3, 1)
+    states = dict(conn.execute("SELECT id, state FROM nodes").fetchall())
+    assert states["A1:glm53_a1_1h:T0002"] == "verified"
+    assert states["A1:glm53_a1_1h:T0003"] == "disputed"
+    assert conn.execute("SELECT COUNT(*) FROM node_parents").fetchone()[0] == 2
     conn.close()
 
 

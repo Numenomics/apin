@@ -16,18 +16,25 @@
         display: block;
       }
       #field text {
-        font-family: var(--mono);
-        font-size: 11px;
+        font-family: var(--sans);
+        font-variant-numeric: lining-nums tabular-nums;
+        font-size: 12.5px;
         fill: var(--ink-3);
       }
       #field .lane-name {
         font-family: var(--display);
-        font-size: 14px;
-        font-weight: 600;
+        font-size: 17px;
+        font-weight: 700;
         fill: var(--ink);
       }
       #field .run-name {
+        font-family: var(--mono);
+        font-size: 11.5px;
         fill: var(--ink-2);
+      }
+      #field .end {
+        fill: var(--ink);
+        font-weight: 500;
       }
       #field .node {
         cursor: pointer;
@@ -35,7 +42,7 @@
       #field .node .pick {
         fill: none;
         stroke: var(--ink);
-        stroke-width: 2;
+        stroke-width: 1.25;
         opacity: 0;
       }
       #field .node:hover .pick,
@@ -45,6 +52,48 @@
       }
       #field .node:focus-visible {
         outline: none;
+      }
+      .notes {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
+        gap: 0 36px;
+        border-top: 1px solid var(--ink);
+      }
+      .notes > .empty,
+      .notes > .cmd {
+        grid-column: 1 / -1;
+      }
+      .notes .empty {
+        padding: 18px 0 10px;
+        color: var(--ink-3);
+      }
+      .note {
+        padding: 16px 0 18px;
+        border-bottom: 1px solid var(--rule);
+        display: grid;
+        gap: 8px;
+        align-content: start;
+      }
+      .note header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        font-family: var(--sans);
+        font-size: 0.86rem;
+      }
+      .note h3 {
+        font-size: 1.12rem;
+        line-height: 1.25;
+      }
+      .note p {
+        color: var(--ink-2);
+        font-size: 0.98rem;
+      }
+      pre.source {
+        max-height: 420px;
+        overflow: auto;
+        margin-top: 8px;
       }
       .legend-note {
         font-size: 0.82rem;
@@ -98,7 +147,7 @@
           </div>
           <div class="field-scroll"><svg id="field" role="group" aria-labelledby="field-h"></svg></div>
           <figcaption class="caption">
-            Each row is one run, read left to right in the order its trials were made. Trials on the line were kept and became the version the next trial had to beat. Trials below the line were not kept. Select any trial to read its hypothesis and numbers.
+            Each strip is one run, read left to right in the order its trials were made. Height is efficiency relative to the run's first scored trial, on that run's own log scale, and the dotted line marks where the run began. The stepped line is the version to beat. It moves only when a trial is kept, and the number at its end says how far it now stands above the start. Select any trial to read its hypothesis and numbers.
           </figcaption>
         </figure>
       </section>
@@ -129,6 +178,36 @@
         <div class="table-scroll"><table class="data" id="claims"></table></div>
       </section>
 
+      <section class="section" aria-labelledby="queue-h">
+        <div class="section-head">
+          <div>
+            <h2 id="queue-h">Waiting for a second opinion</h2>
+            <p>A trial that beats its lane's frontier is queued for a rerun by someone other than its author, on fresh seeds. Take the next one with <code>uv run apin autoresearch verify-next</code>.</p>
+          </div>
+        </div>
+        <div class="table-scroll"><table class="data" id="queue"></table></div>
+      </section>
+
+      <section class="section" aria-labelledby="notes-h">
+        <div class="section-head">
+          <div>
+            <h2 id="notes-h">Hypotheses and insights</h2>
+            <p>What contributors think is true and what they learned, written down apart from any one trial. A hypothesis stays open until trials support or refute it.</p>
+          </div>
+          <div class="filters">
+            <label class="sr-only" for="n-kind">Kind</label>
+            <select id="n-kind">
+              <option value="">Both kinds</option>
+              <option value="hypothesis">Hypotheses</option>
+              <option value="insight">Insights</option>
+            </select>
+            <label class="sr-only" for="n-lane">Lane</label>
+            <select id="n-lane"><option value="">All lanes</option></select>
+          </div>
+        </div>
+        <div id="notes" class="notes"></div>
+      </section>
+
       <section class="section" aria-labelledby="ledger-h">
         <div class="section-head">
           <div>
@@ -147,6 +226,10 @@
               <option value="archived">Archived</option>
               <option value="discarded">Not kept</option>
               <option value="verified">Run on real Stan</option>
+              <option value="state:replicated">Rerun by someone else</option>
+              <option value="state:needs-replication">Rerun requested</option>
+              <option value="state:disputed">Disputed</option>
+              <option value="state:retracted">Retracted</option>
             </select>
             <label class="sr-only" for="f-q">Search</label>
             <input id="f-q" type="search" placeholder="Search hypotheses, runs, hashes" />

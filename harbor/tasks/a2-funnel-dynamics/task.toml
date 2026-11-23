@@ -1,4 +1,7 @@
 version = "1.0"
+# The only file carried from the agent container to the separate verifier container,
+# re-uploaded at the same path (tests/test.sh --submission).
+artifacts = ["/app/autoresearch/lanes/A2/submission.py"]
 
 [metadata]
 author_name = "Numenomics/apin"
@@ -9,10 +12,27 @@ description = "Optimize multiscale and funnel-surviving transition dynamics"
 tags = ["mcmc", "optimization", "bayesian", "apin", "A2"]
 
 [agent]
-timeout_sec = 3600.0
+# No practical limit: earlier sweeps lost results to agent timeouts.
+timeout_sec = 86400.0
+# Only the model provider's API is reachable while the agent works. Harbor adds the
+# inference host it can infer from -m; pass --allow-agent-host for others (harbor/README.md).
+network_mode = "allowlist"
+allowed_hosts = []
 
 [verifier]
-timeout_sec = 900.0
+timeout_sec = 7200.0
+network_mode = "no-network"
+# Grade in a fresh container from the same sealed image, so nothing the agent wrote
+# outside the submission file (harness/, .venv/) reaches the grader.
+environment_mode = "separate"
+
+[verifier.environment]
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 4096
+gpus = 0
+network_mode = "no-network"
 
 [environment]
 build_timeout_sec = 600.0
@@ -20,4 +40,6 @@ cpus = 2
 memory_mb = 4096
 storage_mb = 4096
 gpus = 0
-allow_internet = true
+# Public only while Harbor installs the agent (npm, nvm); the agent and verifier
+# phases above narrow it.
+network_mode = "public"

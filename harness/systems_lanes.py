@@ -1,6 +1,6 @@
 """Systems Autoresearch Lanes S1 (Upstream Sampler Patches) and S2 (Gradient & Compiler Speed).
 
-Implements ARCHITECTURE.md §2.2 & RULINGS.md R-008:
+Implements `autoresearch/RULINGS.md` R-008:
   - Lane S1: scoped upstream sampler patches (`upstream/walnutpie`, `upstream/stan`, `upstream/nuts-rs`),
     enforcing `allowed_paths`, build + upstream unit tests + `apin` statistical gate.
   - Lane S2: scoped gradient/compiler patches (`upstream/math`, `upstream/stan`, `upstream/stanc3`,

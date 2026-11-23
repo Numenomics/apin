@@ -155,16 +155,104 @@ def test_harbor_verify_records_solution_complexity_and_collector_builds_site_dat
     spec.loader.exec_module(mod)
 
     pricing = json.loads((ROOT / "benchmarks" / "pricing.json").read_text())
-    data = mod.collect_jobs([tmp_path / "job1"], pricing, release_tag="bench-v0.1.0")
-    assert len(data["trials"]) == 1 and len(data["leaderboard"]) == 1
-    tr = data["trials"][0]
+    data = mod.collect_jobs([tmp_path / "job1"], pricing, release_tag="bench-v0.2.0")
+    rel = data["releases"][0]
+    assert data["current_release"] == rel["release"] == "bench-v0.2.0"
+    assert len(rel["trials"]) == 1 and len(rel["leaderboard"]) == 1
+    tr = rel["trials"][0]
     assert tr["input_tokens"] == 10000 and tr["cached_tokens"] == 40000 and tr["reasoning_tokens"] == 1200
     assert tr["cache_hit_rate"] == 0.8 and tr["test_runs"] == 1 and tr["tool_calls"] == 1 and tr["turns"] == 1
     assert tr["cost_usd"] > 0 and tr["agent_wall_s"] == 75.0
     assert "coin mixture" in tr["approach_summary"]
-    row = data["leaderboard"][0]
-    assert row["label"] == "GLM-5.3-Flash" and row["infra_errors"] == 0 and row["agents"]
+    assert tr["termination"] == "finished" and tr["outcome"] == "solved"
+    row = rel["leaderboard"][0]
+    assert row["label"] == "GLM-5.3-Flash" and row["interrupted"] == 0 and row["agents"]
+    assert row["solved"] == 1.0 and row["tasks"][tr["task_id"]]["solve_rate"] == 1.0
     # Every task on the page is described from its own task.toml, never restated by hand.
-    meta = data["task_meta"][tr["task_id"]]
+    meta = rel["task_meta"][tr["task_id"]]
     assert meta["category"] == tr["category"]
     assert mod.load_task_meta(["a1-preconditioning"])["a1-preconditioning"]["lane"] == "A1"
+
+
+def _load_collector():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("collect_harbor_results", ROOT / "scripts" / "collect_harbor_results.py")
+    mod = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _attempt(trial_id, cfg, task, *, release="bench-v0.2.0", passed=True, outcome=None, ref=None, start=None,
+             termination="finished", cost=1.0):
+    model, effort = cfg.split("#")
+    return {
+        "trial_id": trial_id, "release": release, "model": model, "effort": effort, "config_key": cfg,
+        "agent": "opencode-v2", "task_id": task, "category": "rewind" if task.startswith("s3-") else "optimize",
+        "passed": passed, "termination": termination, "rate_limited": termination == "provider_limit",
+        "reward": ref or 0.0, "verifier_outcome": outcome, "ref_speedup": ref, "start_speedup": start,
+        "cost_usd": cost, "agent_wall_s": 60.0, "total_tokens": 10, "input_tokens": 5, "cached_tokens": 5,
+    }
+
+
+def test_collector_ranks_by_tasks_solved_and_never_scores_interrupted_runs():
+    mod = _load_collector()
+    trials = [
+        # Setting A: one fix, and one speed-up task attempted three times.
+        _attempt("a1", "m/a#low", "s3-unadjusted-ula", outcome="solved"),
+        _attempt("a2", "m/a#low", "a0-ground-up", outcome="solved", ref=1.5, start=6.0),
+        _attempt("a3", "m/a#low", "a0-ground-up", outcome="improved", ref=0.5, start=2.0),
+        _attempt("a4", "m/a#low", "a0-ground-up", passed=False, outcome="invalid", ref=0.0, start=0.0),
+        # Setting B: a larger speed-up on its only scored run, but the fix was never finished.
+        _attempt("b1", "m/b#low", "s3-unadjusted-ula", termination="provider_limit", outcome="solved"),
+        _attempt("b2", "m/b#low", "a0-ground-up", outcome="solved", ref=9.0, start=30.0),
+        # Setting C: returned the starting code unchanged.
+        _attempt("c1", "m/c#low", "s3-unadjusted-ula", passed=False, outcome="invalid"),
+        _attempt("c2", "m/c#low", "a0-ground-up", outcome="no_gain", ref=0.2, start=1.0),
+    ]
+    rel = mod.aggregate_results(trials, {"models": {}}, release_tag="bench-v0.2.0")["releases"][0]
+    assert rel["scoring"] == "reference"
+    board = {r["config_key"]: r for r in rel["leaderboard"]}
+
+    a = board["m/a#low"]
+    task = a["tasks"]["a0-ground-up"]
+    assert task["attempts"] == 3 and task["outcomes"] == {"solved": 1, "improved": 1, "invalid": 1}
+    assert task["solve_rate"] == round(1 / 3, 4)
+    # The invalid attempt counts as zero in the mean; it is not dropped.
+    assert task["ratio_mean"] == round((1.5 + 0.5 + 0.0) / 3, 4) and task["ratio_min"] == 0.0 and task["ratio_max"] == 1.5
+    assert a["solved"] == round(1 + 1 / 3, 3) and a["complete"] and a["attempts_per_task"] == 3
+
+    b = board["m/b#low"]
+    # The interrupted fix is neither a pass nor a fail, whatever the verifier wrote for it.
+    assert b["interrupted"] == 1 and b["tasks"]["s3-unadjusted-ula"]["attempts"] == 0 and not b["complete"]
+    assert [t["outcome"] for t in rel["trials"] if t["trial_id"] == "b1"] == ["interrupted"]
+
+    c = board["m/c#low"]
+    assert c["solved"] == 0 and c["tasks"]["a0-ground-up"]["outcomes"] == {"no_gain": 1}
+
+    # Complete settings first, then tasks solved. B's bigger ratio does not lift it over A.
+    assert [r["config_key"] for r in rel["leaderboard"]] == ["m/a#low", "m/c#low", "m/b#low"]
+
+
+def test_collector_keeps_releases_apart_and_maps_earlier_trials():
+    mod = _load_collector()
+    legacy = {
+        "trial_id": "old1", "release": "bench-v0.1.1", "model": "m/a", "effort": "low", "config_key": "m/a#low",
+        "task_id": "a0-ground-up", "category": "optimize", "passed": True, "infra_error": False, "rate_limited": False,
+        "reward": 1.0, "speedup": 1.0, "baseline_soft_min": 0.001, "error": "AgentTimeoutError: timed out", "tool_calls": 40,
+    }
+    limited = dict(legacy, trial_id="old2", task_id="a1-preconditioning", speedup=6.4, rate_limited=True,
+                   error="ApiRateLimitError: Command failed")
+    new = _attempt("new1", "m/a#low", "a0-ground-up", outcome="solved", ref=1.2, start=4.0)
+    data = mod.aggregate_results([legacy, limited, new], {"models": {}}, release_tag="bench-v0.2.0")
+    assert [r["release"] for r in data["releases"]] == ["bench-v0.2.0", "bench-v0.1.1"]
+    old = data["releases"][1]
+    assert old["scoring"] == "start" and "Not comparable" in old["note"]
+    by_id = {t["trial_id"]: t for t in old["trials"]}
+    # Unchanged starting code used to count as a pass at 1.00x. It is "no gain".
+    assert by_id["old1"]["outcome"] == "no_gain" and by_id["old1"]["termination"] == "time_limit"
+    assert by_id["old1"]["start_speedup"] == 1.0 and "speedup" not in by_id["old1"]
+    # A run cut off by the provider is excluded even though it scored well.
+    assert by_id["old2"]["outcome"] == "interrupted" and by_id["old2"]["start_speedup"] is None
+    assert old["leaderboard"][0]["solved"] == 0 and old["leaderboard"][0]["time_limit_hits"] == 1
