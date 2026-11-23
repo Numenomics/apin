@@ -1,0 +1,175 @@
+[
+ {
+  "lane": "A0",
+  "label": "copy03",
+  "valid": false,
+  "tier0_ok": true,
+  "tier1_ok": false,
+  "soft_min_eff": 0.00034577158286302004,
+  "per_repeat_soft_min": [
+   0.00031556488955660096,
+   0.0003636128412726222,
+   0.0002623670785805415,
+   0.00036313584064432086,
+   0.0003336257654209748,
+   0.0003791099372305353,
+   0.0003315487663081727,
+   0.00044569306168727697
+  ],
+  "confirmation": {
+   "ran": false,
+   "reason": "a Tier 1 failure that is not a statistical rejection"
+  },
+  "error": "tier1: hybrid_rosenbrock(d=20, rot=False): stuck/identity kernel: late mean latent step 0 < 0.001",
+  "wall_s": 301.2
+ },
+ {
+  "lane": "A0",
+  "label": "copy04",
+  "valid": false,
+  "tier0_ok": true,
+  "tier1_ok": false,
+  "soft_min_eff": 0.00032100687051034825,
+  "per_repeat_soft_min": [
+   0.00032549183716198905,
+   0.0003336642581432577,
+   0.0002768707178803451,
+   0.0003285245366387506,
+   0.00036436088646989785,
+   0.0003003453128604484,
+   0.0003020216340170404,
+   0.00034532604309567164
+  ],
+  "confirmation": {
+   "ran": true,
+   "passed": false,
+   "seed": 78210474,
+   "failed_targets_first_run": [
+    "student_t(d=6, rot=True): invariance rejected on z0_lt_q95: |z|=4.37 > 4.23 (b2_max=0.398)"
+   ],
+   "failed_targets": [
+    "hybrid_rosenbrock(d=20, rot=False): stuck/identity kernel: late mean latent step 0 < 0.001"
+   ],
+   "wall_s": 199.5
+  },
+  "error": "tier1 on the verifier seed and the confirmation seed 78210474: hybrid_rosenbrock(d=20, rot=False): stuck/identity kernel: late mean latent step 0 < 0.001",
+  "wall_s": 505.2
+ },
+ {
+  "lane": "A0",
+  "label": "copy05",
+  "valid": false,
+  "tier0_ok": true,
+  "tier1_ok": false,
+  "soft_min_eff": 0.0003290321109979913,
+  "per_repeat_soft_min": [
+   0.00031110211740398443,
+   0.0003339323034702663,
+   0.00027304592640387736,
+   0.0003222978335045069,
+   0.00031940912877971735,
+   0.0003858137815685709,
+   0.0003472779636526994,
+   0.0003511150902923636
+  ],
+  "confirmation": {
+   "ran": false,
+   "reason": "a Tier 1 failure that is not a statistical rejection"
+  },
+  "error": "tier1: hybrid_rosenbrock(d=20, rot=False): stuck/identity kernel: late mean latent step 0 < 0.001",
+  "wall_s": 297.5
+ },
+ {
+  "lane": "A0",
+  "label": "copy08",
+  "valid": true,
+  "tier0_ok": true,
+  "tier1_ok": true,
+  "soft_min_eff": 0.0003474533379234503,
+  "per_repeat_soft_min": [
+   0.000386183098996273,
+   0.0003379406266124547,
+   0.0003054778447239699,
+   0.0003103865836425544,
+   0.00028679175388900466,
+   0.00040814566450147013,
+   0.0003784731835662008,
+   0.0003874704776359184
+  ],
+  "confirmation": {
+   "ran": true,
+   "passed": true,
+   "seed": 78210474,
+   "failed_targets_first_run": [
+    "banana(d=6, rot=True): rank test rejected on r1:rank_loc: |z|=4.11 > 3.93"
+   ],
+   "failed_targets": [],
+   "wall_s": 195.3,
+   "efficiency_source": "first_run_paired"
+  },
+  "error": null,
+  "wall_s": 497.8
+ },
+ {
+  "lane": "A2",
+  "label": "copy05",
+  "valid": true,
+  "tier0_ok": true,
+  "tier1_ok": true,
+  "soft_min_eff": 0.00029122760669051426,
+  "per_repeat_soft_min": [
+   0.00024738704736221415,
+   0.0003192942753900375,
+   0.0003497076659477474,
+   0.0004023721021517388,
+   0.00027330865734077545,
+   0.0003322764377616716,
+   0.0001773542484615001,
+   0.00028904448993341124
+  ],
+  "confirmation": {
+   "ran": true,
+   "passed": true,
+   "seed": 78210474,
+   "failed_targets_first_run": [
+    "mixture_crossable(d=6, rot=True): invariance rejected on z0_sq: |z|=3.72 > 3.63 (b2_max=0.288)"
+   ],
+   "failed_targets": [],
+   "wall_s": 420.5,
+   "efficiency_source": "first_run_paired"
+  },
+  "error": null,
+  "wall_s": 920.1
+ },
+ {
+  "lane": "A4",
+  "label": "copy03",
+  "valid": true,
+  "tier0_ok": true,
+  "tier1_ok": true,
+  "soft_min_eff": 0.0004605917098271287,
+  "per_repeat_soft_min": [
+   0.00047746820626050297,
+   0.000638914490160742,
+   0.0006570939958499095,
+   0.0004979948533342617,
+   0.0002938917515260546,
+   0.00039317999540906416,
+   0.0003708284445593436,
+   0.00047351913734028925
+  ],
+  "confirmation": {
+   "ran": true,
+   "passed": true,
+   "seed": 78210474,
+   "failed_targets_first_run": [
+    "banana(d=20, rot=True): invariance rejected on z1: |z|=3.94 > 3.82 (b2_max=0.3235)"
+   ],
+   "failed_targets": [],
+   "wall_s": 379.7,
+   "efficiency_source": "first_run_paired"
+  },
+  "error": null,
+  "wall_s": 904.8
+ }
+]

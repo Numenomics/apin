@@ -13,124 +13,12 @@
     "n_chains": 48,
     "k_steps": 16,
     "adapt_draws": 100,
-    "horizon_steps": 500
+    "horizon_steps": 500,
+    "confirmation_seed": 78210474
   },
-  "frozen_at": "2026-11-23T02:16:38+00:00",
+  "frozen_at": "2026-11-23T04:32:07+00:00",
   "reference_name": "stan-nuts-diag-2.37",
   "scores": {
-    "start": {
-      "lane": "A3",
-      "role": "start",
-      "file": "baseline.py",
-      "sha256": "53469469a123599102bcc9bdae5843f62b5705b83e227056f5a6c7b66a158e4f",
-      "judge_digest": "720a17a2cc4a7e74",
-      "config": {
-        "seed": 39389868,
-        "dims": [
-          6,
-          20
-        ],
-        "repeats": 8,
-        "n_chains": 48,
-        "k_steps": 16,
-        "adapt_draws": 100,
-        "horizon_steps": 500
-      },
-      "valid": true,
-      "tier0_ok": true,
-      "tier1_ok": true,
-      "soft_min_eff": 0.00029127487559440195,
-      "short_horizon_soft_min": 0.00019938215983478469,
-      "long_horizon_soft_min": 0.0004254596652238911,
-      "b2_max": 0.2815896919171979,
-      "overhead_ratio": 4.938730143980848,
-      "by_class": {
-        "banana": 0.0017143622127735196,
-        "funnel": 0.0015466727257675745,
-        "gaussian_illcond": 0.008782487760860306,
-        "hybrid_rosenbrock": 0.00018618401300938734,
-        "mixture_crossable": 0.017580153215204654,
-        "student_t": 0.006011267831344977
-      },
-      "per_repeat_soft_min": [
-        0.00020273155114465622,
-        0.00033362973282662246,
-        0.0004296480112913809,
-        0.00028681850644670406,
-        0.00039388930155242693,
-        0.0002763488344821583,
-        0.00017989703699964688,
-        0.0003174404776869566
-      ],
-      "per_repeat_by_class": [
-        {
-          "gaussian_illcond": 0.009615228100494356,
-          "funnel": 0.0006784254751503693,
-          "banana": 0.0008591517446917609,
-          "hybrid_rosenbrock": 0.0001295937698158938,
-          "student_t": 0.008741615028167123,
-          "mixture_crossable": 0.010889852186799803
-        },
-        {
-          "gaussian_illcond": 0.0069393040833279004,
-          "funnel": 0.0014242836350362032,
-          "banana": 0.00308063785798625,
-          "hybrid_rosenbrock": 0.00021319854707254032,
-          "student_t": 0.005641970801224682,
-          "mixture_crossable": 0.017980013911544617
-        },
-        {
-          "gaussian_illcond": 0.012166021811471313,
-          "funnel": 0.0020726878655781436,
-          "banana": 0.0009712236893983886,
-          "hybrid_rosenbrock": 0.0002749922986808017,
-          "student_t": 0.0024717451565324303,
-          "mixture_crossable": 0.021683881096499432
-        },
-        {
-          "gaussian_illcond": 0.00727926001513098,
-          "funnel": 0.0014436393114351765,
-          "banana": 0.000887300111704584,
-          "hybrid_rosenbrock": 0.00018335613814104726,
-          "student_t": 0.006963113195273467,
-          "mixture_crossable": 0.019307553022305732
-        },
-        {
-          "gaussian_illcond": 0.007597172462906184,
-          "funnel": 0.002384573146047127,
-          "banana": 0.0026603117801814445,
-          "hybrid_rosenbrock": 0.0002516858289835411,
-          "student_t": 0.008543675621393252,
-          "mixture_crossable": 0.015272811079458947
-        },
-        {
-          "gaussian_illcond": 0.010420067686300265,
-          "funnel": 0.0016705440116503787,
-          "banana": 0.0034781014209331676,
-          "hybrid_rosenbrock": 0.0001765770364721868,
-          "student_t": 0.005498079939386875,
-          "mixture_crossable": 0.01643553862810428
-        },
-        {
-          "gaussian_illcond": 0.009547569770375242,
-          "funnel": 0.0018408067090935356,
-          "banana": 0.0031562915687448497,
-          "hybrid_rosenbrock": 0.00011494446426593245,
-          "student_t": 0.005643198604289356,
-          "mixture_crossable": 0.018130468127353846
-        },
-        {
-          "gaussian_illcond": 0.007925263782030604,
-          "funnel": 0.0015446120617927297,
-          "banana": 0.0011201300871191936,
-          "hybrid_rosenbrock": 0.00020289609959449247,
-          "student_t": 0.007577358458480201,
-          "mixture_crossable": 0.02445642908416075
-        }
-      ],
-      "failed_targets": [],
-      "wall_s": 577.1
-    },
     "frontier": {
       "lane": "A3",
       "role": "frontier",
@@ -147,7 +35,8 @@
         "n_chains": 48,
         "k_steps": 16,
         "adapt_draws": 100,
-        "horizon_steps": 500
+        "horizon_steps": 500,
+        "confirmation_seed": 78210474
       },
       "valid": true,
       "tier0_ok": true,
@@ -156,7 +45,7 @@
       "short_horizon_soft_min": 0.0010016413230860399,
       "long_horizon_soft_min": 0.001274498399357454,
       "b2_max": 0.2815896919171979,
-      "overhead_ratio": 14.058164245755261,
+      "overhead_ratio": 10.373679722503876,
       "by_class": {
         "banana": 0.002200535796316682,
         "funnel": 0.008396967618723203,
@@ -242,10 +131,130 @@
         }
       ],
       "failed_targets": [],
-      "wall_s": 314.8,
+      "confirmation": {
+        "ran": false
+      },
+      "wall_s": 220.6,
       "source": "autoresearch/lanes/A3/submission.py",
       "git_commit": "b85c6e71898c1036023102c5b5969396475ef48c",
       "copied_from_source": true
+    },
+    "start": {
+      "lane": "A3",
+      "role": "start",
+      "file": "baseline.py",
+      "sha256": "53469469a123599102bcc9bdae5843f62b5705b83e227056f5a6c7b66a158e4f",
+      "judge_digest": "720a17a2cc4a7e74",
+      "config": {
+        "seed": 39389868,
+        "dims": [
+          6,
+          20
+        ],
+        "repeats": 8,
+        "n_chains": 48,
+        "k_steps": 16,
+        "adapt_draws": 100,
+        "horizon_steps": 500,
+        "confirmation_seed": 78210474
+      },
+      "valid": true,
+      "tier0_ok": true,
+      "tier1_ok": true,
+      "soft_min_eff": 0.00029127487559440195,
+      "short_horizon_soft_min": 0.00019938215983478469,
+      "long_horizon_soft_min": 0.0004254596652238911,
+      "b2_max": 0.2815896919171979,
+      "overhead_ratio": 5.2913734966908965,
+      "by_class": {
+        "banana": 0.0017143622127735196,
+        "funnel": 0.0015466727257675745,
+        "gaussian_illcond": 0.008782487760860306,
+        "hybrid_rosenbrock": 0.00018618401300938734,
+        "mixture_crossable": 0.017580153215204654,
+        "student_t": 0.006011267831344977
+      },
+      "per_repeat_soft_min": [
+        0.00020273155114465622,
+        0.00033362973282662246,
+        0.0004296480112913809,
+        0.00028681850644670406,
+        0.00039388930155242693,
+        0.0002763488344821583,
+        0.00017989703699964688,
+        0.0003174404776869566
+      ],
+      "per_repeat_by_class": [
+        {
+          "gaussian_illcond": 0.009615228100494356,
+          "funnel": 0.0006784254751503693,
+          "banana": 0.0008591517446917609,
+          "hybrid_rosenbrock": 0.0001295937698158938,
+          "student_t": 0.008741615028167123,
+          "mixture_crossable": 0.010889852186799803
+        },
+        {
+          "gaussian_illcond": 0.0069393040833279004,
+          "funnel": 0.0014242836350362032,
+          "banana": 0.00308063785798625,
+          "hybrid_rosenbrock": 0.00021319854707254032,
+          "student_t": 0.005641970801224682,
+          "mixture_crossable": 0.017980013911544617
+        },
+        {
+          "gaussian_illcond": 0.012166021811471313,
+          "funnel": 0.0020726878655781436,
+          "banana": 0.0009712236893983886,
+          "hybrid_rosenbrock": 0.0002749922986808017,
+          "student_t": 0.0024717451565324303,
+          "mixture_crossable": 0.021683881096499432
+        },
+        {
+          "gaussian_illcond": 0.00727926001513098,
+          "funnel": 0.0014436393114351765,
+          "banana": 0.000887300111704584,
+          "hybrid_rosenbrock": 0.00018335613814104726,
+          "student_t": 0.006963113195273467,
+          "mixture_crossable": 0.019307553022305732
+        },
+        {
+          "gaussian_illcond": 0.007597172462906184,
+          "funnel": 0.002384573146047127,
+          "banana": 0.0026603117801814445,
+          "hybrid_rosenbrock": 0.0002516858289835411,
+          "student_t": 0.008543675621393252,
+          "mixture_crossable": 0.015272811079458947
+        },
+        {
+          "gaussian_illcond": 0.010420067686300265,
+          "funnel": 0.0016705440116503787,
+          "banana": 0.0034781014209331676,
+          "hybrid_rosenbrock": 0.0001765770364721868,
+          "student_t": 0.005498079939386875,
+          "mixture_crossable": 0.01643553862810428
+        },
+        {
+          "gaussian_illcond": 0.009547569770375242,
+          "funnel": 0.0018408067090935356,
+          "banana": 0.0031562915687448497,
+          "hybrid_rosenbrock": 0.00011494446426593245,
+          "student_t": 0.005643198604289356,
+          "mixture_crossable": 0.018130468127353846
+        },
+        {
+          "gaussian_illcond": 0.007925263782030604,
+          "funnel": 0.0015446120617927297,
+          "banana": 0.0011201300871191936,
+          "hybrid_rosenbrock": 0.00020289609959449247,
+          "student_t": 0.007577358458480201,
+          "mixture_crossable": 0.02445642908416075
+        }
+      ],
+      "failed_targets": [],
+      "confirmation": {
+        "ran": false
+      },
+      "wall_s": 485.7
     },
     "reference": {
       "lane": "A3",
@@ -263,7 +272,8 @@
         "n_chains": 48,
         "k_steps": 16,
         "adapt_draws": 100,
-        "horizon_steps": 500
+        "horizon_steps": 500,
+        "confirmation_seed": 78210474
       },
       "valid": true,
       "tier0_ok": true,
@@ -272,7 +282,7 @@
       "short_horizon_soft_min": 0.00026798383488639,
       "long_horizon_soft_min": 0.0005374589120740973,
       "b2_max": 0.2815896919171979,
-      "overhead_ratio": 4.091428818806763,
+      "overhead_ratio": 4.335353580212397,
       "by_class": {
         "banana": 0.0009111736938290385,
         "funnel": 0.0005712172307767722,
@@ -358,7 +368,10 @@
         }
       ],
       "failed_targets": [],
-      "wall_s": 994.2,
+      "confirmation": {
+        "ran": false
+      },
+      "wall_s": 841.5,
       "name": "stan-nuts-diag-2.37"
     }
   }

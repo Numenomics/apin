@@ -13,9 +13,10 @@
     "n_chains": 48,
     "k_steps": 16,
     "adapt_draws": 100,
-    "horizon_steps": 500
+    "horizon_steps": 500,
+    "confirmation_seed": 78210474
   },
-  "frozen_at": "2026-11-23T02:16:38+00:00",
+  "frozen_at": "2026-11-23T04:32:07+00:00",
   "reference_name": "stan-nuts-diag-2.37",
   "scores": {
     "start": {
@@ -34,7 +35,8 @@
         "n_chains": 48,
         "k_steps": 16,
         "adapt_draws": 100,
-        "horizon_steps": 500
+        "horizon_steps": 500,
+        "confirmation_seed": 78210474
       },
       "valid": true,
       "tier0_ok": true,
@@ -43,7 +45,7 @@
       "short_horizon_soft_min": 0.0003105691358992427,
       "long_horizon_soft_min": 0.0003951712628767137,
       "b2_max": 0.2815896919171979,
-      "overhead_ratio": 10.737693060421321,
+      "overhead_ratio": 11.996838773822954,
       "by_class": {
         "banana": 0.003949166289073856,
         "funnel": 0.016157697777170094,
@@ -129,7 +131,10 @@
         }
       ],
       "failed_targets": [],
-      "wall_s": 238.7
+      "confirmation": {
+        "ran": false
+      },
+      "wall_s": 235.3
     },
     "frontier": {
       "lane": "A0",
@@ -147,7 +152,8 @@
         "n_chains": 48,
         "k_steps": 16,
         "adapt_draws": 100,
-        "horizon_steps": 500
+        "horizon_steps": 500,
+        "confirmation_seed": 78210474
       },
       "valid": true,
       "tier0_ok": true,
@@ -156,7 +162,7 @@
       "short_horizon_soft_min": 0.0008387005836477492,
       "long_horizon_soft_min": 0.0014278069850649216,
       "b2_max": 0.2815896919171979,
-      "overhead_ratio": 8.5470546097397,
+      "overhead_ratio": 9.758818839764213,
       "by_class": {
         "banana": 0.0010657173627415621,
         "funnel": 0.003832944711204262,
@@ -242,7 +248,10 @@
         }
       ],
       "failed_targets": [],
-      "wall_s": 490.4,
+      "confirmation": {
+        "ran": false
+      },
+      "wall_s": 482.1,
       "source": "autoresearch/lanes/A0/submission.py",
       "git_commit": "b85c6e71898c1036023102c5b5969396475ef48c",
       "copied_from_source": true
@@ -263,7 +272,8 @@
         "n_chains": 48,
         "k_steps": 16,
         "adapt_draws": 100,
-        "horizon_steps": 500
+        "horizon_steps": 500,
+        "confirmation_seed": 78210474
       },
       "valid": true,
       "tier0_ok": true,
@@ -272,7 +282,7 @@
       "short_horizon_soft_min": 0.00026798383488639,
       "long_horizon_soft_min": 0.0005374589120740973,
       "b2_max": 0.2815896919171979,
-      "overhead_ratio": 4.611104564130029,
+      "overhead_ratio": 4.932290983939023,
       "by_class": {
         "banana": 0.0009111736938290385,
         "funnel": 0.0005712172307767722,
@@ -358,7 +368,10 @@
         }
       ],
       "failed_targets": [],
-      "wall_s": 1062.5,
+      "confirmation": {
+        "ran": false
+      },
+      "wall_s": 970.0,
       "name": "stan-nuts-diag-2.37"
     }
   }

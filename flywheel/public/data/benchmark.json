@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-11-23T03:49:45Z",
+  "generated_at": "2026-11-23T04:56:50Z",
   "current_release": "bench-v0.1.1",
   "invalid_floor": 0.1,
   "releases": [
@@ -38,9 +38,9 @@
           "difficulty": "medium",
           "agent_timeout_s": 86400.0,
           "denominators": {
-            "frontier": null,
             "start": 0.00046226111322168664,
-            "reference": 0.00031748552302321843
+            "reference": 0.00031748552302321843,
+            "frontier": 0.0008739209582762166
           }
         },
         "a2-funnel-dynamics": {
@@ -62,8 +62,8 @@
           "difficulty": "hard",
           "agent_timeout_s": 86400.0,
           "denominators": {
-            "start": 0.00029127487559440195,
             "frontier": 0.0011298629399194584,
+            "start": 0.00029127487559440195,
             "reference": 0.00038403591215293713
           }
         },
@@ -3272,9 +3272,9 @@
           "difficulty": "medium",
           "agent_timeout_s": 86400.0,
           "denominators": {
-            "frontier": null,
             "start": 0.00046226111322168664,
-            "reference": 0.00031748552302321843
+            "reference": 0.00031748552302321843,
+            "frontier": 0.0008739209582762166
           }
         },
         "a2-funnel-dynamics": {
@@ -3296,8 +3296,8 @@
           "difficulty": "hard",
           "agent_timeout_s": 86400.0,
           "denominators": {
-            "start": 0.00029127487559440195,
             "frontier": 0.0011298629399194584,
+            "start": 0.00029127487559440195,
             "reference": 0.00038403591215293713
           }
         },

@@ -13,6 +13,8 @@ details.json to /logs/verifier (or --out-dir).
     lane's frontier incumbent at freeze time (tests/frontier.py). A denominator whose frozen key
     (lane, judge digest, scoring config, file SHA-256) does not match is scored live instead.
     reward = ref_speedup = candidate / reference (0 if the candidate fails a check).
+    A Tier 1 failure made only of statistical rejections is confirmed on CONFIRMATION_SEED before
+    the candidate is called invalid (see score_file).
 
 Isolation: the candidate file is the only input taken from the agent. It is copied into a private
 temporary directory before scoring. The harness is imported from the image (/app), and the
@@ -49,7 +51,9 @@ ROOT = _find_root()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from harness import autoresearch, judge, rewind
+import numpy as np
+
+from harness import autoresearch, invariance, judge, rewind
 
 # Verifier seed, rotated every release. It is public once a release ships (it is in this file);
 # during a run the agent cannot read it because tests/ is uploaded only after the agent phase and
@@ -63,6 +67,14 @@ HIDDEN_VERIFIER_SEED = 39389868
 # 1.23x, at 2 repeats 1.39x.
 VERIFIER_REPEATS = 8
 IMPROVEMENT_MARGIN = 1.05
+
+# Confirmation of statistical rejections. The Tier 1 invariance and rank tests reject a correct
+# sampler by chance now and then (about one file in eight at 8 repeats, harbor/README.md). A
+# candidate whose only Tier 1 failures are such rejections is scored once more on this seed with
+# the same configuration and is invalid only if that run fails too. Disjoint from every seed the
+# verifier seed's suites use; rotated with it.
+CONFIRMATION_SEED = 78210474
+STATISTICAL_REJECTIONS = ("invariance rejected on", "rank test rejected on")
 VERIFIER_DIMS = (6, 20)
 N_CHAINS = 48
 K_STEPS = 16
@@ -162,7 +174,7 @@ _NUMERIC_KEYS = (
     "ref_speedup", "start_speedup", "frontier_speedup", "gap_closed",
     "soft_min_eff", "start_soft_min", "reference_soft_min", "frontier_soft_min",
     "short_horizon_soft_min", "long_horizon_soft_min", "b2_max", "overhead_ratio",
-    "improvement_margin", "repeats", "candidate_wall_s", "emp_eff", "max_z",
+    "confirmed", "improvement_margin", "repeats", "candidate_wall_s", "emp_eff", "max_z",
 )
 
 
@@ -222,20 +234,103 @@ def verify_rewind(task_id: str, submission: Path, out_dir: Path, tasks_path: Pat
 
 def scoring_config(*, seed: int = HIDDEN_VERIFIER_SEED, dims: tuple[int, ...] = VERIFIER_DIMS,
                    repeats: int = VERIFIER_REPEATS, n_chains: int = N_CHAINS, k_steps: int = K_STEPS,
-                   adapt_draws: int = ADAPT_DRAWS, horizon_steps: int = HORIZON_STEPS) -> dict:
+                   adapt_draws: int = ADAPT_DRAWS, horizon_steps: int = HORIZON_STEPS,
+                   confirmation_seed: int = CONFIRMATION_SEED) -> dict:
     """The full scoring configuration; part of every frozen key."""
     return {
         "seed": int(seed), "dims": [int(d) for d in dims], "repeats": int(max(1, repeats)),
         "n_chains": int(n_chains), "k_steps": int(k_steps), "adapt_draws": int(adapt_draws),
-        "horizon_steps": int(horizon_steps),
+        "horizon_steps": int(horizon_steps), "confirmation_seed": int(confirmation_seed),
     }
 
 
-def score_file(path: Path, lane: str, cfg: dict, work_dir: Path) -> dict:
-    """Tier 0 then Tier 1 on the verifier seeds. Returns a plain dict; `valid` is the pass flag."""
+def _tier1(path: Path, lane: str, cfg: dict, seed: int) -> tuple[dict, list]:
+    """One Tier 1 pass (cfg["repeats"] separately seeded suites) via the judge."""
+    dims = tuple(cfg["dims"])
+    suites = [
+        (seed + r * 7919, autoresearch._build_tier1_suite(dims[0], seed + r * 7919, dims=dims))
+        for r in range(cfg["repeats"])
+    ]
+    res = autoresearch._eval_tier1_multi(
+        path, suites, n_chains=cfg["n_chains"], k_steps=cfg["k_steps"],
+        adapt_draws=cfg["adapt_draws"], lane=lane, horizon_steps=cfg["horizon_steps"],
+    )
+    return res, suites
+
+
+def _geo(vals) -> float:
+    return float(np.exp(np.mean(np.log(np.maximum(np.asarray(vals, dtype=float), 1e-18)))))
+
+
+def scores_from_targets(res: dict, suites: list) -> dict:
+    """Soft-min, horizon soft-mins and class scores rebuilt from the judge's per-target
+    efficiencies with the judge's own formulas (`harness/autoresearch.py::_eval_tier1_suite` and
+    `_eval_tier1_multi`), but without zeroing a suite that has a failed check. For a run whose
+    checks all pass this equals the judge's numbers (score_file checks that on every such run)."""
+    runs = res.get("per_repeat") or [res]
+    reps = []
+    complete = True
+    for run, (_, suite) in zip(runs, suites, strict=True):
+        cls: dict[str, list[float]] = {}
+        short: dict[str, list[float]] = {}
+        long_: dict[str, list[float]] = {}
+        for tgt, p in zip(suite, run["per_target"], strict=True):
+            if tgt.multimodal:
+                continue
+            effs = (p["emp_eff"], p["short_horizon_eff"], p["long_horizon_eff"])
+            complete = complete and all(isinstance(e, (int, float)) and math.isfinite(e) and e > 0 for e in effs)
+            cls.setdefault(tgt.family, []).append(p["emp_eff"])
+            short.setdefault(tgt.family, []).append(p["short_horizon_eff"])
+            long_.setdefault(tgt.family, []).append(p["long_horizon_eff"])
+        by_class = {c: _geo(v) for c, v in cls.items()}
+        reps.append({
+            "soft_min_eff": invariance.soft_min_power_mean(list(by_class.values()), p=-4.0),
+            "short_horizon_soft_min": invariance.soft_min_power_mean([_geo(v) for v in short.values()], p=-4.0),
+            "long_horizon_soft_min": invariance.soft_min_power_mean([_geo(v) for v in long_.values()], p=-4.0),
+            "by_class": by_class,
+        })
+    if len(reps) == 1:
+        agg = dict(reps[0])
+    else:
+        agg = {k: _geo([r[k] for r in reps])
+               for k in ("soft_min_eff", "short_horizon_soft_min", "long_horizon_soft_min")}
+        classes = sorted({c for r in reps for c in r["by_class"]})
+        agg["by_class"] = {c: _geo([r["by_class"][c] for r in reps if c in r["by_class"]]) for c in classes}
+    agg["per_repeat_soft_min"] = [float(r["soft_min_eff"]) for r in reps]
+    agg["per_repeat_by_class"] = [{k: float(v) for k, v in r["by_class"].items()} for r in reps]
+    agg["complete"] = complete  # every target reported a finite, positive efficiency
+    return agg
+
+
+def _failures(res: dict) -> list[str]:
+    return [f"{p['family']}(d={p.get('dim')}, rot={p.get('rotated')}): {p.get('reason')}"
+            for p in (res.get("per_target") or []) if not p.get("passed")]
+
+
+def _only_statistical(res: dict) -> bool:
+    reasons = [str(p.get("reason") or "") for p in (res.get("per_target") or []) if not p.get("passed")]
+    return bool(reasons) and all(r.startswith(STATISTICAL_REJECTIONS) for r in reasons)
+
+
+def _check_rebuild(res: dict, rebuilt: dict) -> None:
+    for k in ("soft_min_eff", "short_horizon_soft_min", "long_horizon_soft_min"):
+        a, b = float(res[k]), float(rebuilt[k])
+        if not math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-300):
+            raise RuntimeError(f"rebuilt {k} {b!r} differs from the judge's {a!r}; scores_from_targets is stale")
+
+
+def score_file(path: Path, lane: str, cfg: dict, work_dir: Path, *, confirm: bool = True) -> dict:
+    """Tier 0, then Tier 1 on the verifier seeds, then (only after a purely statistical Tier 1
+    rejection) one confirmation Tier 1 pass on cfg["confirmation_seed"]. Returns a plain dict;
+    `valid` is the pass flag and `confirmation` says whether a confirmation ran and how it ended.
+
+    Tier 0 failures, non-statistical Tier 1 failures (stuck kernel, adapt-cost cap, exceptions,
+    timeouts inside adapt() or transition()) and a missing file are invalid at once. After a
+    confirmed pass the efficiency numbers are the first run's, rebuilt from the judge's per-target
+    efficiencies (`scores_from_targets`), so they stay paired with the frozen denominators."""
     t0 = time.perf_counter()
     path = Path(path)
-    out: dict = {"valid": False, "tier0_ok": False, "tier1_ok": False}
+    out: dict = {"valid": False, "tier0_ok": False, "tier1_ok": False, "confirmation": {"ran": False}}
     if not path.is_file():
         out.update(error=f"missing file: {path}", wall_s=0.0)
         return out
@@ -250,36 +345,54 @@ def score_file(path: Path, lane: str, cfg: dict, work_dir: Path) -> dict:
                    wall_s=round(time.perf_counter() - t0, 1))
         return out
     out["tier0_ok"] = True
-    dims = tuple(cfg["dims"])
-    suites = [
-        (seed + r * 7919, autoresearch._build_tier1_suite(dims[0], seed + r * 7919, dims=dims))
-        for r in range(cfg["repeats"])
-    ]
-    res = autoresearch._eval_tier1_multi(
-        path, suites, n_chains=cfg["n_chains"], k_steps=cfg["k_steps"],
-        adapt_draws=cfg["adapt_draws"], lane=lane, horizon_steps=cfg["horizon_steps"],
-    )
-    runs = res.get("per_repeat") or [res]
-    per_target = res.get("per_target") or []
+
+    res, suites = _tier1(path, lane, cfg, seed)
+    first = scores_from_targets(res, suites)
+    if res["passed"]:
+        _check_rebuild(res, first)
+    failed = _failures(res)
     out.update(
         tier1_ok=bool(res["passed"]),
         valid=bool(res["passed"]),
-        soft_min_eff=float(res["soft_min_eff"]),
-        short_horizon_soft_min=float(res["short_horizon_soft_min"]),
-        long_horizon_soft_min=float(res["long_horizon_soft_min"]),
         b2_max=float(res["b2_max"]),
         overhead_ratio=float(res["overhead_ratio"]),
-        by_class={k: float(v) for k, v in res["by_class"].items()},
-        per_repeat_soft_min=[float(r["soft_min_eff"]) for r in runs],
-        per_repeat_by_class=[{k: float(v) for k, v in r["by_class"].items()} for r in runs],
-        failed_targets=[
-            f"{p['family']}(d={p.get('dim')}, rot={p.get('rotated')}): {p.get('reason')}"
-            for p in per_target if not p.get("passed")
-        ][:8],
-        wall_s=round(time.perf_counter() - t0, 1),
+        failed_targets=failed[:8],
+        **{k: v for k, v in first.items() if k != "complete"},
     )
+    if not res["passed"]:
+        conf_seed = cfg.get("confirmation_seed")
+        if confirm and conf_seed is not None and _only_statistical(res):
+            t_conf = time.perf_counter()
+            res2, suites2 = _tier1(path, lane, cfg, int(conf_seed))
+            conf = {"ran": True, "passed": bool(res2["passed"]), "seed": int(conf_seed),
+                    "failed_targets_first_run": failed[:8], "failed_targets": _failures(res2)[:8],
+                    "wall_s": round(time.perf_counter() - t_conf, 1)}
+            if res2["passed"]:
+                if first["complete"] and first["soft_min_eff"] > 0.0 and math.isfinite(first["soft_min_eff"]):
+                    conf["efficiency_source"] = "first_run_paired"
+                else:  # the judge left no usable first-run numbers: fall back, and say so
+                    second = scores_from_targets(res2, suites2)
+                    _check_rebuild(res2, second)
+                    out.update(**{k: v for k, v in second.items() if k != "complete"})
+                    conf["efficiency_source"] = "confirmation_run_unpaired"
+                out.update(valid=True, tier1_ok=True, failed_targets=[])
+            else:
+                out["failed_targets"] = conf["failed_targets"]
+            out["confirmation"] = conf
+        else:
+            out["confirmation"] = {"ran": False, "reason": (
+                "a Tier 1 failure that is not a statistical rejection" if confirm else "confirmation disabled")}
+    out["wall_s"] = round(time.perf_counter() - t0, 1)
     if not out["valid"]:
-        out["error"] = "tier1: " + ("; ".join(out["failed_targets"]) or "failed")
+        # The judge's convention: a pass with a failed check has no soft-min, and a failed repeat
+        # scores 0 (scripts/calibrate_harbor_noise.py reads failed repeats this way).
+        runs = res.get("per_repeat") or [res]
+        out["per_repeat_soft_min"] = [v if run["passed"] else 0.0
+                                      for v, run in zip(out["per_repeat_soft_min"], runs, strict=True)]
+        out.update(soft_min_eff=0.0, short_horizon_soft_min=0.0, long_horizon_soft_min=0.0)
+        where = (f" on the verifier seed and the confirmation seed {out['confirmation']['seed']}"
+                 if out["confirmation"].get("ran") else "")
+        out["error"] = f"tier1{where}: " + ("; ".join(out["failed_targets"]) or "failed")
     return out
 
 
@@ -287,7 +400,7 @@ def frozen_entry(lane: str, role: str, path: Path, cfg: dict, digest: str, score
     """The frozen record of one denominator (written by scripts/freeze_harbor_references.py)."""
     keep = ("valid", "tier0_ok", "tier1_ok", "soft_min_eff", "short_horizon_soft_min", "long_horizon_soft_min",
             "b2_max", "overhead_ratio", "by_class", "per_repeat_soft_min", "per_repeat_by_class",
-            "failed_targets", "error", "wall_s")
+            "failed_targets", "error", "confirmation", "wall_s")
     entry = {"lane": lane, "role": role, "file": Path(path).name, "sha256": _sha256(path),
              "judge_digest": digest, "config": cfg}
     entry.update({k: score[k] for k in keep if k in score})
@@ -400,7 +513,7 @@ def _tests_dir_for(lane: str, explicit: Path | None) -> Path:
 
 def _summary(d: dict) -> dict:
     keys = ("valid", "source", "file", "sha256", "soft_min_eff", "short_horizon_soft_min", "long_horizon_soft_min",
-            "by_class", "per_repeat_soft_min", "b2_max", "error", "wall_s", "name")
+            "by_class", "per_repeat_soft_min", "b2_max", "confirmation", "error", "wall_s", "name")
     out = {k: d[k] for k in keys if k in d}
     for k in ("soft_min_eff", "short_horizon_soft_min", "long_horizon_soft_min"):
         if k in out:
@@ -429,6 +542,7 @@ def verify_optimize(lane: str, submission: Path, out_dir: Path, *, tests_dir: Pa
                     "improvement_margin": margin, "judge_digest": digest}
     if not sub.is_file():
         _write_rewards(out_dir, 0.0, {**base_payload, "passed": 0, "solved": 0, "improved": 0, "unscorable": 0,
+                                      "confirmed": 0, "confirmation": {"ran": False},
                                       "outcome": "invalid", "error": f"missing submission: {sub}"})
         return 1
 
@@ -469,6 +583,8 @@ def verify_optimize(lane: str, submission: Path, out_dir: Path, *, tests_dir: Pa
         "frontier_soft_min": _sig(dens["frontier"].get("soft_min_eff")) if dens["frontier"].get("valid") else None,
         "tier0_ok": cand["tier0_ok"],
         "tier1_ok": cand["tier1_ok"],
+        "confirmation": cand.get("confirmation", {"ran": False}),
+        "confirmed": 1 if (cand.get("confirmation") or {}).get("ran") and cand["confirmation"].get("passed") else 0,
         "reference": {"name": ref_name, "file": files["reference"].name,
                       "source": dens["reference"].get("source"), "valid": bool(dens["reference"].get("valid"))},
         "denominators": {role: _summary(d) for role, d in dens.items()},
