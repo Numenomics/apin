@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+# Runs in a clean verifier container (task.toml: [verifier] environment_mode = "separate").
+# Harbor restores only the agent's submission file, at the path below; the harness and the
+# interpreter come from the image, the denominators and frozen scores from /tests.
 set -euo pipefail
 cd /app
-/app/.venv/bin/python /tests/verify.py optimize \
+exec /app/.venv/bin/python -I /tests/verify.py optimize \
   --lane A2 \
   --submission /app/autoresearch/lanes/A2/submission.py \
-  --baseline /tests/baseline.py \
-  --dims 6,20 --repeats 2 \
+  --tests-dir /tests \
   --out-dir /logs/verifier

@@ -1,10 +1,24 @@
 #!/usr/bin/env python3
 """Canonical Harbor verifier for apin Agent Benchmark tasks.
 
-Writes Harbor-standard `/logs/verifier/reward.txt` and `/logs/verifier/reward.json`:
-  - `rewind` mode: binary reward (`1.0` if hidden invariance/Jacobian check passes, else `0.0`).
-  - `optimize` mode: continuous speedup reward (`cand_soft_min / base_soft_min` on hidden
-    held-out verifier seeds across paired dual-horizon suites; `0.0` on any Tier 0/1 failure).
+harbor/verify.py is the single source; scripts/sync_harbor_tests.py copies it verbatim to every
+harbor/tasks/*/tests/verify.py. Writes Harbor-standard reward.txt, reward.json (numbers only) and
+details.json to /logs/verifier (or --out-dir).
+
+  - `rewind` mode: reward 1.0 if the hidden invariance/Jacobian check passes, else 0.0;
+    outcome `solved` or `invalid`.
+  - `optimize` mode: only the candidate is scored at run time, on the hidden verifier seeds. Its
+    soft-min efficiency is divided by three frozen denominators read from tests/frozen_scores.json:
+    the starting code (tests/baseline.py), the Stan-style reference (tests/reference.py) and the
+    lane's frontier incumbent at freeze time (tests/frontier.py). A denominator whose frozen key
+    (lane, judge digest, scoring config, file SHA-256) does not match is scored live instead.
+    reward = ref_speedup = candidate / reference (0 if the candidate fails a check).
+
+Isolation: the candidate file is the only input taken from the agent. It is copied into a private
+temporary directory before scoring. The harness is imported from the image (/app), and the
+denominator files and frozen scores come from the tests directory, which Harbor uploads. Run it
+with `python -I` (tests/test.sh does) so no environment variable or working-directory module can
+change what is imported.
 """
 
 from __future__ import annotations
@@ -18,17 +32,57 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
-_CAND_ROOT = Path(__file__).resolve().parent.parent
-ROOT = _CAND_ROOT if (_CAND_ROOT / "harness").is_dir() else (Path("/app") if Path("/app/harness").is_dir() else Path.cwd())
+
+def _find_root() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "harness" / "judge.py").is_file():
+            return parent
+    if Path("/app/harness/judge.py").is_file():
+        return Path("/app")
+    return Path.cwd()
+
+
+ROOT = _find_root()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from harness import autoresearch, rewind  # noqa: E402
+from harness import autoresearch, judge, rewind
 
-# Hidden verifier seed offset (disjoint from default autoresearch dev seed 20261120)
-HIDDEN_VERIFIER_SEED = 88421077
+# Verifier seed, rotated every release. It is public once a release ships (it is in this file);
+# during a run the agent cannot read it because tests/ is uploaded only after the agent phase and
+# the agent's network is sealed. bench-v0.2.0 retired 88421077.
+HIDDEN_VERIFIER_SEED = 39389868
+
+# Scoring configuration. VERIFIER_REPEATS and IMPROVEMENT_MARGIN come from the A/A calibration in
+# harbor/README.md (scripts/calibrate_harbor_noise.py, harbor/calibration/summary.json): at 8
+# repeats, copies of the starting code that differ only in their random numbers scored at most
+# 1.025x the frozen starting code (p95 1.011, 26 copies over lanes A0-A4); at 4 repeats they reached
+# 1.23x, at 2 repeats 1.39x.
+VERIFIER_REPEATS = 8
+IMPROVEMENT_MARGIN = 1.05
+VERIFIER_DIMS = (6, 20)
+N_CHAINS = 48
+K_STEPS = 16
+ADAPT_DRAWS = 100
+HORIZON_STEPS = 500
+
+# Lane -> Harbor task directory of the optimize tasks.
+LANE_TASKS = {
+    "A0": "a0-ground-up",
+    "A1": "a1-preconditioning",
+    "A2": "a2-funnel-dynamics",
+    "A3": "a3-integrator-trajectory",
+    "A4": "a4-nonlinear-transport",
+}
+# Denominator role -> file in the task's tests directory.
+DENOMINATOR_FILES = {"start": "baseline.py", "reference": "reference.py", "frontier": "frontier.py"}
+FROZEN_FILE = "frozen_scores.json"
+FROZEN_SCHEMA = 1
+
+OUTCOMES = ("invalid", "unscorable", "no_gain", "improved", "solved")
 
 # Accept either Harbor task directory slugs (hyphenated) or internal tasks.json IDs (underscored).
 REWIND_TASK_ALIASES = {
@@ -45,7 +99,18 @@ def _default_out_dir() -> Path:
     return Path.cwd() / "verifier_out"
 
 
-_TRIVIAL_CONSTS = frozenset({-1, 0, 1, 2, -1.0, 0.0, 1.0, 2.0})
+def _sig(v: float | None, digits: int = 6) -> float | None:
+    """Round to significant digits (soft-min values are ~1e-4, so fixed decimals lose them)."""
+    if v is None or not isinstance(v, (int, float)) or not math.isfinite(v):
+        return None
+    return float(f"{float(v):.{digits}g}")
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+_TRIVIAL_CONSTS = frozenset({-1, 0, 1, 2})  # equal floats (-1.0 ... 2.0) match too
 
 
 def _solution_stats(submission: Path) -> dict:
@@ -91,6 +156,16 @@ def _archive_submission(submission: Path, out_dir: Path) -> None:
             shutil.copy2(submission, dest)
 
 
+# reward.json holds numbers only (Harbor's parser rejects anything else); details.json holds all.
+_NUMERIC_KEYS = (
+    "passed", "solved", "improved", "unscorable",
+    "ref_speedup", "start_speedup", "frontier_speedup", "gap_closed",
+    "soft_min_eff", "start_soft_min", "reference_soft_min", "frontier_soft_min",
+    "short_horizon_soft_min", "long_horizon_soft_min", "b2_max", "overhead_ratio",
+    "improvement_margin", "repeats", "candidate_wall_s", "emp_eff", "max_z",
+)
+
+
 def _write_rewards(out_dir: Path, reward: float, payload: dict, *, submission: Path | None = None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     clean_reward = float(reward) if (math.isfinite(reward) and reward > 0.0) else 0.0
@@ -99,15 +174,13 @@ def _write_rewards(out_dir: Path, reward: float, payload: dict, *, submission: P
         extra.setdefault("solution", _solution_stats(submission))
         _archive_submission(submission, out_dir)
     details = {"reward": round(clean_reward, 6), **extra}
-    # Harbor's verifier requires reward.json to contain strictly numeric values (int/float).
     numeric_rewards: dict[str, float | int] = {"reward": round(clean_reward, 6)}
-    if "passed" in extra:
-        numeric_rewards["passed"] = 1 if extra["passed"] else 0
-    for k in ("speedup", "soft_min_eff", "baseline_soft_min", "short_horizon_soft_min",
-              "long_horizon_soft_min", "b2_max", "overhead_ratio", "emp_eff", "max_z"):
+    for k in _NUMERIC_KEYS:
         v = extra.get(k)
-        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
-            numeric_rewards[k] = round(float(v), 6)
+        if isinstance(v, bool):
+            numeric_rewards[k] = int(v)
+        elif isinstance(v, (int, float)) and math.isfinite(v):
+            numeric_rewards[k] = v if isinstance(v, int) else float(v)
     sol = extra.get("solution") if isinstance(extra.get("solution"), dict) else {}
     for sk, nk in (("loc", "solution_loc"), ("cyclomatic_complexity", "solution_cyclomatic"),
                    ("magic_constants", "solution_magic_constants"), ("ast_nodes", "solution_ast_nodes")):
@@ -121,111 +194,306 @@ def _write_rewards(out_dir: Path, reward: float, payload: dict, *, submission: P
     print(json.dumps(details, indent=2))
 
 
+# ---------------------------------------------------------------------------------------------
+# Rewind tasks
+# ---------------------------------------------------------------------------------------------
+
 def verify_rewind(task_id: str, submission: Path, out_dir: Path, tasks_path: Path) -> int:
     tasks = {t.task_id: t for t in rewind.load_tasks(tasks_path)}
     resolved_id = REWIND_TASK_ALIASES.get(task_id, task_id)
     if resolved_id not in tasks:
         valid = sorted(set(tasks) | set(REWIND_TASK_ALIASES))
-        _write_rewards(out_dir, 0.0, {"passed": 0, "error": f"unknown task_id {task_id!r}; valid: {valid}"})
+        _write_rewards(out_dir, 0.0, {"passed": 0, "solved": 0, "outcome": "invalid",
+                                      "error": f"unknown task_id {task_id!r}; valid: {valid}"})
         return 1
     res = rewind.evaluate_rewind_task(tasks[resolved_id], submission)
     passed = 1 if res["passed"] else 0
-    _write_rewards(out_dir, float(passed), {"passed": passed, **res}, submission=submission)
+    _write_rewards(
+        out_dir, float(passed),
+        {"passed": passed, "solved": passed, "outcome": "solved" if passed else "invalid", **res},
+        submission=submission,
+    )
     return 0 if passed else 1
 
 
-def verify_optimize(
-    lane: str,
-    submission: Path,
-    baseline: Path,
-    out_dir: Path,
-    *,
-    dims: tuple[int, ...] = (6, 20),
-    repeats: int = 2,
-    seed: int = HIDDEN_VERIFIER_SEED,
-    n_chains: int = 48,
-    k_steps: int = 16,
-    adapt_draws: int = 100,
-    horizon_steps: int = 500,
-) -> int:
-    sub = Path(submission).resolve()
-    base = Path(baseline).resolve()
+# ---------------------------------------------------------------------------------------------
+# Optimize tasks
+# ---------------------------------------------------------------------------------------------
+
+def scoring_config(*, seed: int = HIDDEN_VERIFIER_SEED, dims: tuple[int, ...] = VERIFIER_DIMS,
+                   repeats: int = VERIFIER_REPEATS, n_chains: int = N_CHAINS, k_steps: int = K_STEPS,
+                   adapt_draws: int = ADAPT_DRAWS, horizon_steps: int = HORIZON_STEPS) -> dict:
+    """The full scoring configuration; part of every frozen key."""
+    return {
+        "seed": int(seed), "dims": [int(d) for d in dims], "repeats": int(max(1, repeats)),
+        "n_chains": int(n_chains), "k_steps": int(k_steps), "adapt_draws": int(adapt_draws),
+        "horizon_steps": int(horizon_steps),
+    }
+
+
+def score_file(path: Path, lane: str, cfg: dict, work_dir: Path) -> dict:
+    """Tier 0 then Tier 1 on the verifier seeds. Returns a plain dict; `valid` is the pass flag."""
+    t0 = time.perf_counter()
+    path = Path(path)
+    out: dict = {"valid": False, "tier0_ok": False, "tier1_ok": False}
+    if not path.is_file():
+        out.update(error=f"missing file: {path}", wall_s=0.0)
+        return out
+    seed = cfg["seed"]
+    work_dir.mkdir(parents=True, exist_ok=True)
+    t0_ok, t0_info = autoresearch._eval_tier0(
+        path, seed=seed, work_dir=work_dir / "t0", lane=lane, horizon_steps=cfg["horizon_steps"],
+    )
+    out["tier0_info"] = t0_info
+    if not t0_ok:
+        out.update(error=f"tier0 {t0_info.get('stage')}: {t0_info.get('error')}",
+                   wall_s=round(time.perf_counter() - t0, 1))
+        return out
+    out["tier0_ok"] = True
+    dims = tuple(cfg["dims"])
+    suites = [
+        (seed + r * 7919, autoresearch._build_tier1_suite(dims[0], seed + r * 7919, dims=dims))
+        for r in range(cfg["repeats"])
+    ]
+    res = autoresearch._eval_tier1_multi(
+        path, suites, n_chains=cfg["n_chains"], k_steps=cfg["k_steps"],
+        adapt_draws=cfg["adapt_draws"], lane=lane, horizon_steps=cfg["horizon_steps"],
+    )
+    runs = res.get("per_repeat") or [res]
+    per_target = res.get("per_target") or []
+    out.update(
+        tier1_ok=bool(res["passed"]),
+        valid=bool(res["passed"]),
+        soft_min_eff=float(res["soft_min_eff"]),
+        short_horizon_soft_min=float(res["short_horizon_soft_min"]),
+        long_horizon_soft_min=float(res["long_horizon_soft_min"]),
+        b2_max=float(res["b2_max"]),
+        overhead_ratio=float(res["overhead_ratio"]),
+        by_class={k: float(v) for k, v in res["by_class"].items()},
+        per_repeat_soft_min=[float(r["soft_min_eff"]) for r in runs],
+        per_repeat_by_class=[{k: float(v) for k, v in r["by_class"].items()} for r in runs],
+        failed_targets=[
+            f"{p['family']}(d={p.get('dim')}, rot={p.get('rotated')}): {p.get('reason')}"
+            for p in per_target if not p.get("passed")
+        ][:8],
+        wall_s=round(time.perf_counter() - t0, 1),
+    )
+    if not out["valid"]:
+        out["error"] = "tier1: " + ("; ".join(out["failed_targets"]) or "failed")
+    return out
+
+
+def frozen_entry(lane: str, role: str, path: Path, cfg: dict, digest: str, score: dict) -> dict:
+    """The frozen record of one denominator (written by scripts/freeze_harbor_references.py)."""
+    keep = ("valid", "tier0_ok", "tier1_ok", "soft_min_eff", "short_horizon_soft_min", "long_horizon_soft_min",
+            "b2_max", "overhead_ratio", "by_class", "per_repeat_soft_min", "per_repeat_by_class",
+            "failed_targets", "error", "wall_s")
+    entry = {"lane": lane, "role": role, "file": Path(path).name, "sha256": _sha256(path),
+             "judge_digest": digest, "config": cfg}
+    entry.update({k: score[k] for k in keep if k in score})
+    return entry
+
+
+def _frozen_match(entry: dict | None, lane: str, role: str, sha: str, cfg: dict, digest: str) -> bool:
+    return bool(entry) and (
+        entry.get("lane") == lane and entry.get("role") == role and entry.get("sha256") == sha
+        and entry.get("judge_digest") == digest and entry.get("config") == cfg
+    )
+
+
+def load_frozen(tests_dir: Path) -> dict:
+    p = Path(tests_dir) / FROZEN_FILE
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if data.get("schema") == FROZEN_SCHEMA else {}
+
+
+def reference_name(path: Path) -> str | None:
+    """REFERENCE_NAME from a reference file, read without executing it."""
+    try:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return None
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "REFERENCE_NAME"
+                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+            return node.value.value
+    return None
+
+
+def denominator(role: str, lane: str, path: Path, cfg: dict, digest: str, frozen: dict,
+                work_dir: Path) -> dict:
+    """Frozen score when the key matches, else a live score. Adds `source` and `sha256`."""
+    path = Path(path)
+    if not path.is_file():
+        return {"valid": False, "source": "missing", "file": path.name, "error": f"missing {role} file {path.name}"}
+    sha = _sha256(path)
+    entry = (frozen.get("scores") or {}).get(role)
+    if _frozen_match(entry, lane, role, sha, cfg, digest):
+        out = dict(entry)
+        out["source"] = "frozen"
+        return out
+    print(f"[verify] {role}: no matching frozen score; scoring {path.name} live", file=sys.stderr, flush=True)
+    out = frozen_entry(lane, role, path, cfg, digest, score_file(path, lane, cfg, work_dir / role))
+    out["source"] = "live"
+    return out
+
+
+def classify(candidate_valid: bool, candidate_sm: float, start: dict, reference: dict,
+             frontier: dict | None = None, margin: float = IMPROVEMENT_MARGIN) -> dict:
+    """Outcome rule. Denominators are dicts with `valid` and `soft_min_eff`.
+
+    invalid     the candidate failed a Tier 0 or Tier 1 check (reward 0)
+    unscorable  the candidate passed but the starting code or the reference failed a check on
+                these seeds, so there is no ratio to report (reward 0, never a substituted 1x)
+    no_gain     start_speedup < margin
+    improved    start_speedup >= margin, ref_speedup < 1
+    solved      start_speedup >= margin, ref_speedup >= 1
+    """
+    def sm(d):
+        if not d or not d.get("valid"):
+            return None
+        v = d.get("soft_min_eff")
+        return float(v) if isinstance(v, (int, float)) and math.isfinite(v) and v > 0 else None
+
+    s, r, f = sm(start), sm(reference), sm(frontier)
+    c = float(candidate_sm) if candidate_valid and math.isfinite(candidate_sm) and candidate_sm > 0 else 0.0
+    out = {"start_speedup": None, "ref_speedup": None, "frontier_speedup": None, "gap_closed": None}
+    if not candidate_valid or c <= 0.0:
+        out.update(outcome="invalid", reward=0.0,
+                   start_speedup=0.0 if s else None, ref_speedup=0.0 if r else None,
+                   frontier_speedup=0.0 if f else None)
+        return out
+    out["start_speedup"] = c / s if s else None
+    out["ref_speedup"] = c / r if r else None
+    out["frontier_speedup"] = c / f if f else None
+    if s and f and f > s:
+        out["gap_closed"] = math.log(c / s) / math.log(f / s)
+    if s is None or r is None:
+        bad = [name for name, v in (("starting code", s), ("reference", r)) if v is None]
+        out.update(outcome="unscorable", reward=0.0,
+                   unscorable_reason=" and ".join(bad) + " failed a check on the verifier seeds")
+        return out
+    if out["start_speedup"] < margin:
+        outcome = "no_gain"
+    elif out["ref_speedup"] < 1.0:
+        outcome = "improved"
+    else:
+        outcome = "solved"
+    out.update(outcome=outcome, reward=out["ref_speedup"])
+    return out
+
+
+def _tests_dir_for(lane: str, explicit: Path | None) -> Path:
+    if explicit is not None:
+        return Path(explicit)
+    here = Path(__file__).resolve().parent
+    if (here / DENOMINATOR_FILES["start"]).is_file():
+        return here
+    return ROOT / "harbor" / "tasks" / LANE_TASKS[lane] / "tests"
+
+
+def _summary(d: dict) -> dict:
+    keys = ("valid", "source", "file", "sha256", "soft_min_eff", "short_horizon_soft_min", "long_horizon_soft_min",
+            "by_class", "per_repeat_soft_min", "b2_max", "error", "wall_s", "name")
+    out = {k: d[k] for k in keys if k in d}
+    for k in ("soft_min_eff", "short_horizon_soft_min", "long_horizon_soft_min"):
+        if k in out:
+            out[k] = _sig(out[k])
+    if "by_class" in out:
+        out["by_class"] = {k: _sig(v) for k, v in out["by_class"].items()}
+    if "per_repeat_soft_min" in out:
+        out["per_repeat_soft_min"] = [_sig(v) for v in out["per_repeat_soft_min"]]
+    if "sha256" in out:
+        out["sha256"] = out["sha256"][:16]
+    return out
+
+
+def verify_optimize(lane: str, submission: Path, out_dir: Path, *, tests_dir: Path | None = None,
+                    overrides: dict[str, Path] | None = None, cfg: dict | None = None,
+                    margin: float = IMPROVEMENT_MARGIN) -> int:
+    t_start = time.perf_counter()
+    cfg = cfg or scoring_config()
+    lane = lane.upper()
+    tests_dir = _tests_dir_for(lane, tests_dir)
+    files = {role: tests_dir / name for role, name in DENOMINATOR_FILES.items()}
+    files.update({k: Path(v) for k, v in (overrides or {}).items() if v is not None})
+    sub = Path(submission)
+    digest = judge.judge_digest()
+    base_payload = {"lane": lane, "task": LANE_TASKS.get(lane), "config": cfg, "repeats": cfg["repeats"],
+                    "improvement_margin": margin, "judge_digest": digest}
     if not sub.is_file():
-        _write_rewards(out_dir, 0.0, {"passed": 0, "error": f"missing submission: {sub}"})
+        _write_rewards(out_dir, 0.0, {**base_payload, "passed": 0, "solved": 0, "improved": 0, "unscorable": 0,
+                                      "outcome": "invalid", "error": f"missing submission: {sub}"})
         return 1
 
     with tempfile.TemporaryDirectory(prefix="apin_harbor_verify_") as tmp:
-        work_dir = Path(tmp)
-        t0_ok, t0_info = autoresearch._eval_tier0(
-            sub, seed=seed, work_dir=work_dir / "t0", lane=lane, horizon_steps=horizon_steps,
-        )
-        if not t0_ok:
-            _write_rewards(
-                out_dir, 0.0,
-                {"passed": 0, "tier0_ok": False, "tier0_info": t0_info, "lane": lane},
-                submission=sub,
-            )
-            return 1
+        work = Path(tmp)
+        cand_path = work / "candidate" / "submission.py"
+        cand_path.parent.mkdir()
+        shutil.copyfile(sub, cand_path)  # the only bytes taken from the agent
 
-        suites = [
-            (seed + r * 7919, autoresearch._build_tier1_suite(dims[0], seed + r * 7919, dims=dims))
-            for r in range(max(1, repeats))
-        ]
-        cand = autoresearch._eval_tier1_multi(
-            sub, suites, n_chains=n_chains, k_steps=k_steps,
-            adapt_draws=adapt_draws, lane=lane, horizon_steps=horizon_steps,
-        )
-        if not cand["passed"]:
-            failed = [
-                f"{p['family']}(rot={p.get('rotated')}): {p.get('reason')}"
-                for r in (cand.get("per_repeat") or [])
-                for p in (r.get("per_target") or [])
-                if not p.get("passed")
-            ]
-            _write_rewards(
-                out_dir, 0.0,
-                {
-                    "passed": 0,
-                    "tier0_ok": True,
-                    "tier1_ok": False,
-                    "lane": lane,
-                    "b2_max": round(float(cand["b2_max"]), 5),
-                    "failed_targets": failed[:8],
-                    "by_class": cand["by_class"],
-                },
-                submission=sub,
-            )
-            return 1
+        t_cand = time.perf_counter()
+        cand = score_file(cand_path, lane, cfg, work / "cand")
+        cand_wall = time.perf_counter() - t_cand
 
-        base_res = autoresearch._eval_tier1_multi(
-            base, suites, n_chains=n_chains, k_steps=k_steps,
-            adapt_draws=adapt_draws, lane=lane, horizon_steps=horizon_steps,
-        )
-        base_sm = float(base_res["soft_min_eff"]) if base_res["passed"] else 0.0
-        cand_sm = float(cand["soft_min_eff"])
-        speedup = (cand_sm / base_sm) if base_sm > 0.0 else (1.0 if cand_sm > 0.0 else 0.0)
-        _write_rewards(
-            out_dir,
-            speedup,
-            {
-                "passed": 1,
-                "tier0_ok": True,
-                "tier1_ok": True,
-                "lane": lane,
-                "dims": list(dims),
-                "repeats": repeats,
-                "speedup": round(speedup, 4),
-                "soft_min_eff": round(cand_sm, 6),
-                "baseline_soft_min": round(base_sm, 6),
-                "short_horizon_soft_min": round(float(cand["short_horizon_soft_min"]), 6),
-                "long_horizon_soft_min": round(float(cand["long_horizon_soft_min"]), 6),
-                "b2_max": round(float(cand["b2_max"]), 5),
-                "overhead_ratio": round(float(cand["overhead_ratio"]), 3),
-                "by_class": {k: round(float(v), 6) for k, v in cand["by_class"].items()},
-            },
-            submission=sub,
-        )
-        return 0
+        frozen = load_frozen(tests_dir)
+        if frozen and frozen.get("lane") not in (None, lane):
+            frozen = {}
+        dens = {role: denominator(role, lane, files[role], cfg, digest, frozen, work) for role in DENOMINATOR_FILES}
+
+    ref_name = reference_name(files["reference"]) if files["reference"].is_file() else None
+    dens["reference"]["name"] = ref_name
+    cls = classify(cand["valid"], cand.get("soft_min_eff", 0.0), dens["start"], dens["reference"],
+                   dens["frontier"], margin=margin)
+    outcome = cls["outcome"]
+    payload = {
+        **base_payload,
+        "outcome": outcome,
+        "passed": 1 if cand["valid"] else 0,
+        "solved": 1 if outcome == "solved" else 0,
+        "improved": 1 if outcome == "improved" else 0,
+        "unscorable": 1 if outcome == "unscorable" else 0,
+        "ref_speedup": _sig(cls["ref_speedup"]),
+        "start_speedup": _sig(cls["start_speedup"]),
+        "frontier_speedup": _sig(cls["frontier_speedup"]),
+        "gap_closed": _sig(cls["gap_closed"], 4),
+        "soft_min_eff": _sig(cand.get("soft_min_eff", 0.0)) if cand["valid"] else 0.0,
+        "start_soft_min": _sig(dens["start"].get("soft_min_eff")) if dens["start"].get("valid") else None,
+        "reference_soft_min": _sig(dens["reference"].get("soft_min_eff")) if dens["reference"].get("valid") else None,
+        "frontier_soft_min": _sig(dens["frontier"].get("soft_min_eff")) if dens["frontier"].get("valid") else None,
+        "tier0_ok": cand["tier0_ok"],
+        "tier1_ok": cand["tier1_ok"],
+        "reference": {"name": ref_name, "file": files["reference"].name,
+                      "source": dens["reference"].get("source"), "valid": bool(dens["reference"].get("valid"))},
+        "denominators": {role: _summary(d) for role, d in dens.items()},
+        "candidate_wall_s": round(cand_wall, 1),
+        "wall_s": round(time.perf_counter() - t_start, 1),
+    }
+    if "unscorable_reason" in cls:
+        payload["unscorable_reason"] = cls["unscorable_reason"]
+    for k in ("short_horizon_soft_min", "long_horizon_soft_min"):
+        if k in cand:
+            payload[k] = _sig(cand[k])
+    for k in ("b2_max", "overhead_ratio"):
+        if k in cand:
+            payload[k] = round(cand[k], 5)
+    if "by_class" in cand:
+        payload["by_class"] = {k: _sig(v) for k, v in cand["by_class"].items()}
+    if "per_repeat_soft_min" in cand:
+        payload["per_repeat_soft_min"] = [_sig(v) for v in cand["per_repeat_soft_min"]]
+    if not cand["valid"]:
+        payload["error"] = cand.get("error")
+        payload["failed_targets"] = cand.get("failed_targets", [])
+        if not cand["tier0_ok"]:
+            payload["tier0_info"] = cand.get("tier0_info")
+    _write_rewards(out_dir, float(cls["reward"]), payload, submission=sub)
+    return {"invalid": 1, "unscorable": 2}.get(outcome, 0)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -239,29 +507,33 @@ def main(argv: list[str] | None = None) -> int:
     rw.add_argument("--out-dir", type=Path, default=None)
 
     op = sub.add_parser("optimize")
-    op.add_argument("--lane", required=True)
+    op.add_argument("--lane", required=True, choices=sorted(LANE_TASKS))
     op.add_argument("--submission", type=Path, required=True)
-    op.add_argument("--baseline", type=Path, required=True)
-    op.add_argument("--dims", default="6,20")
-    op.add_argument("--repeats", type=int, default=2)
+    op.add_argument("--tests-dir", type=Path, default=None,
+                    help="directory holding baseline.py, reference.py, frontier.py and frozen_scores.json "
+                         "(default: next to this file, else harbor/tasks/<task>/tests)")
+    op.add_argument("--baseline", type=Path, default=None, help="override tests/baseline.py")
+    op.add_argument("--reference", type=Path, default=None, help="override tests/reference.py")
+    op.add_argument("--frontier", type=Path, default=None, help="override tests/frontier.py")
+    op.add_argument("--dims", default=",".join(str(d) for d in VERIFIER_DIMS))
+    op.add_argument("--repeats", type=int, default=VERIFIER_REPEATS)
     op.add_argument("--seed", type=int, default=HIDDEN_VERIFIER_SEED)
-    op.add_argument("--n-chains", type=int, default=48)
-    op.add_argument("--k-steps", type=int, default=16)
-    op.add_argument("--adapt-draws", type=int, default=100)
-    op.add_argument("--horizon-steps", type=int, default=500)
+    op.add_argument("--n-chains", type=int, default=N_CHAINS)
+    op.add_argument("--k-steps", type=int, default=K_STEPS)
+    op.add_argument("--adapt-draws", type=int, default=ADAPT_DRAWS)
+    op.add_argument("--horizon-steps", type=int, default=HORIZON_STEPS)
     op.add_argument("--out-dir", type=Path, default=None)
 
     a = ap.parse_args(argv)
     out_dir = a.out_dir if a.out_dir is not None else _default_out_dir()
     if a.mode == "rewind":
         return verify_rewind(a.task_id, a.submission, out_dir, a.tasks)
-    dims = tuple(int(x.strip()) for x in a.dims.split(",") if x.strip())
-    return verify_optimize(
-        a.lane, a.submission, a.baseline, out_dir,
-        dims=dims, repeats=a.repeats, seed=a.seed,
-        n_chains=a.n_chains, k_steps=a.k_steps,
-        adapt_draws=a.adapt_draws, horizon_steps=a.horizon_steps,
+    cfg = scoring_config(
+        seed=a.seed, dims=tuple(int(x.strip()) for x in a.dims.split(",") if x.strip()), repeats=a.repeats,
+        n_chains=a.n_chains, k_steps=a.k_steps, adapt_draws=a.adapt_draws, horizon_steps=a.horizon_steps,
     )
+    overrides = {"start": a.baseline, "reference": a.reference, "frontier": a.frontier}
+    return verify_optimize(a.lane, a.submission, out_dir, tests_dir=a.tests_dir, overrides=overrides, cfg=cfg)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,446 @@
+{
+  "chains": 64,
+  "num_samples": 1000,
+  "seed": 20261123,
+  "results": {
+    "illcond_gauss_windows": {
+      "python": {
+        "stepsize_median": 0.6346090326427739,
+        "stepsize_range": [
+          0.42324610040759547,
+          1.1735674159728682
+        ],
+        "mean_treedepth": 2.86990625,
+        "grad_per_draw": 6.77546875,
+        "min_ess_bulk": 88782.67356036938,
+        "min_ess_per_grad": 0.20474292267686595,
+        "inv_metric_median": [
+          0.0091,
+          0.0241,
+          0.0763,
+          0.1987,
+          0.551,
+          1.5209,
+          4.3185,
+          11.2671,
+          28.5251,
+          77.15
+        ],
+        "wall_s": 53.3
+      },
+      "cmdstan": {
+        "stepsize_median": 0.65934521,
+        "stepsize_range": [
+          0.41289659,
+          1.0219968
+        ],
+        "mean_treedepth": 2.83490625,
+        "grad_per_draw": 6.682,
+        "min_ess_bulk": 100966.54051678973,
+        "min_ess_per_grad": 0.23609730553349886,
+        "inv_metric_median": [
+          0.0092,
+          0.0244,
+          0.0686,
+          0.1784,
+          0.5227,
+          1.5238,
+          4.2031,
+          11.4857,
+          31.3068,
+          83.8009
+        ]
+      }
+    },
+    "illcond_gauss_default": {
+      "python": {
+        "stepsize_median": 0.11349019131902156,
+        "stepsize_range": [
+          0.10682847670108049,
+          0.1272602078678073
+        ],
+        "mean_treedepth": 6.2814375,
+        "grad_per_draw": 132.53859375,
+        "min_ess_bulk": 13272.555113364186,
+        "min_ess_per_grad": 0.0015647040441480117,
+        "inv_metric_median": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "wall_s": 423.6
+      },
+      "cmdstan": {
+        "stepsize_median": 0.11395758,
+        "stepsize_range": [
+          0.10463221,
+          0.1234664
+        ],
+        "mean_treedepth": 6.27890625,
+        "grad_per_draw": 132.14171875,
+        "min_ess_bulk": 12626.21951618203,
+        "min_ess_per_grad": 0.0014929780072982758,
+        "inv_metric_median": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "illcond_gauss_long": {
+      "python": {
+        "stepsize_median": 0.6991887788824152,
+        "stepsize_range": [
+          0.5992057585986021,
+          0.8081150217609612
+        ],
+        "mean_treedepth": 2.820515625,
+        "grad_per_draw": 6.4946875,
+        "min_ess_bulk": 120831.40314227478,
+        "min_ess_per_grad": 0.29069769316815375,
+        "inv_metric_median": [
+          0.01,
+          0.0274,
+          0.0778,
+          0.2139,
+          0.5916,
+          1.6192,
+          4.6318,
+          12.6903,
+          34.7856,
+          101.1046
+        ],
+        "wall_s": 54.7
+      },
+      "cmdstan": {
+        "stepsize_median": 0.7098366700000001,
+        "stepsize_range": [
+          0.56004175,
+          0.8075254
+        ],
+        "mean_treedepth": 2.820703125,
+        "grad_per_draw": 6.48196875,
+        "min_ess_bulk": 122423.14150679855,
+        "min_ess_per_grad": 0.2951050305578421,
+        "inv_metric_median": [
+          0.0095,
+          0.0272,
+          0.0742,
+          0.2141,
+          0.5685,
+          1.6556,
+          4.5603,
+          13.1122,
+          35.3751,
+          99.6542
+        ]
+      }
+    },
+    "funnel_windows": {
+      "python": {
+        "stepsize_median": 0.16974336793984554,
+        "stepsize_range": [
+          0.041034925351247864,
+          0.4581945100817775
+        ],
+        "mean_treedepth": 3.994515625,
+        "grad_per_draw": 45.165734375,
+        "min_ess_bulk": 277.89593664801,
+        "min_ess_per_grad": 9.613757132948546e-05,
+        "inv_metric_median": [
+          2.3961,
+          5.8924,
+          6.9787,
+          5.0903,
+          5.9566,
+          5.5703,
+          6.8226,
+          6.8792,
+          6.9093,
+          7.8227
+        ],
+        "wall_s": 133.9
+      },
+      "cmdstan": {
+        "stepsize_median": 0.18466805,
+        "stepsize_range": [
+          0.023451191,
+          0.50242629
+        ],
+        "mean_treedepth": 4.092609375,
+        "grad_per_draw": 48.87078125,
+        "min_ess_bulk": 430.21803006016444,
+        "min_ess_per_grad": 0.00013754960628320362,
+        "inv_metric_median": [
+          2.2961,
+          7.7651,
+          6.2468,
+          5.9245,
+          6.4737,
+          5.7606,
+          5.8254,
+          5.254,
+          6.3893,
+          6.6502
+        ]
+      }
+    },
+    "funnel_default": {
+      "python": {
+        "stepsize_median": 0.37098839451224397,
+        "stepsize_range": [
+          0.05071250125506098,
+          0.45773104442540574
+        ],
+        "mean_treedepth": 3.9884375,
+        "grad_per_draw": 39.32846875,
+        "min_ess_bulk": 735.7677942391795,
+        "min_ess_per_grad": 0.00029231679112823783,
+        "inv_metric_median": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "wall_s": 133.9
+      },
+      "cmdstan": {
+        "stepsize_median": 0.363649575,
+        "stepsize_range": [
+          0.03695448,
+          0.45923775
+        ],
+        "mean_treedepth": 3.952765625,
+        "grad_per_draw": 38.229484375,
+        "min_ess_bulk": 398.36742915541527,
+        "min_ess_per_grad": 0.00016281912200269804,
+        "inv_metric_median": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "funnel_long": {
+      "python": {
+        "stepsize_median": 0.12139545899738687,
+        "stepsize_range": [
+          0.015950762941361305,
+          0.2389911929207729
+        ],
+        "mean_treedepth": 3.80821875,
+        "grad_per_draw": 33.903734375,
+        "min_ess_bulk": 367.7720014515321,
+        "min_ess_per_grad": 0.00016949276027001639,
+        "inv_metric_median": [
+          5.3729,
+          26.0884,
+          26.4096,
+          24.5795,
+          29.389,
+          30.2514,
+          26.0743,
+          24.5435,
+          22.6872,
+          27.6362
+        ],
+        "wall_s": 182.6
+      },
+      "cmdstan": {
+        "stepsize_median": 0.11431457,
+        "stepsize_range": [
+          0.0074433544,
+          0.24621302
+        ],
+        "mean_treedepth": 3.713484375,
+        "grad_per_draw": 30.721875,
+        "min_ess_bulk": 408.8946058373743,
+        "min_ess_per_grad": 0.000207961858324369,
+        "inv_metric_median": [
+          5.842,
+          21.6484,
+          28.5306,
+          23.9094,
+          27.8849,
+          25.4777,
+          24.3031,
+          24.8963,
+          22.721,
+          26.2835
+        ]
+      }
+    }
+  },
+  "cmdstan_version": "stanc3 v2.37.0 (Unix)",
+  "cmdstan_second_seed": {
+    "seed": 777,
+    "results": {
+      "illcond_gauss_windows": {
+        "stepsize_median": 0.6531113749999999,
+        "stepsize_range": [
+          0.44471721,
+          1.009376
+        ],
+        "mean_treedepth": 2.832390625,
+        "grad_per_draw": 6.61940625,
+        "min_ess_bulk": 107598.27901113489,
+        "min_ess_per_grad": 0.2539839747030155,
+        "inv_metric_median": [
+          0.0096,
+          0.0241,
+          0.072,
+          0.2124,
+          0.581,
+          1.438,
+          4.27,
+          12.1951,
+          32.082,
+          83.1569
+        ]
+      },
+      "illcond_gauss_default": {
+        "stepsize_median": 0.11416394,
+        "stepsize_range": [
+          0.10519678,
+          0.12626771
+        ],
+        "mean_treedepth": 6.2636875,
+        "grad_per_draw": 131.34875,
+        "min_ess_bulk": 13850.223428278692,
+        "min_ess_per_grad": 0.0016475965021886738,
+        "inv_metric_median": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "illcond_gauss_long": {
+        "stepsize_median": 0.7136831450000001,
+        "stepsize_range": [
+          0.60651903,
+          0.84516347
+        ],
+        "mean_treedepth": 2.808515625,
+        "grad_per_draw": 6.44978125,
+        "min_ess_bulk": 121003.43315629396,
+        "min_ess_per_grad": 0.29313841350310804,
+        "inv_metric_median": [
+          0.0097,
+          0.0276,
+          0.0753,
+          0.2066,
+          0.5945,
+          1.6309,
+          4.5551,
+          12.6319,
+          35.6171,
+          98.2733
+        ]
+      },
+      "funnel_windows": {
+        "stepsize_median": 0.16120169,
+        "stepsize_range": [
+          0.0058531543,
+          0.50326269
+        ],
+        "mean_treedepth": 4.17284375,
+        "grad_per_draw": 55.270421875,
+        "min_ess_bulk": 366.8601784764271,
+        "min_ess_per_grad": 0.00010371171585514831,
+        "inv_metric_median": [
+          2.6876,
+          5.3463,
+          4.4034,
+          6.0775,
+          5.6357,
+          5.7775,
+          5.9159,
+          6.0866,
+          6.0673,
+          6.0666
+        ]
+      },
+      "funnel_default": {
+        "stepsize_median": 0.36769506500000004,
+        "stepsize_range": [
+          0.040563245,
+          0.45977959
+        ],
+        "mean_treedepth": 3.9593125,
+        "grad_per_draw": 38.43925,
+        "min_ess_bulk": 399.159019040133,
+        "min_ess_per_grad": 0.00016225237673737333,
+        "inv_metric_median": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "funnel_long": {
+        "stepsize_median": 0.11301987,
+        "stepsize_range": [
+          0.0072204017,
+          0.2347186
+        ],
+        "mean_treedepth": 3.83853125,
+        "grad_per_draw": 37.148515625,
+        "min_ess_bulk": 362.29401136807246,
+        "min_ess_per_grad": 0.00015238412174446424,
+        "inv_metric_median": [
+          5.0147,
+          23.3637,
+          24.4815,
+          26.489,
+          29.0892,
+          24.2585,
+          23.3526,
+          24.8446,
+          31.4019,
+          27.3849
+        ]
+      }
+    }
+  },
+  "host": "CmdStan ran on m0pad (~/.cmdstan/cmdstan-2.37.0); the reference ran here"
+}
