@@ -244,7 +244,8 @@
       const kept = state.improve.kept.get(key) || [];
       const base = kept.length ? kept[0].eff : n.soft_min_eff / n.ratio_vs_incumbent;
       const c = cursor.get(key) || { i: 0, top: 0 };
-      while (c.i < kept.length && kept[c.i].at <= n.created_at) c.top = Math.max(c.top, kept[c.i++].eff);
+      /* Up to this trial in ledger order (time, then id), so trials sharing a timestamp stay in sequence. */
+      while (c.i < kept.length && (kept[c.i].at < n.created_at || (kept[c.i].at === n.created_at && kept[c.i].id <= n.id))) c.top = Math.max(c.top, kept[c.i++].eff);
       cursor.set(key, c);
       const runTop = kept.reduce((m, k) => Math.max(m, k.eff), 0);
       return { ...n, best: base > 0 ? Math.max(c.top, n.soft_min_eff || 0) / base : 1, runBest: base > 0 && runTop > 0 ? runTop / base : null };
@@ -419,7 +420,7 @@
         if (!isNum(n.soft_min_eff) || !(n.soft_min_eff > 0)) continue;
         const key = n.lane + "/" + n.run_id;
         if (!state.improve.kept.has(key)) state.improve.kept.set(key, []);
-        state.improve.kept.get(key).unshift({ eff: n.soft_min_eff, at: n.created_at });
+        state.improve.kept.get(key).unshift({ eff: n.soft_min_eff, at: n.created_at, id: n.id });
       }
       const found = fresh.filter((n) => n.decision === "keep" && isNum(n.ratio_vs_incumbent) && n.ratio_vs_incumbent > 1);
       state.improve.all = found.reverse().concat(state.improve.all);
