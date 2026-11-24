@@ -697,13 +697,21 @@ def main(argv: list[str] | None = None) -> int:
     # Attempts already published are kept: a sweep adds to the record, it does not replace it.
     prior = None if args.fresh else (args.input_json or args.out_json)
     trials: dict[str, dict[str, Any]] = {}
+    published: dict[str, Any] = {}
     if prior and prior.is_file():
-        for t in _flatten_trials(json.loads(prior.read_text(encoding="utf-8"))):
+        published = json.loads(prior.read_text(encoding="utf-8"))
+        for t in _flatten_trials(published):
             trials[f"{t.get('release')}/{t['trial_id']}"] = t
     if args.jobs or not trials:
         for t in scan_jobs(args.jobs or [ROOT / "jobs"], pricing, release_tag=args.release):
             trials[f"{t.get('release')}/{t['trial_id']}"] = t
     data = aggregate_results(list(trials.values()), pricing, release_tag=args.release or DEFAULT_RELEASE)
+    # The task files in this checkout describe the current release only. An earlier release keeps
+    # the task details it was published with (its titles and the scores its speed-ups divide by).
+    earlier = {r.get("release"): r["task_meta"] for r in published.get("releases") or [] if r.get("task_meta")}
+    for rel in data["releases"]:
+        if rel["release"] != DEFAULT_RELEASE and rel["release"] in earlier:
+            rel["task_meta"] = earlier[rel["release"]]
 
     write_site_data(data, args.out_json)
     n = sum(len(r["trials"]) for r in data["releases"])

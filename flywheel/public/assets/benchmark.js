@@ -333,7 +333,8 @@
           tries.map((a, i) => `<button type="button" data-run="${esc(key)}" data-attempt="${esc(a.trial_id)}"${a === t ? ' aria-current="true"' : ""}>${i + 1}: ${esc(attemptLabel(a).split(":")[0])}</button>`).join("") +
           "</div></div>"
         : "";
-    const classes = Object.entries(t.by_class || {}).sort((a, b) => a[1] - b[1]);
+    // An interrupted attempt has no result, so the numbers of the file it left behind are not shown.
+    const classes = t.outcome === "interrupted" ? [] : Object.entries(t.by_class || {}).sort((a, b) => a[1] - b[1]);
     const top = Math.max(...classes.map((c) => c[1]), 1e-12);
     const classHtml = classes.length
       ? '<div><h4>Efficiency by target shape, weakest first</h4><div class="class-bars">' +

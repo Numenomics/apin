@@ -166,7 +166,13 @@ def test_collector_reaggregates_the_published_benchmark_file(tmp_path):
         pytest.skip("no published benchmark data")
     out = tmp_path / "x.json"
     assert mod.main(["--out-json", str(out), "--input-json", str(published)]) == 0
-    assert json.loads(out.read_text())["releases"]
+    before = {r["release"]: r for r in json.loads(published.read_text())["releases"]}
+    after = json.loads(out.read_text())["releases"]
+    assert after
+    # An earlier release keeps the task details it was published with: today's task files
+    # describe only the current release.
+    earlier = [r for r in after if r["release"] != mod.DEFAULT_RELEASE]
+    assert earlier and all(r["task_meta"] == before[r["release"]]["task_meta"] for r in earlier)
 
 
 def _load_collector():
