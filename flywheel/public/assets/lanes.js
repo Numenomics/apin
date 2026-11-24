@@ -28,11 +28,12 @@
         lanes
           .map((l) => {
             const links = [
-              `<a href="/autoresearch/#lane=${l.id}">Trials</a>`,
               `<a href="${apin.REPO}/blob/main/autoresearch/lanes/${l.id}/program.md">Lane brief</a>`,
               `<a href="${apin.REPO}/blob/main/autoresearch/lanes/${l.id}/NEGATIVE_MEMORY.md">Ideas already refuted</a>`,
             ];
             if (BENCH_TASK[l.id]) links.push(`<a href="/benchmark/">Benchmark task</a>`);
+            /* The Autoresearch page has a tab only for a lane with trials. */
+            if (byLane && byLane.has(l.id) && byLane.get(l.id).trials) links.unshift(`<a href="/autoresearch/#lane=${l.id}">Trials</a>`);
             return (
               `<div class="row lane" id="${l.id}"><div><div class="code"><i class="swatch" style="background:${apin.laneColor(l.id)}"></i>${l.id}</div></div>` +
               `<div class="what"><h3>${esc(l.name)}</h3><p>${esc(l.goal)}</p>` +

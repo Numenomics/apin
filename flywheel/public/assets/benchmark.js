@@ -16,9 +16,9 @@
 
   const GAIN = 1.05; /* below this a speed-up is within the noise of the measurement */
   const RAMP_TOP = 8;
-  const SHAPES = { low: "circle", high: "square", max: "diamond" };
+  const SHAPES = { low: "circle", medium: "triangle", high: "square", max: "diamond" };
   const X_AXES = {
-    cost: { get: (r) => r.total_cost_usd, tick: (v) => fmt.usd(v), title: "Total cost of the five tasks, US dollars" },
+    cost: { get: (r) => r.total_cost_usd, tick: (v) => fmt.usd(v), title: "Total cost of all runs, US dollars" },
     tokens: { get: (r) => r.total_tokens, tick: (v) => fmt.tokens(v), title: "Total tokens, cached input included" },
     time: { get: (r) => r.total_wall_s, tick: (v) => fmt.dur(v), title: "Total agent time" },
   };
@@ -40,7 +40,11 @@
     }
     return index.get(rel).get(configKey + "||" + taskId) || [];
   }
-  const meta = (rel, taskId) => ({ id: taskId, title: taskId, ...((rel.task_meta || {})[taskId] || {}) });
+  /* A task mirrors a lane, so it is shown under the lane's name. */
+  const meta = (rel, taskId) => {
+    const m = (rel.task_meta || {})[taskId] || {};
+    return { id: taskId, ...m, title: m.lane ? apin.laneName(m.lane) : m.title || taskId };
+  };
   const cellOf = (row, taskId) => (row.tasks || {})[taskId] || null;
   /* none: never attempted. unfinished: every attempt was cut off. invalid: no attempt passed
      the checks. Otherwise gain or flat, by the mean speed-up. */
@@ -78,6 +82,7 @@
     const open = `<svg viewBox="-8 -8 16 16" width="${s}" height="${s}" aria-hidden="true">`;
     if (shape === "square") return `${open}<rect x="-4" y="-4" width="8" height="8" fill="${color}"/></svg>`;
     if (shape === "diamond") return `${open}<path d="M0-5.6L5.6 0 0 5.6-5.6 0z" fill="${color}"/></svg>`;
+    if (shape === "triangle") return `${open}<path d="M0-5.2L5.4 4.2H-5.4z" fill="${color}"/></svg>`;
     return `${open}<circle r="4.4" fill="${color}"/></svg>`;
   }
 
@@ -99,11 +104,11 @@
   /* ---------- leaderboard ---------- */
 
   const COLUMNS = [
-    { key: "rank", label: "" },
+    { key: "rank", label: "#", value: (r) => r.rank },
     { key: "label", label: "Model" },
     { key: "effort", label: "Effort" },
     { key: "tasks", label: "Tasks" },
-    { key: "speedup", label: "Speed-up", num: true, value: (r) => r.speedup || 0 },
+    { key: "speedup", label: "Speed-up", num: true, value: (r) => (r.complete ? 1e6 : 0) + (r.speedup || 0) },
     { key: "cost", label: "Cost", num: true, value: (r) => r.total_cost_usd },
     { key: "tokens", label: "Tokens", num: true, value: (r) => r.total_tokens },
     { key: "time", label: "Agent time", num: true, value: (r) => r.total_wall_s },
@@ -172,8 +177,9 @@
     const axis = X_AXES[state.xAxis];
     const pad = { l: 40, r: 18, t: 26, b: 46 };
     const xs = list.map(axis.get);
-    const xStep = niceStep(Math.max(...xs, 1e-9) * 1.08, W < 560 ? 3 : 5);
-    const xMax = Math.ceil((Math.max(...xs, 1e-9) * 1.04) / xStep) * xStep;
+    const xTop = Math.max(...xs) > 0 ? Math.max(...xs) : 1; // a release whose runs were all free
+    const xStep = niceStep(xTop * 1.08, W < 560 ? 3 : 5);
+    const xMax = Math.ceil((xTop * 1.04) / xStep) * xStep;
     const yStep = niceStep(Math.max(...list.map((r) => r.speedup), 1.2), 4);
     const yMax = Math.ceil((Math.max(...list.map((r) => r.speedup), 1.2) * 1.04) / yStep) * yStep;
     const sx = (v) => pad.l + (v / xMax) * (W - pad.l - pad.r);
@@ -208,6 +214,7 @@
       const look = p.r.complete ? { fill: color, stroke: "var(--paper)", "stroke-width": 1 } : { fill: "var(--paper)", stroke: color, "stroke-width": 1.5 };
       if (shape === "square") g.appendChild(svg("rect", { x: -4.5, y: -4.5, width: 9, height: 9, ...look }));
       else if (shape === "diamond") g.appendChild(svg("path", { d: "M0-6L6 0 0 6-6 0z", ...look }));
+      else if (shape === "triangle") g.appendChild(svg("path", { d: "M0-5.6L5.8 4.6H-5.8z", ...look }));
       else g.appendChild(svg("circle", { r: 4.8, ...look }));
       tip.bind(
         g,
@@ -242,7 +249,7 @@
   function renderMatrix() {
     const rel = state.rel;
     const model = $("#f-model").value;
-    const list = rel.leaderboard.filter((r) => !model || r.model === model);
+    const list = rel.leaderboard.filter((r) => r.model === model);
     const table = $("#matrix");
     if (!list.length) {
       table.innerHTML = '<tbody><tr><td class="empty">This release has no results yet.</td></tr></tbody>';
@@ -250,7 +257,7 @@
     }
     let html =
       "<thead><tr><th>Task</th>" +
-      list.map((r) => `<th class="config">${model ? "" : esc(r.label) + "<br>"}<span class="tag">${esc(r.effort)}</span></th>`).join("") +
+      list.map((r) => `<th class="config"><span class="tag">${esc(r.effort)}</span></th>`).join("") +
       "</tr></thead><tbody>";
     for (const id of rel.tasks) {
       const m = meta(rel, id);
@@ -261,7 +268,7 @@
           ? `<span class="yard">${[isNum(den.reference) ? `Stan-style reference ${fmt.times(den.reference / den.start)}` : "", isNum(den.frontier) ? `best autoresearch sampler ${fmt.times(den.frontier / den.start)}` : ""].filter(Boolean).join(", ")}</span>`
           : "";
       html +=
-        `<tr><td class="task"><code>${esc(id)}</code><span>${esc(m.title)}</span>${yard}` +
+        `<tr><td class="task"><b>${esc(m.title)}</b><code>${esc(id)}</code>${yard}` +
         `<a href="${apin.REPO}/tree/main/harbor/tasks/${esc(id)}">${esc(m.lane ? `lane ${m.lane}, task files` : "task files")}</a></td>`;
       for (const r of list) {
         const cell = cellOf(r, id);
@@ -332,15 +339,15 @@
         classes.map(([k, v]) => `<div><span>${esc(k)}</span><i style="width:${Math.max(1, (v / top) * 100).toFixed(1)}%"></i><b>${Number(v).toExponential(2)}</b></div>`).join("") +
         "</div></div>"
       : "";
-    const failed = (t.failed_targets || []).length ? `<div><h4>Failed targets</h4><p class="quote">${esc(t.failed_targets.join("; "))}</p></div>` : "";
+    const failed = (t.failed_targets || []).length ? `<div><h4>Failed targets</h4>${t.failed_targets.map((x) => `<p class="quote">${esc(x)}</p>`).join("")}</div>` : "";
     const note = t.approach_summary ? `<div><h4>The agent's closing note</h4><pre class="log">${esc(t.approach_summary)}</pre></div>` : "";
-    const error = t.error ? `<div><h4>Harness error</h4><pre class="log">${esc(t.error)}</pre></div>` : "";
+    const error = t.error ? `<div><h4>Run error</h4><pre class="log">${esc(t.error)}</pre></div>` : "";
 
     document.querySelectorAll(".heat.is-open").forEach((n) => n.classList.remove("is-open"));
     document.querySelectorAll(`.heat[data-run="${CSS.escape(key)}"]`).forEach((n) => n.classList.add("is-open"));
     apin.drawer.open({
       title: meta(rel, taskId).title,
-      sub: `${taskId} · ${row.label || t.model} at ${t.effort} effort · ${t.agent || "unknown harness"} · ${t.trial_id}`,
+      sub: `${taskId} · ${row.label || t.model} at ${t.effort} effort · ${t.agent || "unknown agent"} · ${t.trial_id}`,
       body: `<div>${status(tone, attemptLabel(t))}</div>${chips}<div class="kv">${facts.join("")}</div>${classHtml}${failed}${note}${error}`,
     });
   }
@@ -351,7 +358,7 @@
     const sort = e.target.closest("[data-sort]");
     if (sort) {
       const key = sort.getAttribute("data-sort");
-      state.sort = state.sort.key === key ? { key, dir: -state.sort.dir } : { key, dir: key === "speedup" ? -1 : 1 };
+      state.sort = state.sort.key === key && key !== "rank" ? { key, dir: -state.sort.dir } : { key, dir: key === "speedup" ? -1 : 1 };
       renderBoard();
       return;
     }
@@ -375,13 +382,13 @@
     $("#meta").innerHTML =
       `<span><b>${rel.leaderboard.length}</b> model and effort settings</span>` +
       `<span><b>${runs.length}</b> runs on <b>${rel.tasks.length}</b> tasks${unfinished ? `, <b>${unfinished}</b> did not finish` : ""}</span>` +
-      (harness ? `<span>Harness <b>${esc(harness)}</b></span>` : "") +
+      (harness ? `<span>Agent <b>${esc(harness)}</b></span>` : "") +
       `<span>Updated <b>${esc(fmt.date(data.generated_at))}</b></span>`;
     $("#release-note").textContent = rel.release === data.current_release ? "" : rel.note || "";
     $("#release-note").classList.toggle("is-old", rel.release !== data.current_release);
     /* The task table shows one model at a time, so it stays readable as models are added. */
     const label = (m) => (rel.leaderboard.find((r) => r.model === m) || {}).label || m;
-    $("#f-model").innerHTML = state.models.map((m) => `<option value="${esc(m)}">${esc(label(m))}</option>`).join("") + (state.models.length > 1 ? '<option value="">All models</option>' : "");
+    $("#f-model").innerHTML = state.models.map((m) => `<option value="${esc(m)}">${esc(label(m))}</option>`).join("");
     $("#f-model").hidden = state.models.length < 2;
     renderLegend();
     renderBoard();

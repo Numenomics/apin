@@ -29,7 +29,7 @@
       name: "Ground-up sampler",
       kind: "algorithm",
       edits: "adapt() and transition(), starting from a 43-line random-walk Metropolis stub",
-      fixed: "Nothing is provided: no HMC, NUTS or mass matrix",
+      fixed: "No HMC, NUTS or mass matrix is provided",
       goal: "Build an adjusted sampler from scratch that passes the checks and improves efficiency.",
     },
     {
@@ -38,7 +38,7 @@
       kind: "algorithm",
       edits: "adapt_metric() only: the warmup that estimates the metric and the starting point",
       fixed: "The transition kernel (the harness's verified NUTS/HMC)",
-      goal: "Reach the accuracy gate at the lowest total cost, warmup included, without hurting funnels or isotropic targets.",
+      goal: "Reach the accuracy threshold at the lowest total cost, warmup included, without hurting funnels or isotropic targets.",
     },
     {
       id: "A2",
@@ -54,7 +54,7 @@
       kind: "algorithm",
       edits: "adapt() and transition(), focusing on the integrator, momentum refreshment and when a trajectory ends",
       fixed: "The judge and its target shapes",
-      goal: "Get more accuracy per gradient from the dynamics, including non-reversible kernels and PDMPs.",
+      goal: "Get more accuracy per gradient from the dynamics, including non-reversible kernels and piecewise deterministic samplers.",
     },
     {
       id: "A4",
@@ -69,7 +69,7 @@
       name: "Gradient and compiler speed",
       kind: "systems",
       edits: "Autodiff and compiler code in stan-math, stan, stanc3 or bridgestan",
-      fixed: "Draws at a fixed seed must stay byte-identical, or the full statistical gate applies",
+      fixed: "Draws at a fixed seed must stay byte-identical, or the full statistical check applies",
       goal: "Cut the wall-clock cost of one gradient.",
     },
     {
@@ -84,10 +84,10 @@
 
   /* Tracks: where a finished approximator is ranked. Never pooled. */
   const TRACKS = [
-    { id: "L1", name: "Adjusted kernels by cost", ranks: "Accuracy-gated ESS per cost unit, cost = density evaluations + r × gradient evaluations", cmd: "uv run apin score --models public --reps 3 --baseline cmdstan --track L1 --submission mine=path/to/mine.py" },
-    { id: "L2", name: "Wall clock", ranks: "ESS per second, published with the machine fingerprint", cmd: "uv run apin score --models public --reps 3 --baseline cmdstan --track L2" },
-    { id: "L3", name: "Rotation and scale stress", ranks: "The same kernel under random rotations and scales from 0.01 to 100", cmd: "uv run apin track run --track L3 --sampler path/to/mine.py --dims 6,12" },
-    { id: "L4", name: "Unadjusted and approximate methods", ranks: "Measured bias and the cost to bring squared bias under 0.01 (ULA, VI, Pathfinder, Laplace)", cmd: "uv run apin track run --track L4 --sampler path/to/mine.py --dims 6" },
+    { id: "L1", name: "Adjusted kernels by cost", ranks: "Effective sample size per unit of cost on real Stan posteriors, for models that pass the accuracy check. Cost is density evaluations plus r times gradient evaluations, where r is the measured cost of a gradient", cmd: "uv run apin score --models public --reps 3 --baseline cmdstan --track L1 --submission mine=path/to/mine.py" },
+    { id: "L2", name: "Wall clock", ranks: "Effective sample size per second on real Stan posteriors, published with the machine fingerprint", cmd: "uv run apin score --models public --reps 3 --baseline cmdstan --track L2" },
+    { id: "L3", name: "Rotation and scale stress", ranks: "The same kernel on synthetic targets under random rotations and scales from 0.01 to 100", cmd: "uv run apin track run --track L3 --sampler path/to/mine.py --dims 6,12" },
+    { id: "L4", name: "Unadjusted and approximate methods", ranks: "Measured bias on synthetic targets and the cost to bring squared bias under 0.01 (unadjusted Langevin, variational inference, Pathfinder, Laplace)", cmd: "uv run apin track run --track L4 --sampler path/to/mine.py --dims 6" },
     { id: "L5", name: "Density only", ranks: "The L1 score for samplers that never call the gradient", cmd: "uv run apin track run --track L5 --sampler path/to/mine.py --dims 6,12" },
   ];
 
@@ -102,7 +102,7 @@
     archive_only: { label: "archived", glyph: "open", note: "Passed and did not beat the version before it, but is the best in its niche" },
     discard_no_gain: { label: "no gain", glyph: "open", note: "Passed but did not beat the version before it" },
     discard_tier0: { label: "failed checks", glyph: "tick", note: "Failed lint, replay or the invariance smoke test" },
-    discard_tier1: { label: "failed accuracy", glyph: "tick", note: "Failed an accuracy or replay gate on the target suite" },
+    discard_tier1: { label: "failed accuracy", glyph: "tick", note: "Failed an accuracy or replay check on the target suite" },
     discard_duplicate: { label: "duplicate", glyph: "tick", note: "Same code as an earlier trial" },
   };
 
@@ -371,7 +371,7 @@
        overview()            totals and one summary per lane
        chart(lane, after)    a lane's trials as chart points, oldest first, from a cursor
        trials(filters)       full trials, newest first
-       search({q, lane})     trials and notes that contain every word of q
+       notes(filters)        hypotheses and insights, newest first
        node(id)              one trial with its parents, children and the notes that cite it */
   const api = {
     overview: () => getJSON("/api/overview"),
@@ -380,7 +380,12 @@
       const res = await getJSON("/api/nodes" + query({ lane, step, q, limit, offset }));
       return { ...res, nodes: (res.nodes || []).map(fullNode) };
     },
-    search: ({ q, lane, offset = 0, limit = 50 }) => getJSON("/api/search" + query({ q, lane, limit, offset })),
+    /* Hypotheses and insights, newest first. With q, the ones that contain every word of it. */
+    notes: async ({ lane, q, offset = 0, limit = 50 } = {}) => {
+      if (!q) return getJSON("/api/notes" + query({ lane, limit, offset }));
+      const res = await getJSON("/api/search" + query({ q, lane, kind: "note", limit, offset }));
+      return { ...res, notes: (res.results || []).map((r) => ({ ...r, kind: r.note_kind })) };
+    },
     node: async (id) => {
       const res = await getJSON("/api/nodes/" + encodeURIComponent(id));
       return { node: fullNode(res.node), parents: res.parents || [], children: res.children || [], notes: res.notes || [] };

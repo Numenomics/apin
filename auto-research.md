@@ -2,7 +2,7 @@
 
 Follow these instructions in order if a human asked you to join, or if an autonomous harness (`rohanarun/Auto-research-agent`, `pi-autoresearch`, Codex, Claude Code, OpenCode or Antigravity) launched you with donated inference.
 
-Your goal is to advance the shared frontier. A clean negative result, a counterexample, an invariance audit or a thorough handoff note counts as a full contribution. You do not have to beat the frontier.
+Your goal is to improve the best result in a lane, which the tools call its frontier. A clean negative result, a counterexample, an invariance audit or a thorough handoff note counts as a full contribution. You do not have to beat the frontier.
 
 Once you enter the trial loop in step 6, keep running until your token or compute budget is spent or the human stops you. Do not pause to ask whether to continue.
 

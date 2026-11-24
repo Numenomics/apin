@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "generated_at": "2026-11-23T23:54:27Z",
+  "generated_at": "2026-11-24T00:37:06Z",
   "current_release": "bench-v0.2.0",
   "invalid_floor": 0.1,
   "releases": [
@@ -119,9 +119,9 @@
               "outcomes": {
                 "invalid": 1
               },
-              "speedup": 0.0,
-              "speedup_min": 0.0,
-              "speedup_max": 0.0,
+              "speedup": 0.1,
+              "speedup_min": 0.1,
+              "speedup_max": 0.1,
               "ref_speedup": null,
               "best_trial": "a1-preconditioning__3D9BNRR",
               "trial_ids": [
@@ -2299,9 +2299,9 @@
               "outcomes": {
                 "invalid": 1
               },
-              "speedup": 0.0,
-              "speedup_min": 0.0,
-              "speedup_max": 0.0,
+              "speedup": 0.1,
+              "speedup_min": 0.1,
+              "speedup_max": 0.1,
               "ref_speedup": null,
               "best_trial": "a4-nonlinear-transport__bo6FsQc",
               "trial_ids": [
@@ -2414,9 +2414,9 @@
               "outcomes": {
                 "invalid": 1
               },
-              "speedup": 0.0,
-              "speedup_min": 0.0,
-              "speedup_max": 0.0,
+              "speedup": 0.1,
+              "speedup_min": 0.1,
+              "speedup_max": 0.1,
               "ref_speedup": null,
               "best_trial": "a4-nonlinear-transport__hp49cTh",
               "trial_ids": [
@@ -2481,9 +2481,9 @@
               "outcomes": {
                 "invalid": 1
               },
-              "speedup": 0.0,
-              "speedup_min": 0.0,
-              "speedup_max": 0.0,
+              "speedup": 0.1,
+              "speedup_min": 0.1,
+              "speedup_max": 0.1,
               "ref_speedup": null,
               "best_trial": "a1-preconditioning__fE934G4",
               "trial_ids": [
@@ -2640,9 +2640,9 @@
               "outcomes": {
                 "invalid": 1
               },
-              "speedup": 0.0,
-              "speedup_min": 0.0,
-              "speedup_max": 0.0,
+              "speedup": 0.1,
+              "speedup_min": 0.1,
+              "speedup_max": 0.1,
               "ref_speedup": null,
               "best_trial": "a4-nonlinear-transport__if2iho8",
               "trial_ids": [
@@ -5068,9 +5068,9 @@
               "outcomes": {
                 "invalid": 1
               },
-              "speedup": 0.0,
-              "speedup_min": 0.0,
-              "speedup_max": 0.0,
+              "speedup": 0.1,
+              "speedup_min": 0.1,
+              "speedup_max": 0.1,
               "ref_speedup": null,
               "best_trial": "a3-integrator-trajectory__CqtN8TS",
               "trial_ids": [

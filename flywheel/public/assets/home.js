@@ -189,10 +189,10 @@
     const el = $("#r-verdict");
     const next =
       r.verdict === "right"
-        ? status("good", `Right: within 0.10 SD after ${fmt.int(r.n)} draws`)
+        ? status("good", `Passed: within 0.10 SD after ${fmt.int(r.n)} draws`)
         : r.verdict === "out"
-          ? status("warn", "Unproven at this budget")
-          : status("mute", "Unproven so far");
+          ? status("warn", "Not passed at this budget")
+          : status("mute", "Not passed yet");
     if (el.dataset.state !== r.verdict) {
       el.innerHTML = next;
       el.dataset.state = r.verdict;

@@ -210,7 +210,7 @@
             <div><dt>Draws</dt><dd id="r-draws">0</dd></div>
             <div><dt>Accepted</dt><dd id="r-acc">—</dd></div>
             <div><dt>Error bound</dt><dd id="r-err">—</dd></div>
-            <div><dt>Gate</dt><dd>0.10 SD</dd></div>
+            <div><dt>Tolerance</dt><dd>0.10 SD</dd></div>
           </dl>
           <div class="verdict">
             <span id="r-verdict" aria-live="polite"></span>
@@ -239,7 +239,7 @@
           <h3>Score your own sampler</h3>
           <p>Write <code>adapt()</code> and <code>transition()</code> in one Python file. apin checks that the kernel leaves the target unchanged, then measures it on real Stan posteriors.</p>
           <div id="way-score"></div>
-          <a class="more" href="/lanes/#tracks">See the five rankings</a>
+          <a class="more" href="/lanes/#tracks">See the tracks</a>
         </div>
       </div>
 
@@ -252,15 +252,15 @@
         <ol class="steps">
           <li>
             <h3>Valid kernel</h3>
-            <p>The harness lints the code, replays it bit for bit in a clean process, and tests invariance on targets with exact draws. A kernel that does not preserve the target distribution scores zero, however fast it is.</p>
+            <p>The harness runs static checks on the code, replays it bit for bit in a clean process, and tests invariance on targets with exact draws. A kernel that does not preserve the target distribution scores zero.</p>
           </li>
           <li>
             <h3>Efficient on every shape</h3>
-            <p>The judge tests fresh Gaussians, funnels, bananas, Rosenbrock ridges and heavy tails in 6 and 20 dimensions, at a short and a long budget. The score is a soft minimum across shape classes, so the worst class sets it.</p>
+            <p>The judge tests fresh Gaussians, funnels, bananas, Rosenbrock ridges, mixtures and heavy tails in 6 and 20 dimensions, at a short and a long budget. The score is a soft minimum across shape classes, so the worst class sets it.</p>
           </li>
           <li>
             <h3>Passes on real posteriors</h3>
-            <p>On Stan models from posteriordb, every checked quantity must lie within 0.1 posterior standard deviations of the reference at 99.5% confidence. A result that is wrong or unproven earns no speed credit.</p>
+            <p>On Stan models from posteriordb, every checked quantity must lie within 0.1 posterior standard deviations of the reference at 99.5% confidence. A result that fails this check gets no speed score.</p>
           </li>
           <li>
             <h3>Reproduced by a maintainer</h3>

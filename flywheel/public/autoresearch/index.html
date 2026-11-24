@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Autoresearch | apin</title>
-    <meta name="description" content="Every autoresearch trial on apin, lane by lane: all trials, the best result so far, and who found it." />
+    <meta name="description" content="Autoresearch trials on apin by lane, with each trial and the best efficiency so far." />
     <link rel="stylesheet" href="/assets/site.css" />
     <style>
       /* This page is a chart with a side rail, so it uses more of a wide screen than the others. */
@@ -201,11 +201,6 @@
         background: var(--ink);
         margin-right: 6px;
       }
-      mark {
-        background: color-mix(in srgb, var(--warn-mark) 32%, transparent);
-        color: inherit;
-        border-radius: 2px;
-      }
       .check {
         display: inline-flex;
         align-items: center;
@@ -276,11 +271,15 @@
             <p id="list-count"></p>
           </div>
           <div class="filters">
-            <label class="check"><input type="checkbox" id="f-step" /> Improvements only</label>
+            <div class="seg" role="group" aria-label="Show">
+              <button type="button" data-kind="trial" aria-pressed="true">Trials</button>
+              <button type="button" data-kind="note" aria-pressed="false">Notes</button>
+            </div>
+            <label class="check" id="f-step-label"><input type="checkbox" id="f-step" /> Improvements only</label>
             <label class="sr-only" for="f-lane">Lane</label>
             <select id="f-lane"><option value="">All lanes</option></select>
             <label class="sr-only" for="f-q">Search</label>
-            <input id="f-q" type="search" placeholder="Search hypotheses and notes" />
+            <input id="f-q" type="search" placeholder="Search" />
           </div>
         </div>
         <div class="table-scroll"><table class="data" id="list"></table></div>

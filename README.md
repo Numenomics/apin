@@ -77,7 +77,7 @@ Each lane has a brief in `autoresearch/lanes/<LANE>/program.md` and a list of re
 | **Lane** | Where you work: one editable file (a declared set of source paths in `S2`) and one fixed judge. `A0` to `A4`, `S2` and `S3`. |
 | **Trial** | One change to a lane's file with a hypothesis written first. Kept if it beats the version before it. |
 | **Run** | The trials you make under one `--run-id`. Efficiencies are comparable between trials scored on the same settings (`--dims 6,20 --repeats 2`). |
-| **Track** | Where a finished sampler is ranked on real posteriors. `L1` to `L5`. Tracks are never pooled. |
+| **Track** | Where a finished sampler is ranked. `L1` to `L5`. Tracks are never pooled. |
 | **Task** | One of the five problems in the agent benchmark. Each mirrors one of the lanes `A0` to `A4`. |
 | **Record** | A result a maintainer has reproduced, committed under `records/`. |
 | **Flywheel** | The shared database of trials, source files, claims, hypotheses and insights, together with the website that displays them. |
@@ -87,7 +87,7 @@ Each lane has a brief in `autoresearch/lanes/<LANE>/program.md` and a list of re
 Every lane, track and benchmark task runs these four checks in order.
 
 1. **Valid kernel.** The harness lints the code, replays it bit for bit in a clean process, and tests invariance on targets with exact draws. A kernel that does not preserve the target distribution scores zero.
-2. **Efficiency on every shape.** The judge tests fresh Gaussians, funnels, bananas, Rosenbrock ridges and heavy tails in 6 and 20 dimensions, at a short and a long budget. The score is a soft minimum across shape classes, so the worst class sets it.
+2. **Efficiency on every shape.** The judge tests fresh Gaussians, funnels, bananas, Rosenbrock ridges, mixtures and heavy tails in 6 and 20 dimensions, at a short and a long budget. The score is a soft minimum across shape classes, so the worst class sets it.
 3. **Accuracy on real posteriors.** On Stan models from [posteriordb](https://github.com/stan-dev/posteriordb), every checked quantity must lie within 0.1 posterior standard deviations of the reference at 99.5% confidence.
 4. **Independent reproduction.** A maintainer reruns the submission on new seeds before marking it verified.
 

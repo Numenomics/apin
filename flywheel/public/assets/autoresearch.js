@@ -3,13 +3,14 @@
    All data comes from apin.api in bounded pages. */
 (function () {
   "use strict";
-  const { $, esc, fmt, svg, status, tip, cmd, api, DECISIONS, STATES, RELATIONS, KEPT, isNum } = apin;
+  const { $, esc, fmt, svg, status, tip, cmd, api, DECISIONS, STATES, RELATIONS, isNum } = apin;
 
   apin.mount("autoresearch");
 
-  /* The chart reads at most this many pages of 1,000 points per lane, and draws at most
-     MAX_DOTS of the trials that did not move the line. Every step is always drawn. */
-  const MAX_PAGES = 20;
+  /* The chart reads a lane page by page (1,000 points each) and draws at most MAX_DOTS of the
+     trials that did not set a new best. Every trial that did is always drawn. MAX_PAGES is a
+     safety stop far beyond any lane today. Past it, the best comes from the lane summary. */
+  const MAX_PAGES = 200;
   const MAX_DOTS = 6000;
 
   const state = {
@@ -17,7 +18,7 @@
     lane: null,
     chart: { lane: null, points: [], dims: null, loading: false, failed: false, capped: false, seq: 0 },
     agent: "",
-    list: { rows: [], next: null, seq: 0, note: "" },
+    list: { kind: "trial", rows: [], next: null, seq: 0, note: "" },
     selected: null,
     redraw: null,
   };
@@ -30,6 +31,16 @@
   /* A contributor who registered without an invite is marked until a maintainer promotes them. */
   const byline = (n) => esc(who(n)) + (n.author_tier === "provisional" ? ' <span class="tag" title="Registered without an invite and not yet promoted by a maintainer">new</span>' : "");
   const scored = (p) => isNum(p.soft_min_eff) && p.soft_min_eff > 0;
+  /* The same rule the Flywheel uses for a new best: kept and not disputed or withdrawn. */
+  const counts = (p) => (p.decision === "keep" || p.decision === "keep_baseline" || p.decision === "keep_simpler" || p.state === "verified") && p.state !== "retracted" && p.state !== "disputed" && scored(p);
+  const hashValue = (name) => {
+    const raw = (location.hash.match(new RegExp("^#" + name + "=(.+)$")) || [])[1];
+    try {
+      return raw ? decodeURIComponent(raw) : null;
+    } catch {
+      return null;
+    }
+  };
   const laneOf = (id) => apin.LANES.find((l) => l.id === id) || { id, name: id };
 
   /* ---------- header and tabs ---------- */
@@ -101,13 +112,15 @@
   function renderRail() {
     const pts = state.chart.points;
     const steps = pts.filter((p) => p.step);
-    const best = steps[steps.length - 1];
+    const summary = state.overview.lanes.find((l) => l.lane === state.lane) || {};
+    const best = state.chart.capped && summary.frontier ? summary.frontier : steps[steps.length - 1];
     $("#prompt").innerHTML = cmd(apin.lanePrompt(laneOf(state.lane)), { prose: true });
 
     if (!best) {
       $("#best").innerHTML = `<p class="caption">${state.chart.loading ? "Loading." : state.chart.failed ? "Could not load this lane." : "No kept trial on the standard setup yet."}</p>`;
     } else {
-      const gain = steps.length > 1 ? `${steps.length - 1} ${steps.length === 2 ? "improvement" : "improvements"}, ${fmt.times(best.soft_min_eff / steps[0].soft_min_eff)} the first score` : "The first kept trial. Nothing has beaten it yet.";
+      const n = (isNum(summary.steps) ? summary.steps : steps.length) - 1;
+      const gain = n > 0 && steps.length ? `${n} ${n === 1 ? "improvement" : "improvements"}, ${fmt.times(best.soft_min_eff / steps[0].soft_min_eff)} the first score` : "The first kept trial. Nothing has beaten it yet";
       $("#best").innerHTML =
         `<div class="value">${fmt.eff(best.soft_min_eff)}</div>` +
         `<div class="who"><button type="button" data-node="${esc(best.id)}">${esc(best.trial_id || best.id)} by ${esc(who(best))}</button>` +
@@ -119,7 +132,7 @@
     for (const p of pts) {
       const a = agents.get(who(p)) || { name: who(p), model: p.agent_model, trials: 0, best: null };
       a.trials += 1;
-      if (KEPT.has(p.decision) && scored(p) && (!a.best || p.soft_min_eff > a.best.soft_min_eff)) a.best = p;
+      if (counts(p) && (!a.best || p.soft_min_eff > a.best.soft_min_eff)) a.best = p;
       agents.set(a.name, a);
     }
     const ranked = [...agents.values()].sort((a, b) => (b.best ? b.best.soft_min_eff : 0) - (a.best ? a.best.soft_min_eff : 0) || b.trials - a.trials);
@@ -156,7 +169,9 @@
     if (c.failed) parts.push("Could not load every trial of this lane. Reload the page to try again.");
     if (n) parts.push(`${fmt.int(n)}${c.capped ? " or more" : ""} ${n === 1 ? "trial" : "trials"}${setup}.`);
     if (!c.loading && all > n && !c.capped) parts.push(`${fmt.int(all - n)} more used other settings and are in the list below.`);
-    if (n) parts.push("Efficiency is accuracy per unit of cost on the hardest class of test target. Higher is better, with no upper limit. A score comes from two repeats and can move by a third between seeds.");
+    if (c.capped) parts.push("The chart shows the oldest of them.");
+    if (n > MAX_DOTS) parts.push("The grey dots are a sample.");
+    if (n) parts.push("Efficiency is accuracy per unit of cost, and the weakest of six classes of test target dominates it. Higher is better, with no upper limit. A score usually comes from two repeats and can move by a third between seeds.");
     $("#reading").textContent = parts.join(" ");
   }
 
@@ -212,7 +227,8 @@
       el.appendChild(svg("text", { x: pad.l - 8, y: sy(v) + 4, "text-anchor": "end" }, fmt.eff(v)));
     }
     el.appendChild(svg("line", { class: "axis", x1: pad.l, x2: W - pad.r, y1: H - pad.b, y2: H - pad.b }));
-    const every = Math.max(1, Math.ceil(n / (W < 620 ? 4 : 8) / 10) * 10);
+    const want = n / (W < 620 ? 4 : 8);
+    const every = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000].find((v) => v >= want) || 100000;
     for (let i = 0; i < n; i += every) el.appendChild(svg("text", { x: sx(i), y: H - pad.b + 17, "text-anchor": "middle" }, "#" + i));
     el.appendChild(svg("text", { class: "axis-title", x: pad.l, y: H - 6 }, "Trial, in the order posted"));
     el.appendChild(svg("text", { class: "axis-title", x: 0, y: 12 }, "Efficiency, log scale"));
@@ -275,7 +291,7 @@
   function pointTip(p) {
     return (
       `<b>${esc(p.trial_id || p.id)}</b> · ${esc(decision(p).label)} · ${esc(who(p))}<br>` +
-      `<span class="k">Efficiency</span> ${scored(p) ? fmt.eff(p.soft_min_eff) : "no score"}${p.step ? " · moved the line" : ""}<br>` +
+      `<span class="k">Efficiency</span> ${scored(p) ? fmt.eff(p.soft_min_eff) : "no score"}${p.step ? " · best when posted" : ""}<br>` +
       esc(clip(headline(p), 150))
     );
   }
@@ -295,81 +311,87 @@
 
   /* ---------- trial list ---------- */
 
-  const idParts = (id) => {
-    const [, run, trial] = String(id).split(":");
-    return { run: run || id, trial: trial || "" };
-  };
-  /* The search marks the matched word with square brackets. */
-  const snippet = (s) => esc(s).replace(/\[([^\]]+)\]/g, "<mark>$1</mark>");
-
   async function loadList(more) {
     const l = state.list;
     const seq = ++l.seq;
     const lane = $("#f-lane").value;
     const q = $("#f-q").value.trim();
-    const step = $("#f-step").checked;
+    const step = l.kind === "trial" && $("#f-step").checked;
     const offset = more ? l.next : 0;
+    let res;
+    let rows;
     try {
-      let rows;
-      let res;
-      if (q && !step) {
-        res = await api.search({ q, lane, offset });
-        rows = (res.results || []).map((r) => ({ ...r, kind: r.kind === "note" ? "note" : "trial", text: r.snippet || r.title || "", marked: true }));
-        l.note = res.window_truncated ? ` among the newest ${fmt.int(res.search_window)} trials and notes` : "";
-        l.count = null;
+      if (l.kind === "note") {
+        res = await api.notes({ lane, q, offset });
+        rows = res.notes;
       } else {
         res = await api.trials({ lane, step, q, offset });
-        rows = res.nodes.map((n) => ({ ...n, kind: "trial", text: headline(n) }));
-        l.note = res.window_truncated ? ` among the newest ${fmt.int(res.filter_window || res.search_window || 0)} trials` : "";
-        l.count = isNum(res.count) ? res.count : null;
+        rows = res.nodes;
       }
-      if (seq !== l.seq) return; // a newer search has replaced this one
-      l.rows = more ? l.rows.concat(rows) : rows;
-      l.next = res.next_offset ?? null;
     } catch (err) {
       if (seq !== l.seq) return;
       console.error(err);
       l.rows = [];
       l.next = null;
-      $("#list").innerHTML = '<tbody><tr><td class="empty">Could not load trials. Reload the page to try again.</td></tr></tbody>';
+      $("#list").innerHTML = '<tbody><tr><td class="empty">Could not load the list. Reload the page to try again.</td></tr></tbody>';
       $("#list-more").hidden = true;
       $("#list-count").textContent = "";
       return;
     }
-    renderList(Boolean(q), step);
+    if (seq !== l.seq) return; // a newer search has replaced this one
+    l.rows = more ? l.rows.concat(rows) : rows;
+    l.next = res.next_offset ?? null;
+    const window = res.filter_window || res.search_window || 0;
+    renderList({ q, step, lane, count: l.kind === "trial" && isNum(res.count) && !res.count_capped ? res.count : null, window: res.window_truncated ? window : 0 });
   }
 
-  function renderList(searching, stepOnly) {
+  function listCount({ q, step, lane, count, window }) {
     const l = state.list;
     const shown = l.rows.length;
-    const total = l.count !== null && l.count >= shown ? fmt.int(l.count) : fmt.int(shown) + (l.next !== null ? " or more" : "");
-    const what = searching ? (stepOnly ? "matching improvements" : "matches") : stepOnly ? "improvements" : "trials";
-    $("#list-count").textContent = `${total} ${what}${l.note}, newest first.`;
+    const total = count !== null && count >= shown ? fmt.int(count) : fmt.int(shown) + (l.next !== null ? " or more" : "");
+    const among = window ? ` among the newest ${fmt.int(window)}` : "";
+    if (l.kind === "note") return `${total} ${q ? "matching notes" : "notes"}${among}.`;
+    if (q) return `${total} matching ${step ? "trials that were the best when posted" : "trials"}${among}, newest first.`;
+    if (!step) return `${total} trials, newest first.`;
+    /* Each lane's first kept trial starts its line. It is in this list but is not an improvement. */
+    const starts = state.overview.lanes.filter((x) => (!lane || x.lane === lane) && x.steps > 0).length;
+    if (count === null || count < starts) return `${total} trials that were the best when posted, newest first.`;
+    const n = count - starts;
+    return `${fmt.int(n)} ${n === 1 ? "improvement" : "improvements"} and ${starts} starting ${starts === 1 ? "trial" : "trials"}, newest first.`;
+  }
+
+  function renderList(info) {
+    const l = state.list;
+    $("#list-count").textContent = listCount(info);
     $("#list-more").hidden = l.next === null;
-    if (!shown) {
-      $("#list").innerHTML = `<tbody><tr><td class="empty">${searching ? "Nothing matches. Try fewer words or another lane." : "Nothing here yet."}</td></tr></tbody>`;
+    if (!l.rows.length) {
+      $("#list").innerHTML = `<tbody><tr><td class="empty">${info.q ? "Nothing matches. Try fewer words or another lane." : l.kind === "note" ? "No hypotheses or insights here yet." : "Nothing here yet."}</td></tr></tbody>`;
+      return;
+    }
+    if (l.kind === "note") {
+      $("#list").innerHTML =
+        "<thead><tr><th>Lane</th><th>Kind</th><th>By</th><th>State</th><th>Note</th><th>Updated</th></tr></thead><tbody>" +
+        l.rows
+          .map(
+            (r) =>
+              `<tr class="clickable" data-note="${esc(r.id)}" tabindex="0"><td>${r.lane ? apin.laneTag(r.lane) : ""}</td><td><span class="tag">${esc(r.kind || "note")}</span></td>` +
+              `<td>${esc(r.author || "unknown")}</td><td><span class="status mute">${esc(r.state || "open")}</span></td>` +
+              `<td class="wrap-cell"><b>${esc(r.title || "")}</b> ${esc(clip(String(r.body || ""), 200))}</td><td>${esc(fmt.day(r.updated_at || r.created_at))}</td></tr>`
+          )
+          .join("") +
+        "</tbody>";
       return;
     }
     $("#list").innerHTML =
       "<thead><tr><th>Lane</th><th>Trial</th><th>By</th><th>Outcome</th><th class='num'>Efficiency</th><th>Hypothesis</th><th>Posted</th></tr></thead><tbody>" +
       l.rows
-        .map((r) => {
-          const text = r.marked ? snippet(clip(r.text, 240)) : esc(clip(r.text, 200));
-          if (r.kind === "note") {
-            return (
-              `<tr class="clickable" data-note="${esc(r.id)}" tabindex="0"><td>${r.lane ? apin.laneTag(r.lane) : ""}</td><td><span class="tag">${esc(r.note_kind || "note")}</span></td>` +
-              `<td>${esc(r.author || "unknown")}</td><td><span class="status mute">${esc(r.state || "open")}</span></td><td></td>` +
-              `<td class="wrap-cell"><b>${esc(r.title || "")}</b> ${text}</td><td>${esc(fmt.day(r.updated_at || r.created_at))}</td></tr>`
-            );
-          }
-          const id = idParts(r.id);
-          return (
+        .map(
+          (r) =>
             `<tr class="clickable${r.id === state.selected ? " is-selected" : ""}" data-node="${esc(r.id)}" tabindex="0"><td>${apin.laneTag(r.lane)}</td>` +
-            `<td><code>${esc(r.run_id || id.run)}</code> ${esc(r.trial_id || id.trial)}</td><td>${byline(r)}</td>` +
-            `<td>${r.frontier_step ? '<span class="mark-step" title="Moved the best so far"></span>' : ""}${apin.decisionMark(r.decision, r.lane)}</td>` +
-            `<td class="num">${fmt.eff(r.soft_min_eff)}</td><td class="wrap-cell">${text}</td><td>${esc(fmt.day(r.created_at))}</td></tr>`
-          );
-        })
+            `<td><code>${esc(r.run_id)}</code> ${esc(r.trial_id || "")}</td><td>${byline(r)}</td>` +
+            `<td>${r.frontier_step ? '<span class="mark-step" title="The best in its lane when it was posted"></span>' : ""}${apin.decisionMark(r.decision, r.lane)}</td>` +
+            `<td class="num">${fmt.eff(r.soft_min_eff)}</td><td class="wrap-cell">${esc(clip(headline(r), 200))}</td><td>${esc(fmt.day(r.created_at))}</td></tr>`
+        )
         .join("") +
       "</tbody>";
   }
@@ -381,7 +403,7 @@
     try {
       detail = await api.node(id);
     } catch {
-      apin.drawer.open({ title: "Could not load this trial", sub: id, body: '<p class="caption">The Flywheel did not return it. It may have been removed, or the request failed. Close this and try again.</p>' });
+      apin.drawer.open({ title: "Could not load this trial", sub: id, body: '<p class="caption">The server did not return it. It may have been removed, or the request failed. Close this and try again.</p>' });
       return;
     }
     const n = detail.node;
@@ -441,7 +463,7 @@
       const res = await apin.getJSON("/api/notes/" + encodeURIComponent(id));
       note = res.note || res;
     } catch {
-      apin.drawer.open({ title: "Could not load this note", sub: id, body: '<p class="caption">The Flywheel did not return it. Close this and try again.</p>' });
+      apin.drawer.open({ title: "Could not load this note", sub: id, body: '<p class="caption">The server did not return it. Close this and try again.</p>' });
       return;
     }
     const cited = (note.node_ids || []).map((nid) => `<button type="button" data-node="${esc(nid)}">${esc(nid)}</button>`).join("");
@@ -465,7 +487,7 @@
       box.innerHTML = `<pre class="log source">${esc(res.source)}</pre><p class="caption">${fmt.int(res.size)} bytes, sha256 ${esc(String(res.sha256).slice(0, 16))}</p>`;
       button.hidden = true;
     } catch {
-      box.innerHTML = '<p class="caption">Could not load the source from the Flywheel.</p>';
+      box.innerHTML = '<p class="caption">Could not load the source.</p>';
       button.disabled = false;
     }
   }
@@ -484,6 +506,13 @@
   document.addEventListener("click", (e) => {
     const tab = e.target.closest("[data-lane]");
     if (tab) return void pickLane(tab.getAttribute("data-lane"));
+    const kind = e.target.closest("[data-kind]");
+    if (kind) {
+      state.list.kind = kind.getAttribute("data-kind");
+      document.querySelectorAll("[data-kind]").forEach((b) => b.setAttribute("aria-pressed", String(b === kind)));
+      $("#f-step-label").hidden = state.list.kind !== "trial";
+      return void loadList(false);
+    }
     const src = e.target.closest("[data-source]");
     if (src) return void showSource(src.getAttribute("data-source"), src);
     const note = e.target.closest("[data-note]");
@@ -513,10 +542,10 @@
   apin.onTheme(() => state.redraw && state.redraw());
   /* Links between pages and inside the page name a lane or a trial in the hash. */
   window.addEventListener("hashchange", () => {
-    const lane = (location.hash.match(/^#lane=([A-Za-z0-9]+)$/) || [])[1];
-    const trial = (location.hash.match(/^#trial=(.+)$/) || [])[1];
+    const lane = hashValue("lane");
+    const trial = hashValue("trial");
     if (lane && state.overview && lanes().some((l) => l.id === lane)) pickLane(lane, true);
-    if (trial && decodeURIComponent(trial) !== state.selected) openNode(decodeURIComponent(trial), true);
+    if (trial && trial !== state.selected) openNode(trial, true);
   });
 
   /* ---------- load ---------- */
@@ -530,16 +559,16 @@
       return;
     }
     renderCounts();
-    const fromHash = (location.hash.match(/^#lane=([A-Za-z0-9]+)$/) || [])[1];
-    const trial = (location.hash.match(/^#trial=(.+)$/) || [])[1];
-    const trialLane = trial ? decodeURIComponent(trial).split(":")[0] : null;
+    const fromHash = hashValue("lane");
+    const trial = hashValue("trial");
+    const trialLane = trial ? trial.split(":")[0] : null;
     /* Open on the lane named in the link, or the lane with the newest trial. */
     const newest = [...state.overview.lanes].sort((a, b) => String(b.latest_at).localeCompare(String(a.latest_at)))[0];
     const options = lanes().map((l) => l.id);
     const start = [fromHash, trialLane, newest && newest.lane, "A0"].find((id) => id && options.includes(id)) || options[0];
     state.redraw = apin.watchWidth($("#plot-box"), renderPlot);
     pickLane(start, true);
-    if (trial) openNode(decodeURIComponent(trial), true);
+    if (trial) openNode(trial, true);
   }
 
   load();

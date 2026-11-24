@@ -390,6 +390,11 @@ def collect_jobs(jobs_dirs: list[Path], pricing: dict[str, Any], *, release_tag:
     return aggregate_results(scan_jobs(jobs_dirs, pricing, release_tag=release_tag), pricing, release_tag=release_tag)
 
 
+def speedup_tasks(tasks_dir: Path = TASKS_DIR) -> list[str]:
+    """The benchmark's tasks: every task directory except the bug-fix tasks of lane S3."""
+    return sorted(p.parent.name for p in tasks_dir.glob("*/task.toml") if not p.parent.name.startswith("s3-"))
+
+
 def load_task_meta(task_ids: list[str], tasks_dir: Path = TASKS_DIR) -> dict[str, dict[str, Any]]:
     """Describe each task from its own `task.toml`, so the page never restates task facts by hand."""
     meta: dict[str, dict[str, Any]] = {}
@@ -521,8 +526,9 @@ def _summarise_task(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """All attempts of one setting on one task."""
     scored = [r for r in rows if r["outcome"] not in NOT_SCORED]
     valid = [r for r in scored if r["outcome"] != "invalid"]
-    # An invalid attempt earned no speed-up: it counts as zero in the task mean.
-    ratios = [(_num(r.get("start_speedup")) or 0.0) if r["outcome"] != "invalid" else 0.0 for r in scored]
+    # An invalid attempt enters the task mean at INVALID_FLOOR: worse than returning the
+    # starting code unchanged (1.0), and still a number the geometric mean can use.
+    ratios = [INVALID_FLOOR if r["outcome"] == "invalid" else (_num(r.get("start_speedup")) or 0.0) for r in scored]
     refs = [v for v in (_num(r.get("ref_speedup")) for r in valid) if v is not None]
     counts = {o: sum(1 for r in scored if r["outcome"] == o) for o in OUTCOMES}
     best = max(scored, key=lambda r: (r["outcome"] != "invalid", _num(r.get("start_speedup")) or 0.0), default=None)
@@ -568,7 +574,7 @@ def summarise_setting(rows: list[dict[str, Any]], tasks: list[str], label: str) 
         "interrupted": len(rows) - len(scored),
         "attempts_per_task": max((s["attempts"] for s in done), default=0),
         # The ranking key: geometric mean, over the tasks with a scored attempt, of efficiency
-        # relative to the starting code. A task with no valid attempt enters at INVALID_FLOOR.
+        # relative to the starting code. No task counts for less than INVALID_FLOOR.
         "speedup": _geomean([max(s["speedup"], INVALID_FLOOR) for s in done]),
         "valid": round(sum(s["valid"] / s["attempts"] for s in done), 3),
         "tasks": per_task,
@@ -599,7 +605,9 @@ def summarise_release(release: str, trials: list[dict[str, Any]], pricing: dict[
     # A release has a Stan-style reference once any of its attempts carries a reference ratio.
     scoring = "reference" if any(_num(t.get("ref_speedup")) is not None for t in trials) else "start"
     speed = [t for t in trials if t["category"] == "optimize"]
-    tasks = sorted({t["task_id"] for t in speed})
+    # The benchmark's own task list, so a row that skipped a task is not "complete" just
+    # because nobody in the release ran it. Tasks a release ran that no longer exist stay listed.
+    tasks = sorted({t["task_id"] for t in speed} | set(speedup_tasks()))
     by_cfg: dict[str, list[dict[str, Any]]] = {}
     for t in speed:
         by_cfg.setdefault(t["config_key"], []).append(t)
