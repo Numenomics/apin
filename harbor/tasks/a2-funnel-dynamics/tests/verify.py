@@ -50,7 +50,7 @@ ROOT = _find_root()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from harness import grade, judge
+from harness import grade, judge, sandbox
 
 # Hidden seeds, rotated every release. A seed is public once its release ships (it is in this
 # file). During a run the agent cannot read it: tests/ reaches only the verifier container, after
@@ -414,6 +414,10 @@ def main(argv: list[str] | None = None) -> int:
         n_chains=a.n_chains, k_steps=a.k_steps, adapt_draws=a.adapt_draws, horizon_steps=a.horizon_steps,
     )
     overrides = {"start": a.baseline, "reference": a.reference, "frontier": a.frontier}
+    # The verifier holds the hidden seeds and the frozen scores, and it writes the reward. Agent
+    # code must not run here unless both confinement layers are active, so a layer that fails to
+    # install fails the run instead of being skipped.
+    os.environ[sandbox.ENV_SANDBOX] = "strict"
     return verify_optimize(a.lane, a.submission, out_dir, tests_dir=a.tests_dir, overrides=overrides, cfg=cfg)
 
 

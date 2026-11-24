@@ -139,6 +139,8 @@ def test_harbor_verify_records_solution_complexity_and_collector_builds_site_dat
 
     assert mod.DEFAULT_RELEASE == "bench-v0.3.0"
     pricing = json.loads((ROOT / "benchmarks" / "pricing.json").read_text())
+    # A job whose name carries no release tag is skipped unless a release is named for it.
+    assert mod.collect_jobs([tmp_path / "job1"], pricing)["releases"] == []
     data = mod.collect_jobs([tmp_path / "job1"], pricing, release_tag=mod.DEFAULT_RELEASE)
     rel = data["releases"][0]
     assert data["current_release"] == rel["release"] == "bench-v0.3.0"

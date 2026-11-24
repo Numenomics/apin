@@ -180,6 +180,12 @@ def test_exploratory_trials_are_never_kept(lane):
     assert _trial(ar_dir, lane_dir, None)["decision"] == "keep_baseline"
     # A different seed is exploratory too.
     assert _trial(ar_dir, lane_dir, _long(9.5), cfg=grade.config(seed=1))["decision"] == "exploratory"
+    # The file of an exploratory trial can be graded at the standard setup afterwards, but the
+    # same file is still a duplicate of an earlier trial at the same kind of setup.
+    (lane_dir / "submission.py").write_text(_long(9.0))
+    assert _trial(ar_dir, lane_dir, None)["decision"] != "discard_duplicate"
+    assert _trial(ar_dir, lane_dir, None)["decision"] == "discard_duplicate"
+    assert _trial(ar_dir, lane_dir, _long(9.5), cfg=explore)["decision"] == "discard_duplicate"
 
 
 def test_archive_only_when_a_class_sets_a_record(lane):

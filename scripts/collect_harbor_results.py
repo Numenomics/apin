@@ -17,6 +17,7 @@ import hashlib
 import json
 import math
 import re
+import sys
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,7 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PRICING = ROOT / "benchmarks" / "pricing.json"
 DEFAULT_OUT_JSON = ROOT / "flywheel" / "public" / "data" / "benchmark.json"
 TASKS_DIR = ROOT / "harbor" / "tasks"
-DEFAULT_RELEASE = "bench-v0.3.0"  # used for job directories whose name does not start with a release tag
+DEFAULT_RELEASE = "bench-v0.3.0"  # the current release. A job is never assigned to it by default.
 
 _TEST_CMD_RE = re.compile(
     r"\b(pytest|apin\s+(invariance|autoresearch\s+eval|score|track)|harbor/verify\.py|verify\.py)\b"
@@ -213,7 +214,7 @@ def _compute_cost(
     return round(cost, 6), ("free" if p.get("free_tier") else "estimated_list")
 
 
-def parse_trial_dir(trial_dir: Path, pricing: dict[str, Any], *, release_tag: str = DEFAULT_RELEASE) -> dict[str, Any] | None:
+def parse_trial_dir(trial_dir: Path, pricing: dict[str, Any], *, release_tag: str | None = None) -> dict[str, Any] | None:
     res_path = trial_dir / "result.json"
     if not res_path.is_file():
         return None
@@ -366,9 +367,14 @@ def parse_trial_dir(trial_dir: Path, pricing: dict[str, Any], *, release_tag: st
     }
 
 
-def scan_jobs(jobs_dirs: list[Path], pricing: dict[str, Any], *, release_tag: str) -> list[dict[str, Any]]:
-    """Every attempt found under the given Harbor jobs directories."""
+def scan_jobs(jobs_dirs: list[Path], pricing: dict[str, Any], *, release_tag: str | None = None) -> list[dict[str, Any]]:
+    """Every attempt found under the given Harbor jobs directories.
+
+    A job belongs to the release its directory name starts with (`bench-v0.3.0-...`). A job
+    without that prefix is skipped unless `release_tag` names its release: an old or a smoke
+    job must not land on the current leaderboard by default."""
     trials: list[dict[str, Any]] = []
+    skipped: set[str] = set()
     seen_ids: set[str] = set()
     for root in jobs_dirs:
         if not root.exists():
@@ -379,15 +385,21 @@ def scan_jobs(jobs_dirs: list[Path], pricing: dict[str, Any], *, release_tag: st
             parsed = parse_trial_dir(trial_dir, pricing, release_tag=release_tag)
             if parsed is None or parsed["task_id"] == trial_dir.name and not (trial_dir / "verifier").exists() and not (trial_dir / "agent").exists():
                 continue
+            if parsed["release"] is None:
+                skipped.add(trial_dir.parent.name)
+                continue
             if parsed["trial_id"] in seen_ids:
                 continue
             seen_ids.add(parsed["trial_id"])
             trials.append(parsed)
+    for name in sorted(skipped):
+        print(f"skipped job {name}: its name has no release tag. Pass --release to assign one.", file=sys.stderr)
     return trials
 
 
-def collect_jobs(jobs_dirs: list[Path], pricing: dict[str, Any], *, release_tag: str) -> dict[str, Any]:
-    return aggregate_results(scan_jobs(jobs_dirs, pricing, release_tag=release_tag), pricing, release_tag=release_tag)
+def collect_jobs(jobs_dirs: list[Path], pricing: dict[str, Any], *, release_tag: str | None = None) -> dict[str, Any]:
+    return aggregate_results(scan_jobs(jobs_dirs, pricing, release_tag=release_tag), pricing,
+                             release_tag=release_tag or DEFAULT_RELEASE)
 
 
 def speedup_tasks(tasks_dir: Path = TASKS_DIR) -> list[str]:
@@ -676,7 +688,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--input-json", type=Path, help="Data file whose attempts are kept (default: the output file, if it exists)")
     ap.add_argument("--fresh", action="store_true", help="Start from nothing instead of adding to the existing data file")
     ap.add_argument("--pricing", type=Path, default=DEFAULT_PRICING)
-    ap.add_argument("--release", default=DEFAULT_RELEASE, help="Release tag for job directories whose name does not start with one")
+    ap.add_argument("--release", default=None,
+                    help="Release tag for job directories whose name does not start with one (default: skip them)")
     ap.add_argument("--out-json", type=Path, default=DEFAULT_OUT_JSON)
     args = ap.parse_args(argv)
 
@@ -690,7 +703,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.jobs or not trials:
         for t in scan_jobs(args.jobs or [ROOT / "jobs"], pricing, release_tag=args.release):
             trials[f"{t.get('release')}/{t['trial_id']}"] = t
-    data = aggregate_results(list(trials.values()), pricing, release_tag=args.release)
+    data = aggregate_results(list(trials.values()), pricing, release_tag=args.release or DEFAULT_RELEASE)
 
     write_site_data(data, args.out_json)
     n = sum(len(r["trials"]) for r in data["releases"])

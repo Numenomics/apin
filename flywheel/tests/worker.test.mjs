@@ -2217,15 +2217,32 @@ describe("frontier steps (migration 0005)", () => {
   const byPosition = (a, b) =>
     a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 
+  const isEligible = (r) =>
+    r.yardstick !== null && r.speedup > 0 && !["retracted", "disputed"].includes(r.state) && (r.verified === 1 || KEPT.has(r.decision));
+  /** Each lane's current yardstick: the one whose first eligible trial is the newest. */
+  function expectedYardsticks(rows) {
+    const first = new Map(); // lane -> yardstick -> its first eligible trial
+    for (const r of [...rows].sort(byPosition)) {
+      if (!isEligible(r)) continue;
+      const ys = first.get(r.lane) ?? new Map();
+      if (!ys.has(r.yardstick)) ys.set(r.yardstick, r);
+      first.set(r.lane, ys);
+    }
+    const current = new Map();
+    for (const [lane, ys] of first) current.set(lane, [...ys.values()].sort(byPosition).at(-1).yardstick);
+    return current;
+  }
   /** The definition, from scratch over every trial: independent of the Worker and of the migration. */
   function expected(sqlite) {
     const rows = sqlite.prepare("SELECT id, lane, created_at, speedup, yardstick, decision, verified, state FROM nodes").all();
     rows.sort(byPosition);
+    const current = expectedYardsticks(rows);
     const bar = new Map(); // lane -> the latest step's speedup
     const flags = {};
     for (const r of rows) {
       const standard = r.yardstick !== null;
-      const eligible = standard && r.speedup > 0 && !["retracted", "disputed"].includes(r.state) && (r.verified === 1 || KEPT.has(r.decision));
+      // Only trials on the lane's current yardstick are compared.
+      const eligible = isEligible(r) && r.yardstick === current.get(r.lane);
       // At least MARGIN times the latest step, up to rounding (1.26 over 1.2 counts).
       const step = eligible && (!bar.has(r.lane) || r.speedup >= bar.get(r.lane) * MARGIN * (1 - 1e-12));
       if (step) bar.set(r.lane, r.speedup);
@@ -2242,12 +2259,19 @@ describe("frontier steps (migration 0005)", () => {
 
   function assertConsistent(sqlite, label) {
     assert.deepEqual(stored(sqlite), expected(sqlite), label);
-    const counters = sqlite.prepare("SELECT lane, standard, steps FROM lane_stats WHERE trials > 0 ORDER BY lane").all().map((r) => ({ ...r }));
-    const counted = sqlite
-      .prepare("SELECT lane, SUM(yardstick IS NOT NULL) AS standard, SUM(frontier_step) AS steps FROM nodes GROUP BY lane ORDER BY lane")
-      .all()
-      .map((r) => ({ ...r }));
-    assert.deepEqual(counters, counted, `${label}: lane_stats counters`);
+    const rows = sqlite.prepare("SELECT id, lane, created_at, speedup, yardstick, decision, verified, state, frontier_step FROM nodes").all();
+    const current = expectedYardsticks(rows);
+    const counters = sqlite.prepare("SELECT lane, yardstick, standard, steps FROM lane_stats WHERE trials > 0 ORDER BY lane").all().map((r) => ({ ...r }));
+    const counted = [...new Set(rows.map((r) => r.lane))].sort().map((lane) => {
+      const y = current.get(lane) ?? null;
+      const mine = rows.filter((r) => r.lane === lane);
+      return {
+        lane, yardstick: y,
+        standard: mine.filter((r) => y !== null && r.yardstick === y).length,
+        steps: mine.filter((r) => r.frontier_step === 1).length,
+      };
+    });
+    assert.deepEqual(counters, counted, `${label}: lane_stats yardstick and counters`);
   }
 
   it("stores speedup and yardstick, rejects a speedup that is not a number above 0, and returns both everywhere", async () => {
@@ -2361,7 +2385,8 @@ describe("frontier steps (migration 0005)", () => {
     // Speed-ups on both sides of the margin from each other (1.05 over 1, 1.1025 over 1.05, ...).
     const SPEEDUPS = [1, 1.03, 1.049, 1.05, 1.06, 1.1, 1.1025, 1.103, 1.16, 1.2, 1.26, 2, null];
     const DECISIONS = ["keep", "keep", "keep_baseline", "keep_simpler", "discard_tier1", "archive_only"];
-    const YARDSTICKS = ["A-y1", "A-y1", "A-y1", null];
+    // A second yardstick, so lanes switch yardsticks and old ones get later trials.
+    const YARDSTICKS = ["A-y1", "A-y1", "A-y2", null];
     const ids = [];
     let next = 0;
     const tally = {};
@@ -2460,12 +2485,15 @@ describe("frontier steps (migration 0005)", () => {
     assert.equal(big.json.node.frontier_step, true);
     assert.equal(dirty(), 0);
     const settle = flagQueries().filter(([q]) => /1 - frontier_step/.test(q));
-    assert.equal(settle.length, 1);
-    // The walk starts from the dirty lanes, an empty partial index outside a transaction.
-    assert.match(plan(settle[0]), /SETUP \| SCAN lane_stats USING COVERING INDEX idx_lane_stats_dirty/);
-    assert.match(plan(settle[0]), /SEARCH p USING INDEX idx_nodes_lane_graded/);
+    const settleYardstick = flagQueries().filter(([q]) => /UPDATE lane_stats SET yardstick/.test(q));
+    assert.deepEqual([settle.length, settleYardstick.length], [1, 1]);
+    // Both start from the dirty lanes, an empty partial index outside a transaction.
+    assert.match(plan(settle[0]), /SETUP \| SCAN lane_stats USING INDEX idx_lane_stats_dirty/);
+    assert.match(plan(settle[0]), /SEARCH p USING INDEX idx_nodes_eligible \(lane=\? AND yardstick=\? AND created_at>\?\)/);
+    assert.match(plan(settleYardstick[0]), /SETUP \| SCAN lane_stats USING COVERING INDEX idx_lane_stats_dirty/);
+    assert.ok(!/SCAN (nodes|e|f|g)\b/.test(plan(settleYardstick[0])), plan(settleYardstick[0]));
     for (const q of flagQueries()) {
-      if (q === settle[0]) continue;
+      if (q === settle[0] || q === settleYardstick[0]) continue;
       assert.ok(!/SCAN (nodes|n|a|x|p)\b|TEMP B-TREE/.test(plan(q)), plan(q));
     }
 
@@ -2507,6 +2535,63 @@ describe("frontier steps (migration 0005)", () => {
     assert.deepEqual(steps(sqlite), ["A1:m:T0"]);
     assertConsistent(sqlite, "mid-lane posts");
     assert.equal((await reqJson(env, "GET", "/api/frontier?lane=A1")).json.frontier.A1.id, "A1:m:T0");
+  });
+
+  it("speed-ups are compared only within one yardstick, and the lane keeps the yardstick introduced last", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    const post = (id, yardstick, speedup, at, extra = {}) =>
+      reqJson(env, "POST", "/api/nodes", trial(id, { yardstick, speedup, created_at: ts(at), source: `# ${id}\n`, ...extra }), ADMIN);
+    const node = async (id) => (await reqJson(env, "GET", `/api/nodes/${encodeURIComponent(id)}`)).json.node;
+    const laneYardstick = () => sqlite.prepare("SELECT yardstick FROM lane_stats WHERE lane = 'A1'").get().yardstick;
+    const chart = async () => (await reqJson(env, "GET", "/api/lanes/A1/chart")).json;
+    const best = async () => (await reqJson(env, "GET", "/api/frontier?lane=A1")).json.frontier.A1.id;
+    const stepIds = async (q) => (await reqJson(env, "GET", `/api/nodes?${q}`)).json;
+
+    // A 2.0x step on yardstick X, reviewed, so it would set the verification bar on X.
+    assert.equal((await post("A1:x:T1", "X", 2, 1)).json.node.frontier_step, true);
+    await reqJson(env, "POST", `/api/nodes/${encodeURIComponent("A1:x:T1")}/state`, { state: "replicated" }, ADMIN);
+    // Then a new yardstick Y: its 1.0x baseline and a 1.1x improvement are both steps.
+    const base = await post("A1:y:T2", "Y", 1, 2);
+    assert.deepEqual([base.json.node.frontier_step, base.json.verify_queued], [true, true]);
+    assert.equal((await post("A1:y:T3", "Y", 1.1, 3)).json.node.frontier_step, true);
+    assert.deepEqual([(await node("A1:x:T1")).frontier_step, (await node("A1:y:T2")).frontier_step], [false, true]);
+    assert.equal(laneYardstick(), "Y");
+    assert.equal(await best(), "A1:y:T3");
+    const o = (await reqJson(env, "GET", "/api/overview")).json.lanes.find((l) => l.lane === "A1");
+    assert.deepEqual([o.frontier.id, o.steps], ["A1:y:T3", 2]);
+    const c = await chart();
+    assert.deepEqual([c.yardstick, c.points.map((p) => [p.id, p.step]), c.total, c.steps], ["Y", [["A1:y:T2", true], ["A1:y:T3", true]], 2, 2]);
+    for (const q of ["lane=A1&step=1", "step=1"]) {
+      const r = await stepIds(q);
+      assert.deepEqual([r.nodes.map((n) => n.id), r.count], [["A1:y:T3", "A1:y:T2"], 2], q);
+    }
+    assertConsistent(sqlite, "a new yardstick");
+
+    // A later 3.0x trial on X, from a stale checkout: stored and readable, but the lane stays on Y.
+    const stale = await post("A1:x:T4", "X", 3, 4);
+    assert.deepEqual([stale.status, stale.json.node.frontier_step, stale.json.verify_queued], [201, false, false]);
+    assert.equal(sqlite.prepare("SELECT steps_dirty FROM lane_stats WHERE lane = 'A1'").get().steps_dirty, 0);
+    assert.equal(laneYardstick(), "Y");
+    assert.equal(await best(), "A1:y:T3");
+    assert.deepEqual(await chart(), c);
+    assert.equal((await node("A1:x:T4")).speedup, 3);
+    assert.ok((await stepIds("lane=A1")).nodes.some((n) => n.id === "A1:x:T4"));
+    assertConsistent(sqlite, "a stale yardstick");
+
+    // A re-post that changes only a trial's yardstick moves the lane too: Z's first trial is the newest.
+    await post("A1:y:T3", "Z", 1.1, 3);
+    assert.deepEqual([laneYardstick(), await best(), (await chart()).points.map((p) => p.id)], ["Z", "A1:y:T3", ["A1:y:T3"]]);
+    assertConsistent(sqlite, "a re-post on a new yardstick");
+    await post("A1:y:T3", "Y", 1.1, 3);
+    assert.deepEqual(await chart(), c);
+    assertConsistent(sqlite, "back on Y");
+    // Retracting Y's only trials leaves X as the lane's yardstick, with its own steps.
+    for (const id of ["A1:y:T2", "A1:y:T3"]) await reqJson(env, "POST", `/api/nodes/${encodeURIComponent(id)}/state`, { state: "retracted" }, ADMIN);
+    assert.deepEqual([laneYardstick(), await best()], ["X", "A1:x:T4"]);
+    assertConsistent(sqlite, "Y retracted");
+    const before = stored(sqlite);
+    sqlite.exec(BACKFILL_SQL);
+    assert.deepEqual(stored(sqlite), before);
   });
 
   /**
@@ -2602,11 +2687,37 @@ describe("frontier steps (migration 0005)", () => {
     }
   });
 
+  it("a new yardstick and a state change at once commit consistent flags in every interleaving", async () => {
+    // T1 and T2 are steps on Y1. One request posts the first trial on Y2 while another retracts
+    // T2. In every order the lane ends on Y2, with T3 its only step.
+    const runs = await everyInterleaving(
+      async () => {
+        const { env, sqlite } = makeEnv();
+        const post = (id, speedup, at, yardstick = "Y1") => reqJson(env, "POST", "/api/nodes", trial(id, { speedup, yardstick, created_at: ts(at) }));
+        await post("A1:r:T1", 1, 1);
+        await post("A1:r:T2", 2, 2);
+        return {
+          env, sqlite,
+          requests: [() => post("A1:r:T3", 1.2, 3, "Y2"), () => reqJson(env, "POST", `/api/nodes/${encodeURIComponent("A1:r:T2")}/state`, { state: "retracted" })],
+        };
+      },
+      ({ sqlite }, results, label) => {
+        assert.ok(results.every((r) => r.status < 300), label);
+        assertConsistent(sqlite, label);
+        assert.deepEqual(steps(sqlite), ["A1:r:T3"], label);
+        assert.equal(sqlite.prepare("SELECT yardstick FROM lane_stats WHERE lane = 'A1'").get().yardstick, "Y2", label);
+      }
+    );
+    assert.ok(runs >= 3, `${runs} interleavings`);
+  });
+
   it("a concurrent mix of posts and state changes in one lane ends consistent", async () => {
     const { env, sqlite } = makeEnv();
     let seed = 7;
     const rand = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
     const eff = () => Math.round(rand() * 60) / 1000 + 0.001;
+    // Mostly Y1, sometimes a second yardstick, so the lane switches while requests overlap.
+    const yardstick = () => (rand() < 0.2 ? "Y2" : "Y1");
     const ids = [];
     for (let k = 0; k < 12; k += 1) {
       ids.push(`A1:r:T${k}`);
@@ -2622,10 +2733,10 @@ describe("frontier steps (migration 0005)", () => {
           // A new trial anywhere in the lane (a maintainer may set created_at).
           const id = `A1:c${round}:T${j}`;
           ids.push(id);
-          const body = trial(id, { soft_min_eff: eff(), created_at: ts(Math.floor(rand() * 130)) });
+          const body = trial(id, { soft_min_eff: eff(), yardstick: yardstick(), created_at: ts(Math.floor(rand() * 130)) });
           requests.push(() => reqJson(env, "POST", "/api/nodes", body));
         } else if (u < 0.6) {
-          const body = trial(any, { soft_min_eff: eff() });
+          const body = trial(any, { soft_min_eff: eff(), yardstick: yardstick() });
           requests.push(() => reqJson(env, "POST", "/api/nodes", body));
         } else {
           const state = ["retracted", "unverified", "disputed", "verified"][Math.floor(rand() * 4)];
@@ -2727,8 +2838,8 @@ describe("frontier steps (migration 0005)", () => {
     assert.equal(first.status, 200);
     assert.equal(first.headers.get("Cache-Control"), "public, max-age=30, s-maxage=30");
     const c = first.json;
-    assert.deepEqual(Object.keys(c).sort(), ["lane", "limit", "next_after", "points", "steps", "total"]);
-    assert.deepEqual([c.lane, c.total, c.steps, c.limit], ["A1", 1202, 2, 1000]);
+    assert.deepEqual(Object.keys(c).sort(), ["lane", "limit", "next_after", "points", "steps", "total", "yardstick"]);
+    assert.deepEqual([c.lane, c.yardstick, c.total, c.steps, c.limit], ["A1", "Y1", 1202, 2, 1000]);
     assert.equal(c.next_after, `${c.points.at(-1).created_at}|${c.points.at(-1).id}`);
     assert.equal(c.points.length, 1000);
     // T3 is exploratory, so not on the chart. T4 failed its checks: on the chart, with no speedup.
@@ -2863,6 +2974,18 @@ describe("frontier steps (migration 0005)", () => {
     const items = (await reqJson(env, "GET", "/api/verify/queue")).json.items;
     assert.deepEqual(items.map((i) => [i.node_id, i.node.speedup, i.node.yardstick]), [["A1:q:T1", 1, "Y1"]]);
     assert.equal((await reqJson(env, "POST", "/api/verify/claim", {}, bearer(dave))).json.lease.node_id, "A1:q:T1");
+  });
+
+  it("the verification queue does not lease a queued trial re-posted without a speedup", async () => {
+    const { env } = makeEnv({ apiKey: "root-admin-secret" });
+    const dave = (await reqJson(env, "POST", "/api/admin/keys", { handle: "dave", role: "contributor" }, ADMIN)).json.token;
+    const post = (id, extra) => reqJson(env, "POST", "/api/nodes", trial(id, { source: `# ${id}\n`, ...extra }), ADMIN);
+    assert.equal((await post("A1:q:T1", { speedup: 1.2 })).json.verify_queued, true);
+    // Still graded (it has a yardstick), but it failed a check: nothing to verify.
+    await post("A1:q:T1", { speedup: null });
+    assert.deepEqual((await reqJson(env, "GET", "/api/verify/queue")).json.items, []);
+    assert.equal((await reqJson(env, "POST", "/api/verify/claim", {}, bearer(dave))).json.error, "queue_empty");
+    assert.equal((await reqJson(env, "POST", "/api/verify/claim", { node_id: "A1:q:T1" }, bearer(dave))).status, 409);
   });
 
   it("the verification queue compares the speedups of graded trials, with the step margin", async () => {

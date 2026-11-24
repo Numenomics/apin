@@ -163,6 +163,17 @@ def test_test_sh_grades_in_isolated_mode_from_the_tests_dir(verify):
             assert f"--submission /app/autoresearch/lanes/{lane}/submission.py" in text
 
 
+def test_the_verifier_requires_both_confinement_layers(verify, tmp_path, monkeypatch):
+    """Agent code runs next to the hidden seeds and the reward file, so a confinement layer
+    that cannot be installed must fail the run, not be skipped."""
+    from harness import sandbox
+    monkeypatch.setenv(sandbox.ENV_SANDBOX, "auto")
+    seen = {}
+    monkeypatch.setattr(verify, "verify_optimize", lambda *a, **k: seen.setdefault("mode", sandbox.sandbox_mode()) and 0)
+    assert verify.main(["optimize", "--lane", "A2", "--submission", str(tmp_path / "s.py"), "--out-dir", str(tmp_path)]) == 0
+    assert seen["mode"] == "strict"
+
+
 def test_denominators_never_ship_in_the_agent_image():
     for task in TASKS.iterdir():
         for name in ("reference.py", "frontier.py", "frozen_scores.json"):

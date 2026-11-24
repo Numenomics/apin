@@ -122,14 +122,14 @@ eval "$(grep -E '^export ZAI_API_KEY=' ~/.bashrc)"     # load the key without pr
 harbor run -p harbor/tasks -a opencode-v2 -m zai-coding-plan/glm-5.3-flash \
   --ak reasoning_effort=high --api-key-name ZAI_API_KEY --allow-agent-host api.z.ai \
   --job-name bench-v0.3.0-glm-5.3-flash-high     # the release prefix is how the collector tags trials
-uv run python scripts/collect_harbor_results.py --release bench-v0.3.0 --jobs jobs/
+uv run python scripts/collect_harbor_results.py --jobs jobs/
 ```
 
 The agent may run for 24 h per task, so start sweeps in the background. Rebuild the base image after any change to `harness/`, the lane documents, a lane's `start.py` or its `yardstick.json`. A stale image still runs but measures the old code.
 
 ### Refreezing the scores
 
-Every speed-up divides by a frozen score: each lane's public yardstick (`autoresearch/lanes/<LANE>/yardstick.json`) and the benchmark's hidden denominators (`harbor/tasks/<task>/tests/frozen_scores.json`). Refreeze both after a change to a module in the judge digest (`harness/judge.py::judge_digest`), to a lane's `start.py`, to a reference, or to a seed:
+Every speed-up divides by a frozen score: each lane's public yardstick (`autoresearch/lanes/<LANE>/yardstick.json`) and the benchmark's hidden denominators (`harbor/tasks/<task>/tests/frozen_scores.json`). Refreeze both after a change to a module in the judge digest (`harness/judge.py::judge_digest`), to a lane's `start.py`, to a reference, to a seed, or to the NumPy or SciPy version in `uv.lock` (the digest does not cover the lock file, so nothing reports that case):
 
 ```bash
 uv run python scripts/sync_harbor_tests.py              # copy start.py, verify.py and the references into harbor/tasks/

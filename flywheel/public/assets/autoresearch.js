@@ -484,7 +484,7 @@
     const facts = [
       pair("Speed-up over the starting code", fmt.speedup(n.speedup)),
       pair("Efficiency", fmt.eff(n.soft_min_eff)),
-      pair("Against the version before", fmt.times(n.ratio_vs_incumbent, 3)),
+      pair("Against the best of its run", fmt.times(n.ratio_vs_incumbent, 3)),
       pair("Short budget", fmt.eff(n.short_horizon_eff)),
       pair("Long budget", fmt.eff(n.long_horizon_eff)),
       pair("Real Stan models passed", n.real_stan_total > 0 ? `${n.real_stan_passed} of ${n.real_stan_total}` : "not run"),

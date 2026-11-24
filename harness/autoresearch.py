@@ -335,8 +335,11 @@ def evaluate_lane_trial(
         base_meta["parents"] = extra_parents
 
     # Novelty filter: reject an exact duplicate or an AST-equivalent (comment or whitespace) change.
+    # An exploratory trial does not count against a standard one: the report of an exploratory
+    # trial tells the agent to grade the same file again at the standard setup.
     is_dup = any(
-        r.get("candidate_sha") == cand_sha or (r.get("ast_sha") and r.get("ast_sha") == cand_ast_sha)
+        (r.get("candidate_sha") == cand_sha or (r.get("ast_sha") and r.get("ast_sha") == cand_ast_sha))
+        and (exploratory or not r.get("exploratory"))
         for r in prior
     )
 

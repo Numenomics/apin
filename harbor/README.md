@@ -172,8 +172,10 @@ The verifier writes Harbor-standard `reward.txt` (scalar reward), `reward.json` 
 The leaderboard is a page of the project website: [apin-flywheel.m0hawk.workers.dev/benchmark/](https://apin-flywheel.m0hawk.workers.dev/benchmark/). It reads one data file, `flywheel/public/data/benchmark.json`. Collect Harbor job directories into that file, then deploy the site:
 
 ```bash
-uv run python scripts/collect_harbor_results.py --release bench-v0.3.0 --jobs jobs/
+uv run python scripts/collect_harbor_results.py --jobs jobs/
 cd flywheel && npx wrangler deploy
 ```
+
+A job counts toward the release its directory name starts with, for example `bench-v0.3.0-glm-5.3-flash-low`. The collector skips a job without that prefix unless you pass `--release`.
 
 The collector reads each task's title, lane, difficulty and time limit from its `task.toml`, so the page never restates them by hand. It records any run cut off by the model provider or infrastructure as `interrupted`, whatever the run produced, and any valid result the verifier could not score as `unscorable`. Neither counts as a result. The leaderboard covers the five speed-up tasks. Each row is ranked by the geometric mean of its speed-ups over the starting code, and a task with no valid attempt enters that mean at 0.1×. Attempts at bug-fix tasks of earlier releases stay in the data file as a record and appear in no row. Preview the page locally with `python3 -m http.server 8788 --directory flywheel/public` and open `http://localhost:8788/benchmark/`.

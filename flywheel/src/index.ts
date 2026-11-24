@@ -796,7 +796,7 @@ const SQL_OUTCOME_KEPT = sqlList(OUTCOME_KEPT);
 /**
  * A trial that takes part in the step walk: graded, with a speedup, not retracted or disputed,
  * and kept or verified. `t` is a table alias with its dot, or "" for the bare table. Must match
- * the triggers and the BACKFILL block of migration 0005.
+ * the triggers, the BACKFILL block and the condition of idx_nodes_eligible in migration 0005.
  */
 const sqlStepEligible = (t = "") =>
   `(${t}yardstick IS NOT NULL AND ${t}speedup > 0 AND ${t}state NOT IN (${sqlList(FRONTIER_EXCLUDED_STATES)})
@@ -861,7 +861,10 @@ async function laneStats(db: D1DatabaseLike, lane?: string | null): Promise<Lane
     .sort((a, b) => a.lane.localeCompare(b.lane));
 }
 
-/** Each lane's frontier, its latest step: one row of idx_nodes_steps per lane. No step, no frontier. */
+/**
+ * Each lane's frontier, its latest step: one row of idx_nodes_steps per lane. Only trials on the
+ * lane's current yardstick are steps, so this is the best on it. No step, no frontier.
+ */
 async function laneFrontiers(db: D1DatabaseLike, lanes: string[]): Promise<Record<string, NodeRecord>> {
   const rows = await batchAll<NodeRow>(
     db,
@@ -886,32 +889,39 @@ async function laneFrontiers(db: D1DatabaseLike, lanes: string[]): Promise<Recor
 // ---------------------------------------------------------------------------
 // Frontier steps
 //
-// Per lane, walk the eligible trials (sqlStepEligible) in (created_at, id) order. The first
-// is a step. A later one is a step when its speedup is at least STEP_MARGIN times the latest
-// step's. A trial under that margin is not a step and does not raise the bar.
-// nodes.frontier_step stores the result, and the lane frontier is the latest step.
+// Speed-ups are comparable only within one yardstick. Each lane has one current yardstick
+// (lane_stats.yardstick): the one whose first eligible trial (sqlStepEligible) is the newest.
+// Walk the lane's eligible trials on it in (created_at, id) order. The first is a step. A later
+// one is a step when its speedup is at least STEP_MARGIN times the latest step's. A trial under
+// that margin is not a step and does not raise the bar. A trial on another yardstick is never a
+// step. nodes.frontier_step stores the result, and the lane frontier is the latest step.
 //
 // Every flag a write changes commits in the write's own batch, computed in SQL from the rows
 // as they are inside that transaction, so overlapping requests cannot leave stale flags.
-//   * A new trial: stepSelfStmt sets its own flag from the latest step before it. When no step
-//     follows it (the newest trial, the usual post) nothing else can change: a step raises the
-//     bar, so a later trial that was not a step still is not. When a step follows it, the
-//     insert trigger of migration 0005 marks the lane dirty.
-//   * Any other change: the triggers of migration 0005 mark the lane dirty when other flags may
-//     move (the trial was a step, or is eligible now and changed its position or speedup).
-//   * settleStepsStmts, last in every batch that writes trials, walks each dirty lane again
-//     from its first trial and clears the mark. That reads the lane's graded trials about
-//     once: the rare path.
+//   * A new trial: stepSelfStmt sets its own flag from the latest step before it. When it is on
+//     the current yardstick, is not that yardstick's first eligible trial and no step follows it
+//     (the newest trial, the usual post), nothing else can change: a step raises the bar, so a
+//     later trial that was not a step still is not. Otherwise the insert trigger of migration
+//     0005 marks the lane dirty. A trial posted from a stale checkout, on an older yardstick
+//     that already has an eligible trial, changes nothing.
+//   * Any other change: the triggers of migration 0005 mark the lane dirty when other flags or
+//     the current yardstick may move (the trial was a step, is eligible now and changed its
+//     position, speedup or yardstick, or was the first eligible trial of its yardstick).
+//   * settleStepsStmts, last in every batch that writes trials, sets each dirty lane's current
+//     yardstick, walks the lane again from its first trial and clears the mark. That reads the
+//     lane's eligible trials on the yardstick about once: the rare path.
 // ---------------------------------------------------------------------------
 
 /**
  * Sets one trial's own flag from the latest step before it. Earlier flags never depend on
- * later trials. Correct for a new trial, and a no-op for an unchanged one.
+ * later trials. Correct for a new trial on a lane that is not dirty, and a no-op for an
+ * unchanged one. A dirty lane is walked again by settleStepsStmts in the same batch.
  */
 function stepSelfStmt(db: D1DatabaseLike, id: string): D1PreparedStatement {
   return db
     .prepare(
       `UPDATE nodes SET frontier_step = CASE WHEN ${sqlStepEligible()}
+         AND yardstick = (SELECT l.yardstick FROM lane_stats AS l WHERE l.lane = nodes.lane)
          AND coalesce(speedup >= ${STEP_FACTOR} * (
            SELECT p.speedup FROM nodes AS p INDEXED BY idx_nodes_steps
            WHERE p.lane = nodes.lane AND p.frontier_step = 1 AND (p.created_at, p.id) < (nodes.created_at, nodes.id)
@@ -923,19 +933,52 @@ function stepSelfStmt(db: D1DatabaseLike, id: string): D1PreparedStatement {
 }
 
 /**
- * Walks every dirty lane from step to step and toggles each flag that differs from the walk.
- * The walk starts before the lane's first trial with a bar of 0. From each step it seeks the
- * first eligible trial after it whose speedup clears the bar, so the searches together read
- * each graded trial of the lane about once. Reads no row when no lane is dirty. Must equal the
- * recompute statement of migration 0005's BACKFILL block.
+ * Sets each dirty lane's current yardstick. Lists the lane's yardsticks that have an eligible
+ * trial (one seek of idx_nodes_eligible each), takes the first eligible trial of each (one more
+ * seek) and keeps the yardstick whose first trial is the newest. When the yardstick changes it
+ * counts the lane's graded trials on the new one again (lane_stats.standard). Reads no row when
+ * no lane is dirty. Must equal the first recompute statement of migration 0005's BACKFILL block.
+ */
+const SQL_SETTLE_YARDSTICK = `WITH RECURSIVE ys(lane, yardstick) AS (
+    SELECT lane, '' FROM lane_stats INDEXED BY idx_lane_stats_dirty WHERE steps_dirty = 1
+    UNION ALL
+    SELECT ys.lane, (
+      SELECT e.yardstick FROM nodes AS e INDEXED BY idx_nodes_eligible
+      WHERE e.lane = ys.lane AND e.yardstick > ys.yardstick
+        AND ${sqlStepEligible("e.")}
+      ORDER BY e.yardstick LIMIT 1)
+    FROM ys WHERE ys.yardstick IS NOT NULL
+  ),
+  cur(lane, yardstick) AS MATERIALIZED (
+    SELECT d.lane, (
+      SELECT ys.yardstick FROM ys JOIN nodes AS f ON f.id = (
+        SELECT e.id FROM nodes AS e INDEXED BY idx_nodes_eligible
+        WHERE e.lane = ys.lane AND e.yardstick = ys.yardstick
+          AND ${sqlStepEligible("e.")}
+        ORDER BY e.created_at, e.id LIMIT 1)
+      WHERE ys.lane = d.lane ORDER BY f.created_at DESC, f.id DESC LIMIT 1)
+    FROM lane_stats AS d INDEXED BY idx_lane_stats_dirty WHERE d.steps_dirty = 1
+  )
+UPDATE lane_stats SET yardstick = cur.yardstick,
+  standard = (SELECT COUNT(*) FROM nodes AS g INDEXED BY idx_nodes_lane_graded WHERE g.lane = cur.lane AND g.yardstick = cur.yardstick)
+FROM cur WHERE lane_stats.lane = cur.lane AND lane_stats.yardstick IS NOT cur.yardstick`;
+
+/**
+ * Walks every dirty lane from step to step on its current yardstick and toggles each flag that
+ * differs from the walk. The walk starts before the lane's first trial with a bar of 0. From
+ * each step it seeks the first eligible trial on the yardstick after it whose speedup clears the
+ * bar, so the searches together read each eligible trial of the yardstick about once. A marked
+ * trial the walk skipped, on any yardstick, is cleared. Reads no row when no lane is dirty. Must
+ * equal the second recompute statement of migration 0005's BACKFILL block.
  */
 const SQL_SETTLE_STEPS = `UPDATE nodes SET frontier_step = 1 - frontier_step WHERE id IN (
-  WITH RECURSIVE walk(lane, created_at, id, speedup) AS (
-    SELECT lane, '', '', 0 FROM lane_stats INDEXED BY idx_lane_stats_dirty WHERE steps_dirty = 1
+  WITH RECURSIVE walk(lane, yardstick, created_at, id, speedup) AS (
+    SELECT lane, yardstick, '', '', 0 FROM lane_stats INDEXED BY idx_lane_stats_dirty WHERE steps_dirty = 1
     UNION ALL
-    SELECT n.lane, n.created_at, n.id, n.speedup FROM walk AS w JOIN nodes AS n ON n.id = (
-      SELECT p.id FROM nodes AS p INDEXED BY idx_nodes_lane_graded
-      WHERE p.lane = w.lane AND (p.created_at, p.id) > (w.created_at, w.id) AND p.speedup >= w.speedup * ${STEP_FACTOR}
+    SELECT n.lane, w.yardstick, n.created_at, n.id, n.speedup FROM walk AS w JOIN nodes AS n ON n.id = (
+      SELECT p.id FROM nodes AS p INDEXED BY idx_nodes_eligible
+      WHERE p.lane = w.lane AND p.yardstick = w.yardstick AND (p.created_at, p.id) > (w.created_at, w.id)
+        AND p.speedup >= w.speedup * ${STEP_FACTOR}
         AND ${sqlStepEligible("p.")}
       ORDER BY p.created_at, p.id LIMIT 1)
   )
@@ -946,6 +989,7 @@ const SQL_SETTLE_STEPS = `UPDATE nodes SET frontier_step = 1 - frontier_step WHE
 
 function settleStepsStmts(db: D1DatabaseLike): D1PreparedStatement[] {
   return [
+    db.prepare(SQL_SETTLE_YARDSTICK),
     db.prepare(SQL_SETTLE_STEPS),
     db.prepare("UPDATE lane_stats INDEXED BY idx_lane_stats_dirty SET steps_dirty = 0 WHERE steps_dirty = 1"),
   ];
@@ -1246,37 +1290,45 @@ const NODE_DATA_COLUMNS = [
 const NODE_ADMIN_COLUMNS = ["real_stan_passed", "real_stan_total", "real_ess_per_cost"] as const;
 
 /**
- * The bar for the verification queue: the best speedup among the lane's replicated or verified
- * graded trials with source. Unreviewed or sourceless scores never set it, so nobody can block
- * the queue by posting an inflated claim. One row from a partial index.
+ * A queue item worth verifying now: its trial has a speedup on its lane's current yardstick. A
+ * trial re-posted ungraded, without a speedup or on another yardstick keeps its queue row, so
+ * the queue checks the trial as it is now. `n` is the trial.
  */
-async function reviewedBest(db: D1DatabaseLike, lane: string, excludeId: string): Promise<number | null> {
+const SQL_QUEUE_WORTH = "n.speedup > 0 AND n.yardstick = (SELECT l.yardstick FROM lane_stats AS l WHERE l.lane = n.lane)";
+
+/**
+ * The bar for the verification queue: the best speedup among the lane's replicated or verified
+ * trials with source on the given yardstick. Unreviewed or sourceless scores never set it, so
+ * nobody can block the queue by posting an inflated claim. One row from a partial index.
+ */
+async function reviewedBest(db: D1DatabaseLike, lane: string, yardstick: string, excludeId: string): Promise<number | null> {
   const row = await db
     .prepare(
       `SELECT speedup AS best FROM nodes INDEXED BY idx_nodes_reviewed_best
-       WHERE lane = ? AND state IN ('replicated', 'verified') AND source_sha IS NOT NULL AND yardstick IS NOT NULL
+       WHERE lane = ? AND yardstick = ? AND state IN ('replicated', 'verified') AND source_sha IS NOT NULL
          AND speedup IS NOT NULL AND id <> ?
        ORDER BY speedup DESC LIMIT 1`
     )
-    .bind(lane, excludeId)
+    .bind(lane, yardstick, excludeId)
     .first<{ best: number | null }>();
   return toFiniteNumber(row?.best);
 }
 
 /**
- * A kept graded trial with source and a speedup is queued when its lane has no reviewed trial
- * yet, or its speedup is at least STEP_MARGIN times the best reviewed one (the step rule).
+ * A kept trial with source and a speedup on its lane's current yardstick is queued when the lane
+ * has no reviewed trial on that yardstick yet, or its speedup is at least STEP_MARGIN times the
+ * best reviewed one (the step rule).
  */
 async function maybeEnqueue(db: D1DatabaseLike, node: NodeRecord): Promise<boolean> {
-  if (!KEPT_DECISIONS.has(node.decision) || node.speedup === null || !node.has_source || !node.standard) return false;
+  if (!KEPT_DECISIONS.has(node.decision) || node.speedup === null || !node.has_source || node.yardstick === null) return false;
   if (LOCKED_STATES.has(node.state) || FRONTIER_EXCLUDED_STATES.includes(node.state)) return false;
-  const best = await reviewedBest(db, node.lane, node.id);
+  const best = await reviewedBest(db, node.lane, node.yardstick, node.id);
   if (best !== null && node.speedup < STEP_FACTOR * best) return false;
   const now = nowIso();
   const res = await db
     .prepare(
       `INSERT OR IGNORE INTO verify_queue (node_id, lane, status, reason, attempts, created_at, updated_at)
-       SELECT id, lane, 'queued', 'beats_frontier', 0, ?, ? FROM nodes WHERE id = ?`
+       SELECT id, lane, 'queued', 'beats_frontier', 0, ?, ? FROM nodes AS n WHERE id = ? AND ${SQL_QUEUE_WORTH}`
     )
     .bind(now, now, node.id)
     .run();
@@ -1618,8 +1670,9 @@ const opFrontier: Op = async (ctx, args) => {
 };
 
 /**
- * One lane's chart: its graded trials oldest first, slim, with their step flags. One range
- * of idx_nodes_lane_graded plus the lane's counter row.
+ * One lane's chart: its graded trials on the lane's current yardstick oldest first, slim, with
+ * their step flags. One range of idx_nodes_lane_graded plus the lane's counter row. Trials on
+ * other yardsticks are not comparable, so they are left out.
  */
 const opLaneChart: Op = async (ctx, args) => {
   const db = ctx.env.DB;
@@ -1643,17 +1696,19 @@ const opLaneChart: Op = async (ctx, args) => {
       .prepare(
         `SELECT id, trial_id, run_id, created_at, speedup, soft_min_eff, decision, state, verified, frontier_step,
                 author, author_tier, agent_model, substr(coalesce(hypothesis, title), 1, ?) AS title
-         FROM nodes INDEXED BY idx_nodes_lane_graded WHERE lane = ? AND yardstick IS NOT NULL
+         FROM nodes INDEXED BY idx_nodes_lane_graded
+         WHERE lane = ? AND yardstick = (SELECT l.yardstick FROM lane_stats AS l WHERE l.lane = ?)
            ${after ? "AND (created_at, id) > (?, ?)" : ""}
          ORDER BY created_at, id LIMIT ?`
       )
-      .bind(LIMITS.chartTitleChars, lane, ...cursor, limit),
-    db.prepare("SELECT standard, steps FROM lane_stats WHERE lane = ?").bind(lane),
+      .bind(LIMITS.chartTitleChars, lane, lane, ...cursor, limit),
+    db.prepare("SELECT standard, steps, yardstick FROM lane_stats WHERE lane = ?").bind(lane),
   ]);
   const total = Number(stats[0]?.standard ?? 0);
   const last = rows.length === limit ? rows[rows.length - 1] : null;
   return out(200, {
     lane,
+    yardstick: (stats[0]?.yardstick as string | null | undefined) ?? null,
     points: rows.map((r) => ({
       id: r.id as string,
       trial_id: (r.trial_id as string | null) ?? null,
@@ -2428,7 +2483,7 @@ const opVerifyQueue: Op = async (ctx, args) => {
     .prepare(
       `SELECT q.*, n.* , q.lane AS q_lane, q.created_at AS q_created_at, q.updated_at AS q_updated_at
        FROM verify_queue q JOIN nodes n ON n.id = q.node_id
-       WHERE q.status IN (${placeholders(statuses.length)}) AND n.yardstick IS NOT NULL${laneClause}
+       WHERE q.status IN (${placeholders(statuses.length)}) AND ${SQL_QUEUE_WORTH}${laneClause}
        ORDER BY q.created_at ASC, q.node_id ASC LIMIT ?`
     )
     .bind(...params, limit)
@@ -2468,9 +2523,7 @@ const opVerifyClaim: Op = async (ctx, args) => {
     "(q.status = 'queued' OR (q.status = 'leased' AND q.lease_expires_at <= ?))",
     "n.state NOT IN ('verified', 'retracted')",
     "n.source_sha IS NOT NULL",
-    // Only a graded trial can move a frontier. A trial re-posted ungraded keeps its queue row,
-    // so the lease checks the trial as it is now.
-    "n.yardstick IS NOT NULL",
+    SQL_QUEUE_WORTH,
   ];
   const pickParams: unknown[] = [now];
   if (principal.role !== "admin") {
