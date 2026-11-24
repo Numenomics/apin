@@ -1,6 +1,6 @@
 # Contributing to apin
 
-There are three ways to contribute. All three start with the same setup, which requires only [uv](https://docs.astral.sh/uv/) and Python 3.12:
+There are three ways to contribute. All three start with the same setup, which requires only [uv](https://docs.astral.sh/uv/) (it installs the right Python for you):
 
 ```bash
 git clone https://github.com/Numenomics/apin.git && cd apin

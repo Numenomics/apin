@@ -184,7 +184,9 @@ def test_exploratory_trials_are_never_kept(lane):
     # same file is still a duplicate of an earlier trial at the same kind of setup.
     (lane_dir / "submission.py").write_text(_long(9.0))
     assert _trial(ar_dir, lane_dir, None)["decision"] != "discard_duplicate"
-    assert _trial(ar_dir, lane_dir, None)["decision"] == "discard_duplicate"
+    dup = _trial(ar_dir, lane_dir, None)
+    assert dup["decision"] == "discard_duplicate"
+    assert any("--allow-duplicate" in ln for ln in autoresearch.trial_report(dup, "r"))
     assert _trial(ar_dir, lane_dir, _long(9.5), cfg=explore)["decision"] == "discard_duplicate"
 
 
@@ -297,6 +299,8 @@ def test_a1_narrow_contract_and_novelty_filter(tmp_path):
     assert not (run_dir / "incumbent.py").exists() and not (lane_dir / "incumbent.py").exists()
 
     dry = run("dry run duplicate", dry_run=True)
+    # A dry run grades nothing, so its row carries no verdict of the checks.
+    assert "tier0_ok" not in dry and "tier1_ok" not in dry
     assert dry["decision"] == "dry_run_duplicate" and dry["is_duplicate"] is True
     assert len((run_dir / "ledger.jsonl").read_text().splitlines()) == 1
 
@@ -423,7 +427,8 @@ def test_evaluator_json_contract_and_research_brief_stall_detection(tmp_path):
     lane_dir = tmp_path / "lanes" / "A1"
     run_dir = lane_dir / "runs" / "r1"
     run_dir.mkdir(parents=True)
-    (lane_dir / "NEGATIVE_MEMORY.md").write_text("- Do not shrink step size below 1e-4\n")
+    (lane_dir / "NEGATIVE_MEMORY.md").write_text(
+        "- Do not shrink step size below 1e-4\n" + "".join(f"- refuted idea {i}\n" for i in range(40)))
     (run_dir / "RESEARCH_HANDOFF.md").write_text("Pinned commit abc123; funnel still bottleneck.\n")
 
     rows = [
@@ -460,7 +465,7 @@ def test_evaluator_json_contract_and_research_brief_stall_detection(tmp_path):
     brief = autoresearch.build_research_brief("A1", run_id="r1", autoresearch_dir=tmp_path, offline=True)
     assert "STALL DETECTED (5 consecutive non-kept trials)" in brief
     assert "speedup=1.0x" in brief and "Funnel=0.11" in brief
-    assert "Do not shrink step size below 1e-4" in brief
+    assert "Do not shrink step size below 1e-4" in brief and "refuted idea 39" in brief
     assert "Pinned commit abc123" in brief
     assert "--repeats" not in brief
 

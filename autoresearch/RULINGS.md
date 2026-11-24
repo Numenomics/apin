@@ -46,3 +46,9 @@ Versioned rulebook modeled on `openai/parameter-golf` (issue #402) and `KellerJo
 ### R-010 · PR Queue Cap & License Purity
 - **Status:** **Binding**
 - **Ruling:** Maximum **1 open record PR per contributor** (and 1 open promotion candidate per autoresearch lane). All submitted code must be permissively licensed (`BSD-3-Clause`, `MIT`, or `Apache-2.0`) and free of copyleft (`GPL`/`AGPL`) or unlicensed code.
+
+### R-011 · Carrying a Gradient Between `transition()` Calls
+- **Status:** **Banned**
+- **Ruling:** A sampler may not carry the gradient or the log density of its current position from one `transition()` call to the next. `chain` holds only `(position, aux)`, and `aux` must follow the law declared in `aux_spec`, independent of position. A stored gradient is a function of the position, so it cannot live in `aux`, and R-002 bans every other place to keep it. Each `transition()` call therefore pays for the first gradient it uses. Reusing a gradient within one call is **Legal**.
+- **Enforcement:** Partly automatic. The bill counts every density and gradient call, and the statistical independence test on `aux` in `invariance.py` can catch a gradient stored there. The replay check compares positions and `aux`, not call counts, so it does not catch a cache kept elsewhere: that part of the ban relies on review of the source. Each lane's starting code pays the same cost, so the speed-up over it is not affected.
+

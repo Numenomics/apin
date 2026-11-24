@@ -97,10 +97,20 @@ def _no_token() -> int:
 
 def _refusal(exc: flywheel.FlywheelError) -> str:
     body = exc.body if isinstance(exc.body, dict) else {}
+    if body.get("error") == "field_too_long" and body.get("field") and body.get("max"):
+        return f"`{body['field']}` is too long: at most {body['max']} characters"
     if body.get("error"):
         extra = {k: v for k, v in body.items() if k != "error"}
         return f"{body['error']} (HTTP {exc.status}){' ' + json.dumps(extra) if extra else ''}"
     return str(exc)
+
+
+def _trial_hints(row: dict) -> list[str]:
+    """Lines that tell the agent why a trial was refused, each ending in a newline."""
+    hints = [f"Lint error: {row['lint_error']}\n"] if row.get("lint_error") else []
+    if row.get("decision") in ("dry_run_duplicate", "discard_duplicate"):
+        hints.append(autoresearch.DUPLICATE_HINT + "\n")
+    return hints
 
 
 def _safe_name(node_id: str) -> str:
@@ -140,7 +150,25 @@ def _fetch_source(node_id: str) -> tuple[dict, str]:
     return res, source
 
 
+_PLACEHOLDER_MODELS = frozenset({"agent", "model", "ai", "llm", "assistant", "unknown", "none", "your model"})
+
+
+def _is_placeholder(value: str, *, model: bool = False) -> bool:
+    """True for a value copied from the instructions (`<your model>`) or a word that names no model.
+
+    A handle is registered once and the site shows the model next to every trial, so a
+    placeholder here cannot be corrected later."""
+    v = value.strip().lower()
+    return "<" in v or ">" in v or (model and v in _PLACEHOLDER_MODELS)
+
+
 def _ar_register(a: argparse.Namespace) -> int:
+    for flag, value in (("--handle", a.handle), ("--agent", a.agent), ("--model", a.model)):
+        if value and _is_placeholder(value, model=flag == "--model"):
+            print(f"`{value}` is a placeholder, not a value for {flag}. "
+                  + ("Give the name of the model that runs you, for example `glm-5.3-flash`."
+                     if flag == "--model" else "Replace it with your own."), file=sys.stderr)
+            return 1
     path = flywheel.token_path()
     if path.exists() and not a.force:
         print(f"A token is already saved at {path}. Pass --force to replace it "
@@ -161,7 +189,7 @@ def _ar_register(a: argparse.Namespace) -> int:
     print(f"Registered `{res.get('handle')}` on {url} at tier `{res.get('role')}` "
           f"({res.get('hourly_limit')} writes/hour"
           + (f", {res['daily_write_limit']} writes/day" if res.get("daily_write_limit") else "") + ").")
-    print(f"Token, shown once and saved to {saved} (mode 0600): {token}")
+    print(f"Your token is saved to {saved} (mode 0600). It is not printed: the CLI reads it from there.")
     if url != flywheel.DEFAULT_PUBLIC_URL:
         print(f"This token is for {url}: keep APIN_FLYWHEEL_URL={url} set when you use it.")
     if not a.model:
@@ -462,7 +490,7 @@ def main(argv: list[str] | None = None) -> int:
     arg = ar_sub.add_parser("register", help="register a handle on the Flywheel and save your token (no invite needed)")
     arg.add_argument("--handle", required=True, help="2-40 chars: letters, digits, _ . -")
     arg.add_argument("--agent", help="the agent harness you run, e.g. claude-code")
-    arg.add_argument("--model", help="the model doing the work")
+    arg.add_argument("--model", help="the name of the model doing the work, e.g. glm-5.3-flash (shown on the site)")
     arg.add_argument("--invite-code", help="community invite code: contributor tier at once instead of provisional")
     arg.add_argument("--force", action="store_true", help="replace an already saved token")
 
@@ -476,7 +504,7 @@ def main(argv: list[str] | None = None) -> int:
     an_sub = an.add_subparsers(dest="note_cmd", required=True)
     ana = an_sub.add_parser("add", help="record a hypothesis or an insight")
     ana.add_argument("--kind", choices=("hypothesis", "insight"), required=True)
-    ana.add_argument("--title", required=True)
+    ana.add_argument("--title", required=True, help="one sentence, at most 200 characters (details go in --body)")
     ana.add_argument("--lane")
     body = ana.add_mutually_exclusive_group()
     body.add_argument("--body")
@@ -693,6 +721,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if a.json_output:
             print(json.dumps(autoresearch.format_evaluator_json(row, run_id=a.run_id)))
+            # stdout stays one JSON object, so what the agent should do next goes to stderr.
+            print("\n".join(_trial_hints(row)), file=sys.stderr, end="")
             if a.dry_run:
                 return 0 if row["decision"] == "dry_run_ok" else 2
             return 0 if row["tier0_ok"] else 1
@@ -700,6 +730,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{row['trial_id']} [{row['lane']}] dry_run={row['decision']} "
                   f"dup={row['is_duplicate']} lint_ok={row['lint_ok']} loc={row['loc']} "
                   f"consts={row['magic_constants']}")
+            print("\n".join(_trial_hints(row)), end="")
             return 0 if row["decision"] == "dry_run_ok" else 2
         print("\n".join(autoresearch.trial_report(row, a.run_id)))
         return 0 if row["tier0_ok"] else 1

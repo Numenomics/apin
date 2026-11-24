@@ -153,9 +153,10 @@ def test_cli_register_saves_token_once_and_refuses_to_clobber(
     assert fake.calls[0]["body"] == {"handle": "ada", "agent": "claude-code", "model": "opus"}
     assert _isolated.read_text().strip() == "apfw_secret_once"
     assert stat.S_IMODE(_isolated.stat().st_mode) == 0o600
-    out = capsys.readouterr().out
-    assert out.count("apfw_secret_once") == 1
-    assert "provisional" in out
+    # The token goes to the file only. An agent's transcript is not a place for it.
+    captured = capsys.readouterr()
+    assert "apfw_secret_once" not in captured.out + captured.err
+    assert "provisional" in captured.out and str(_isolated) in captured.out
 
     assert cli.main(["autoresearch", "register", "--handle", "ada2"]) == 1
     assert "--force" in capsys.readouterr().err
@@ -166,6 +167,14 @@ def test_cli_register_saves_token_once_and_refuses_to_clobber(
     err = capsys.readouterr().err
     assert "registration_ip_cap" in err
     assert _isolated.read_text().strip() == "apfw_secret_once"
+
+    # A placeholder copied from the instructions is refused before anything is sent.
+    sent = len(fake.calls)
+    for args in (["--handle", "ada4", "--model", "<your model>"], ["--handle", "ada4", "--model", "Agent"],
+                 ["--handle", "<handle>", "--model", "opus"], ["--handle", "ada4", "--agent", "<your harness>"]):
+        assert cli.main(["autoresearch", "register", "--force", *args]) == 1
+        assert "placeholder" in capsys.readouterr().err
+    assert len(fake.calls) == sent
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +251,22 @@ def test_cli_eval_passes_combines_and_fork_of(monkeypatch: pytest.MonkeyPatch, c
     assert rc == 0
     assert seen["combines"] == ["A3:x:T0004", "A2:y:T0001", "A4:z:T0002"]
     assert seen["fork_of"] == ["A1:w:T0007"]
+
+
+def test_cli_eval_says_why_a_trial_was_refused_in_text_and_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dry = {"trial_id": "T0002", "lane": "A1", "dry_run": True, "decision": "dry_run_duplicate", "is_duplicate": True,
+           "lint_ok": False, "lint_error": "import os is not allowed", "loc": 3, "magic_constants": 0}
+    monkeypatch.setattr(autoresearch, "evaluate_lane_trial", lambda lane, hypothesis, **kw: dry)
+    assert cli.main(["autoresearch", "eval", "--lane", "A1", "--hypothesis", "h", "--dry-run"]) == 2
+    out = capsys.readouterr().out
+    assert "import os is not allowed" in out and "--allow-duplicate" in out and "tier1" not in out
+    # With --json, stdout is one JSON object and the reasons go to stderr.
+    assert cli.main(["autoresearch", "eval", "--lane", "A1", "--hypothesis", "h", "--dry-run", "--json"]) == 2
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["valid"] is False
+    assert "import os is not allowed" in captured.err and "--allow-duplicate" in captured.err
 
 
 def test_evaluate_lane_trial_records_extra_parents_in_ledger(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -329,6 +354,11 @@ def test_cli_note_add_list_set_state_and_trial_set_state(
     assert fake.calls[-1]["body"] == {"kind": "hypothesis", "title": "Robust Fisher", "lane": "A1",
                                       "body": "long body", "node_ids": ["A1:r:T0002", "A1:r:T0003"]}
     assert "note_1" in capsys.readouterr().out
+
+    # A title over the limit is refused in plain words.
+    fake.on("POST", "/api/notes", lambda c: _http_error(400, {"error": "field_too_long", "field": "title", "max": 200}))
+    assert cli.main(["autoresearch", "note", "add", "--kind", "insight", "--title", "x" * 201]) == 1
+    assert "`title` is too long: at most 200 characters" in capsys.readouterr().err
 
     assert cli.main(["autoresearch", "note", "list", "--lane", "A1", "--kind", "hypothesis", "--state", "open"]) == 0
     assert fake.calls[-1]["query"] == {"lane": "A1", "kind": "hypothesis", "state": "open", "limit": "20"}
