@@ -3,7 +3,7 @@
 # Do not build this file against the repository root. Build it with
 #   uv run python scripts/build_harbor_base.py
 # which stages a sealed build context (an allowlist: harness, models, data, codex,
-# lane documents, the frozen starting code of every lane, pyproject.toml, uv.lock)
+# lane documents, the starting code and public yardstick of every lane, pyproject.toml, uv.lock)
 # and builds apin-harbor-base:<release> from it.
 
 FROM python:3.12-slim

@@ -31,6 +31,11 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from harness import grade  # noqa: E402
+
 ENTRY_POINTS = ("adapt", "adapt_metric", "adapt_transport")
 
 
@@ -64,11 +69,10 @@ def rng_copy(source: str, k: int) -> str:
 
 def _job(args: tuple[str, str, str, dict, str]) -> dict:
     lane, label, path, cfg, out_json = args
-    verify = _load_verify()
     t0 = time.perf_counter()
     work = Path(out_json).with_suffix(".work")
     # The raw gate: no confirmation run, so the table shows how often a single pass rejects.
-    score = verify.score_file(Path(path), lane, cfg, work, confirm=False)
+    score = grade.score_file(Path(path), lane, cfg, work, confirm=False)
     rec = {"lane": lane, "label": label, "file": path, "config": cfg, "wall_s": round(time.perf_counter() - t0, 1),
            **{k: score.get(k) for k in ("valid", "tier0_ok", "tier1_ok", "soft_min_eff", "per_repeat_soft_min",
                                          "per_repeat_by_class", "by_class", "error", "failed_targets")}}
@@ -153,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--extra", default="reference,frontier",
                     help="also score these tests/ files (comma list of reference, frontier; empty for none)")
-    ap.add_argument("--seed", type=int, default=None, help="default: the verifier seed")
+    ap.add_argument("--seed", type=int, default=None, help="default: the hidden verifier seed")
     ap.add_argument("--out-dir", type=Path, default=ROOT / "harbor" / "calibration")
     a = ap.parse_args(argv)
 

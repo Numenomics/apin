@@ -1,14 +1,29 @@
-# Optimize warm-start & diffeomorphic nonlinear transport under fixed latent HMC judge
+# Improve a transport map for a fixed latent HMC kernel
 
-Optimize `adapt_transport()`, `forward()`, `pullback_grad()`, and `inverse()` in `/app/autoresearch/lanes/A4/submission.py` (latent-space HMC and automatic finite-difference Jacobian + round-trip inverse verification are owned by `harness/judge.py`). Evolve a fast diffeomorphic transport map (e.g. whitening, Sinh-Arcsinh tail warps, triangular funnel/banana unwarping) maximizing dual-horizon `soft_min_eff` across `dims=(6,20)`.
-
-> **Scoring note:** `soft_min_eff` is a **$p = -4$ power mean** over per-class geometric means, so the **weakest target class dominates**. Check `CLASS_METRIC` after each trial and lift the worst class without regressing it.
+The file `/app/autoresearch/lanes/A4/submission.py` defines a transport map: `adapt_transport()`, `forward()`, `pullback_grad()` and `inverse()`. The judge in `harness/judge.py` runs HMC in the latent space of your map, and it checks the Jacobian and the round trip through `inverse()` itself. Find a map that makes the latent target easy, for example by whitening, tail warps such as sinh-arcsinh, or triangular maps that unwarp funnels and bananas. It must work in 6 and 20 dimensions.
 
 ## Rules
-- Read `/app/autoresearch/lanes/A4/program.md`, `/app/autoresearch/RULINGS.md`, and `/app/codex/INDEX.yaml`.
-- Edit **ONLY** `/app/autoresearch/lanes/A4/submission.py`. Never modify `harness/`, `models/`, or `data/`.
-- Iterate locally using:
-  ```bash
-  uv run apin autoresearch eval --lane A4 --run-id harbor_dev --dims 6,20 --repeats 2 --no-queue --hypothesis "<one falsifiable sentence>"
-  ```
-- Final grading runs your `/app/autoresearch/lanes/A4/submission.py` against the frozen baseline on **hidden held-out seeds**; reward = `cand_soft_min / baseline_soft_min` (or `0.0` on any invariance/replay failure).
+
+- Edit only `/app/autoresearch/lanes/A4/submission.py`.
+- Do not change `harness/`, `models/`, `data/` or any other file in `/app/autoresearch/lanes/A4/`.
+- Use only the log density and gradient that the oracle gives you. Do not try to identify the target.
+- The sampler must leave the target distribution exactly invariant. A biased kernel fails the checks.
+- Read `/app/autoresearch/lanes/A4/program.md`, `/app/autoresearch/RULINGS.md` and `/app/codex/INDEX.yaml` before you start.
+
+## How to measure
+
+Run this after every change:
+
+```bash
+uv run apin autoresearch eval --lane A4 --run-id harbor_dev --no-queue --hypothesis "<one sentence>"
+```
+
+It prints `METRIC speedup=<x>`, the speed-up of your file over the starting code on public seeds. The unchanged file scores 1.0. A difference under 5% is noise. The tool says whether a change beat your best kept version by at least 5% and keeps that version in `/app/autoresearch/lanes/A4/runs/harbor_dev/incumbent.py`.
+
+The score is a soft minimum over the target classes, so the weakest class sets it. A large gain on an easy class can vanish behind a small loss on the hardest one. Check the `CLASS_METRIC` lines after every run and work on the lowest class.
+
+## How you are graded
+
+When you finish, the same grader scores the file left at `/app/autoresearch/lanes/A4/submission.py`, with hidden seeds in place of the public ones. Tuning to the public seeds will not carry over. The hidden seeds draw different targets, so expect the two speed-ups to differ by about a tenth. A sampler that fails a validity check scores zero, so the last file you leave in place must be one the tool reported as valid. The leaderboard ranks your speed-up over the starting code. The reward is your file's score divided by the score of a Stan-style reference sampler on the same hidden seeds, or 0 if the file fails a check.
+
+There is no time or token limit to save. Keep trying new ideas until several different ideas in a row bring no gain. Then stop with the best valid version in place.

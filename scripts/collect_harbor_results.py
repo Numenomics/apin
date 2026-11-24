@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PRICING = ROOT / "benchmarks" / "pricing.json"
 DEFAULT_OUT_JSON = ROOT / "flywheel" / "public" / "data" / "benchmark.json"
 TASKS_DIR = ROOT / "harbor" / "tasks"
-DEFAULT_RELEASE = "bench-v0.2.0"  # used for job directories whose name does not start with a release tag
+DEFAULT_RELEASE = "bench-v0.3.0"  # used for job directories whose name does not start with a release tag
 
 _TEST_CMD_RE = re.compile(
     r"\b(pytest|apin\s+(invariance|autoresearch\s+eval|score|track)|harbor/verify\.py|verify\.py)\b"
@@ -229,7 +229,7 @@ def parse_trial_dir(trial_dir: Path, pricing: dict[str, Any], *, release_tag: st
     ver_res = res.get("verifier_result") or {}
 
     task_id = str(res.get("task_name") or Path(str(task_cfg.get("path") or trial_dir.name)).name)
-    category = "rewind" if task_id.startswith("s3-") else "optimize"
+    category = "rewind" if task_id.startswith("s3-") else "optimize"  # bug-fix tasks of older releases
     agent_name = str(agent_cfg.get("name") or (res.get("agent_info") or {}).get("name") or "unknown")
     raw_model = str(agent_cfg.get("model_name") or "unknown")
     kwargs = agent_cfg.get("kwargs") or {}
@@ -391,8 +391,8 @@ def collect_jobs(jobs_dirs: list[Path], pricing: dict[str, Any], *, release_tag:
 
 
 def speedup_tasks(tasks_dir: Path = TASKS_DIR) -> list[str]:
-    """The benchmark's tasks: every task directory except the bug-fix tasks of lane S3."""
-    return sorted(p.parent.name for p in tasks_dir.glob("*/task.toml") if not p.parent.name.startswith("s3-"))
+    """The benchmark's tasks: every task directory under harbor/tasks/."""
+    return sorted(p.parent.name for p in tasks_dir.glob("*/task.toml"))
 
 
 def load_task_meta(task_ids: list[str], tasks_dir: Path = TASKS_DIR) -> dict[str, dict[str, Any]]:

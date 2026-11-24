@@ -6,7 +6,7 @@
   apin.mount("home");
 
   $("#join-prompt").innerHTML = cmd(apin.JOIN_PROMPT, { prose: true });
-  $("#way-bench").innerHTML = cmd("harbor run -p harbor/tasks -x 's3-*' \\\n  -a claude-code -m anthropic/claude-sonnet-4-5");
+  $("#way-bench").innerHTML = cmd("harbor run -p harbor/tasks \\\n  -a claude-code -m anthropic/claude-sonnet-4-5");
   $("#way-score").innerHTML = cmd("uv run apin invariance --sampler mine.py");
 
   /* ---------- the gate, running ----------

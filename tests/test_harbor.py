@@ -2,23 +2,21 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
 import os
-import subprocess
 import sys
 import tomllib
 from pathlib import Path
 
 import pytest
 
+from harness import grade
 from harness.models import ROOT
 
 HARBOR_TASKS_DIR = ROOT / "harbor" / "tasks"
 EXPECTED_TASKS = {
-    "s3-position-gated-mh",
-    "s3-missing-jacobian-a4",
-    "s3-unadjusted-ula",
     "a0-ground-up",
     "a1-preconditioning",
     "a2-funnel-dynamics",
@@ -51,104 +49,86 @@ def test_harbor_task_directories_and_schemas():
             assert sec in cfg, f"{name}: task.toml missing [{sec}]"
         assert cfg["agent"]["timeout_sec"] > 0
         assert cfg["verifier"]["timeout_sec"] > 0
-        assert cfg["metadata"]["category"] in ("rewind", "optimize")
+        assert cfg["metadata"]["category"] == "optimize"
 
 
-def test_harbor_verify_rewind_writes_rewards(tmp_path):
-    verify_py = ROOT / "harbor" / "verify.py"
-
-    # Base fixture fails -> reward 0.0
-    out_base = tmp_path / "base"
-    r_base = subprocess.run(
-        [
-            sys.executable, str(verify_py), "rewind",
-            "--task-id", "s3_missing_jacobian_transport",
-            "--submission", str(HARBOR_TASKS_DIR / "s3-missing-jacobian-a4" / "environment" / "baseline.py"),
-            "--out-dir", str(out_base),
-        ],
-        capture_output=True, text=True,
-    )
-    assert r_base.returncode == 1
-    assert float((out_base / "reward.txt").read_text().strip()) == 0.0
-    assert json.loads((out_base / "reward.json").read_text())["passed"] == 0
-
-    # Reference fix passes -> reward 1.0 (also verify hyphenated Harbor slug alias works)
-    out_ref = tmp_path / "ref"
-    r_ref = subprocess.run(
-        [
-            sys.executable, str(verify_py), "rewind",
-            "--task-id", "s3-missing-jacobian-a4",
-            "--submission", str(ROOT / "autoresearch" / "lanes" / "S3" / "fixtures" / "missing_jacobian_a4_ref.py"),
-            "--out-dir", str(out_ref),
-        ],
-        capture_output=True, text=True,
-    )
-    assert r_ref.returncode == 0, r_ref.stdout + r_ref.stderr
-    assert float((out_ref / "reward.txt").read_text().strip()) == 1.0
-    assert json.loads((out_ref / "reward.json").read_text())["passed"] == 1
-
-    # Verify default --out-dir outside Docker writes to cwd/verifier_out instead of crashing on /logs/verifier
-    r_def = subprocess.run(
-        [
-            sys.executable, str(verify_py), "rewind",
-            "--task-id", "s3-position-gated-mh",
-            "--submission", str(ROOT / "autoresearch" / "lanes" / "S3" / "fixtures" / "position_gated_ref.py"),
-        ],
-        cwd=tmp_path,
-        capture_output=True, text=True,
-    )
-    assert r_def.returncode == 0, r_def.stdout + r_def.stderr
-    assert float((tmp_path / "verifier_out" / "reward.txt").read_text().strip()) == 1.0
+@pytest.mark.parametrize("name", sorted(EXPECTED_TASKS))
+def test_instruction_names_the_measuring_command_and_the_reward(name):
+    lane = tomllib.loads((HARBOR_TASKS_DIR / name / "task.toml").read_text())["metadata"]["lane"]
+    text = (HARBOR_TASKS_DIR / name / "instruction.md").read_text()
+    cmd = f'uv run apin autoresearch eval --lane {lane} --run-id harbor_dev --no-queue --hypothesis "<one sentence>"'
+    assert cmd in text
+    assert "--dims" not in text and "--repeats" not in text
+    assert "hidden seeds" in text and "under 5% is noise" in text and "scores zero" in text
+    assert "Stan-style reference" in text and "baseline_soft_min" not in text
+    for bad in ("\u2014", ";", "**"):
+        assert bad not in text.split("```")[0] + text.split("```")[-1], (name, bad)
 
 
-def test_harbor_verify_records_solution_complexity_and_collector_builds_site_data(tmp_path):
+def _verify():
+    spec = importlib.util.spec_from_file_location("apin_harbor_verify_harbor", ROOT / "harbor" / "verify.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _stub_grader(monkeypatch, soft_min: float = 6e-4):
+    def score_file(path, lane, cfg, work_dir, **kw):
+        sm = soft_min if Path(path).name == "submission.py" else 2e-4
+        return {"valid": True, "tier0_ok": True, "tier1_ok": True, "soft_min_eff": sm,
+                "short_horizon_soft_min": sm, "long_horizon_soft_min": sm, "b2_max": 0.01,
+                "overhead_ratio": 1.0, "by_class": {"banana": sm}, "per_repeat_soft_min": [sm],
+                "confirmation": {"ran": False}, "failed_targets": [], "wall_s": 0.1}
+    monkeypatch.setattr(grade, "score_file", score_file)
+
+
+def test_verifier_default_out_dir_outside_docker(tmp_path, monkeypatch):
+    verify = _verify()
+    _stub_grader(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    sub = ROOT / "autoresearch" / "lanes" / "A2" / "start.py"
+    assert verify.main(["optimize", "--lane", "A2", "--submission", str(sub)]) == 0
+    assert float((tmp_path / "verifier_out" / "reward.txt").read_text().strip()) > 0
+
+
+def test_harbor_verify_records_solution_complexity_and_collector_builds_site_data(tmp_path, monkeypatch):
     """harbor/verify.py records LOC/cyclomatic/AST stats & archives submission.py; collector builds the site's benchmark data."""
-    import importlib.util
-
-    verify_py = ROOT / "harbor" / "verify.py"
+    verify = _verify()
+    _stub_grader(monkeypatch)
     out_dir = tmp_path / "job1" / "trial_a" / "verifier"
-    r = subprocess.run(
-        [
-            sys.executable, str(verify_py), "rewind",
-            "--task-id", "s3-position-gated-mh",
-            "--submission", str(ROOT / "autoresearch" / "lanes" / "S3" / "fixtures" / "position_gated_ref.py"),
-            "--out-dir", str(out_dir),
-        ],
-        capture_output=True, text=True,
-    )
-    assert r.returncode == 0, r.stdout + r.stderr
-    # reward.json must contain strictly numeric values for Harbor's verifier parser
+    sub = ROOT / "autoresearch" / "lanes" / "A0" / "submission.py"
+    assert verify.verify_optimize("A0", sub, out_dir) == 0
     reward_num = json.loads((out_dir / "reward.json").read_text())
     assert all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in reward_num.values()), reward_num
-    assert reward_num["reward"] == 1.0 and reward_num["passed"] == 1 and reward_num["solution_loc"] > 10
+    assert reward_num["passed"] == 1 and reward_num["solution_loc"] > 10
     details = json.loads((out_dir / "details.json").read_text())
     sol = details["solution"]
     assert sol["loc"] > 10 and sol["cyclomatic_complexity"] >= 1 and sol["ast_nodes"] > 20
     assert (out_dir / "submission.py").is_file()
 
-    # Create synthetic Harbor result.json + opencode-v2.txt next to verifier/ and test collector
     trial_dir = tmp_path / "job1" / "trial_a"
     agent_dir = trial_dir / "agent"
     agent_dir.mkdir(parents=True)
     (trial_dir / "result.json").write_text(json.dumps({
-        "trial_name": "s3-position-gated-mh__abc",
-        "task_name": "s3-position-gated-mh",
+        "trial_name": "a0-ground-up__abc",
+        "task_name": "a0-ground-up",
         "config": {
             "agent": {
                 "name": "opencode-v2",
                 "model_name": "zai-coding-plan/glm-5.3-flash",
                 "kwargs": {"reasoning_effort": "high"},
             },
-            "task": {"path": "harbor/tasks/s3-position-gated-mh"},
+            "task": {"path": "harbor/tasks/a0-ground-up"},
         },
         "started_at": "2026-11-22T04:00:00Z",
         "finished_at": "2026-11-22T04:01:30Z",
         "agent_execution": {"started_at": "2026-11-22T04:00:05Z", "finished_at": "2026-11-22T04:01:20Z"},
-        "verifier_result": {"rewards": {"reward": 1.0}},
+        "verifier_result": {"rewards": {"reward": reward_num["reward"]}},
     }))
     (agent_dir / "opencode-v2.txt").write_text("\n".join([
-        json.dumps({"type": "tool_use", "part": {"state": {"input": {"command": "uv run apin invariance --sampler /app/submission.py --dim 4"}}}}),
-        json.dumps({"type": "text", "part": {"text": "Replaced radial gate with state-independent 50/50 coin mixture."}}),
+        json.dumps({"type": "tool_use", "part": {"state": {"input": {"command": "uv run apin autoresearch eval --lane A0 --run-id harbor_dev --no-queue --hypothesis h"}}}}),
+        json.dumps({"type": "text", "part": {"text": "Replaced the random walk with windowed dense HMC."}}),
         json.dumps({"type": "step_finish", "part": {"tokens": {"input": 10000, "output": 500, "reasoning": 1200, "cache": {"read": 40000, "write": 2000}}, "cost": 0.0}}),
     ]) + "\n")
 
@@ -157,23 +137,34 @@ def test_harbor_verify_records_solution_complexity_and_collector_builds_site_dat
     assert spec and spec.loader
     spec.loader.exec_module(mod)
 
+    assert mod.DEFAULT_RELEASE == "bench-v0.3.0"
     pricing = json.loads((ROOT / "benchmarks" / "pricing.json").read_text())
-    data = mod.collect_jobs([tmp_path / "job1"], pricing, release_tag="bench-v0.2.0")
+    data = mod.collect_jobs([tmp_path / "job1"], pricing, release_tag=mod.DEFAULT_RELEASE)
     rel = data["releases"][0]
-    assert data["current_release"] == rel["release"] == "bench-v0.2.0"
+    assert data["current_release"] == rel["release"] == "bench-v0.3.0"
     assert len(rel["trials"]) == 1
     tr = rel["trials"][0]
     assert tr["input_tokens"] == 10000 and tr["cached_tokens"] == 40000 and tr["reasoning_tokens"] == 1200
     assert tr["cache_hit_rate"] == 0.8 and tr["test_runs"] == 1 and tr["tool_calls"] == 1 and tr["turns"] == 1
     assert tr["cost_usd"] > 0 and tr["agent_wall_s"] == 75.0
-    assert "coin mixture" in tr["approach_summary"]
-    assert tr["termination"] == "finished" and tr["outcome"] == "solved"
-    # A bug-fix attempt is kept as a record, but the benchmark is the speed-up tasks: it adds
-    # no leaderboard row and no task to the release.
-    assert tr["category"] == "rewind" and rel["leaderboard"] == [] and tr["task_id"] not in rel["tasks"]
-    assert rel["tasks"] == mod.speedup_tasks() and len(rel["tasks"]) == 5
+    assert "dense HMC" in tr["approach_summary"]
+    assert tr["termination"] == "finished" and tr["category"] == "optimize"
+    assert tr["outcome"] == details["outcome"] and tr["start_speedup"] == details["start_speedup"]
+    assert rel["tasks"] == mod.speedup_tasks() == sorted(EXPECTED_TASKS)
+    assert [r["config_key"] for r in rel["leaderboard"]] == [tr["config_key"]]
     # Every task on the page is described from its own task.toml, never restated by hand.
     assert mod.load_task_meta(["a1-preconditioning"])["a1-preconditioning"]["lane"] == "A1"
+
+
+def test_collector_reaggregates_the_published_benchmark_file(tmp_path):
+    """Older releases in the site's data file (with their bug-fix tasks) still aggregate."""
+    mod = _load_collector()
+    published = ROOT / "flywheel" / "public" / "data" / "benchmark.json"
+    if not published.is_file():
+        pytest.skip("no published benchmark data")
+    out = tmp_path / "x.json"
+    assert mod.main(["--out-json", str(out), "--input-json", str(published)]) == 0
+    assert json.loads(out.read_text())["releases"]
 
 
 def _load_collector():

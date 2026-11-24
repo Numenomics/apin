@@ -22,7 +22,7 @@ is close to an isotropic standard normal $\mathcal{N}(0, I_d)$ — **un-funnelin
 2. **Respect `autoresearch/RULINGS.md`:** `requires = ["grad"]` only; no unpriced `hvp`/`hess`, no inspecting `oracle` internals, no target fingerprinting.
 3. **Exact diffeomorphism verified automatically:** `harness/judge.py` checks round-trip invertibility (`T(T^{-1}(theta)) == theta`, `T^{-1}(T(z)) == z`), central finite-difference $\log|\det J_T(z)|$, and central finite-difference `pullback_grad(z, v) = J_T(z)^T v + \nabla_z \log|\det J_T(z)|` automatically in Tier 0 / `adapt`.
 4. **Canonical `transport_tuning`:** Must include `"eps"` (float in `[1e-8, 10.0]`) and finite numpy/JSON-serializable parameters (no lambdas/objects).
-5. **Simplicity regularizer:** Within $\pm 2\%$ soft-min ratio, fewer LOC, fewer magic constants, or $\ge 15\%$ lower `overhead_ratio` wins (`keep_simpler`).
+5. **Simplicity rule:** A candidate within 2% of the run's best speed-up is kept as `keep_simpler` when it has fewer lines, fewer magic constants or at least 15% lower `overhead_ratio` than the incumbent.
 
 ## 3. Priority Starting Hypotheses
 
@@ -34,7 +34,7 @@ is close to an isotropic standard normal $\mathcal{N}(0, I_d)$ — **un-funnelin
 ## 4. Evaluation
 
 ```bash
-uv run apin autoresearch eval --lane A4 --run-id <run_id> --dims 6,20 --repeats 2 --hypothesis "..."
+uv run apin autoresearch eval --lane A4 --run-id <run_id> --hypothesis "..."   # prints the speed-up over start.py
 # Real Stan posteriors (especially eight_schools_centered!):
 uv run apin run logdensity --label a4_cand --opt sampler=autoresearch/lanes/A4/submission.py --opt lane=A4 --models blr,eight_schools_noncentered,eight_schools_centered,gp_regr,garch11 --reps 3
 ```

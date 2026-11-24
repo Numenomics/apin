@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Stage a sealed build context for the Harbor benchmark base image and build it.
 
-The base image holds only what the eight Harbor tasks need to run
-`apin autoresearch eval` and `apin invariance` offline: the harness package, the
-lane documents the instructions name, the data the harness loads, and the locked
-dependencies. Everything else in the repository stays out, in particular evolved
-lane submissions, example samplers, tests, results, the hidden rewind fixtures,
-the verifier, and .git.
+The base image holds only what the five Harbor tasks need to run `apin autoresearch eval` and
+`apin invariance` offline: the harness package (with the grader and its public seeds), the lane
+documents the instructions name, each lane's starting code and public yardstick, the data the
+harness loads, and the locked dependencies. Everything else in the repository stays out, in
+particular evolved lane submissions, example samplers, tests, results, the verifier with its
+hidden seeds, the hidden frozen scores, and .git.
 
 Every lane's `submission.py` in the image is that lane's frozen starting code,
-taken from `harbor/tasks/<task>/environment/baseline.py` of the optimize task
-for that lane. Task images (FROM the base) then copy their own starting file.
+autoresearch/lanes/<LANE>/start.py, which is also in the image next to its yardstick.json. Task
+images (FROM the base) then copy their own starting file.
 
     uv run python scripts/build_harbor_base.py            # stage + build base image
-    uv run python scripts/build_harbor_base.py --tasks    # also build the 8 task images
+    uv run python scripts/build_harbor_base.py --tasks    # also build the 5 task images
     uv run python scripts/build_harbor_base.py --stage-only build/harbor-context
 """
 
@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TASKS_DIR = ROOT / "harbor" / "tasks"
 BASE_DOCKERFILE = ROOT / "harbor" / "base.Dockerfile"
 
-RELEASE = "bench-v0.2.0"
+RELEASE = "bench-v0.3.0"
 BASE_IMAGE = "apin-harbor-base"
 
 # Copied verbatim (files or whole directories), relative to the repository root.
@@ -44,8 +44,9 @@ ALLOWLIST = (
     "codex",
     "autoresearch/RULINGS.md",
 )
-# Copied for every lane that has an optimize task.
-LANE_DOCS = ("program.md", "NEGATIVE_MEMORY.md")
+# Copied for every lane that has a benchmark task: its documents, its starting code and its
+# public yardstick (the lane loop divides by it). Never its hidden frozen scores.
+LANE_FILES = ("program.md", "NEGATIVE_MEMORY.md", "start.py", "yardstick.json")
 # Never copied, even from inside an allowlisted directory.
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "runs", "archive", "incumbent.py", ".DS_Store")
 
@@ -58,18 +59,12 @@ def task_configs() -> dict[str, dict]:
     }
 
 
-def lane_baselines() -> dict[str, Path]:
-    """Lane -> frozen starting code, from the optimize task for that lane."""
-    out: dict[str, Path] = {}
-    for name, cfg in task_configs().items():
-        meta = cfg.get("metadata", {})
-        if meta.get("category") != "optimize":
-            continue
-        lane = meta["lane"]
-        if lane in out:
-            raise SystemExit(f"two optimize tasks claim lane {lane}")
-        out[lane] = TASKS_DIR / name / "environment" / "baseline.py"
-    return out
+def task_lanes() -> list[str]:
+    """Lanes that have a benchmark task."""
+    lanes = [cfg["metadata"]["lane"] for cfg in task_configs().values()]
+    if len(set(lanes)) != len(lanes):
+        raise SystemExit("two tasks claim the same lane")
+    return sorted(lanes)
 
 
 def stage(dest: Path) -> Path:
@@ -85,14 +80,14 @@ def stage(dest: Path) -> Path:
         else:
             (dest / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest / rel)
-    for lane, baseline in sorted(lane_baselines().items()):
+    for lane in task_lanes():
         lane_src = ROOT / "autoresearch" / "lanes" / lane
         lane_dst = dest / "autoresearch" / "lanes" / lane
         lane_dst.mkdir(parents=True)
-        for doc in LANE_DOCS:
-            if (lane_src / doc).is_file():
-                shutil.copy2(lane_src / doc, lane_dst / doc)
-        shutil.copy2(baseline, lane_dst / "submission.py")
+        for name in LANE_FILES:
+            if (lane_src / name).is_file():
+                shutil.copy2(lane_src / name, lane_dst / name)
+        shutil.copy2(lane_src / "start.py", lane_dst / "submission.py")
     shutil.copy2(BASE_DOCKERFILE, dest / "Dockerfile")
     return dest
 

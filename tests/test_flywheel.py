@@ -242,6 +242,8 @@ def test_seed_from_apin_generates_valid_sql(tmp_path: Path) -> None:
             "hypothesis": "Improved A1 with 'quoted' note",
             "codex_refs": ["fisher-low-rank"],
             "soft_min_eff": 0.0011,
+            "speedup": 1.27,
+            "yardstick": "A1:judge-1:r8",
             "ratio_vs_incumbent": 2.75,
             "overhead_ratio": 5.1,
             "b2_max": 0.12,
@@ -307,13 +309,13 @@ def test_seed_from_apin_generates_valid_sql(tmp_path: Path) -> None:
     assert conn.execute("SELECT lane, run_id, trials, kept, archived FROM run_stats").fetchall() == [
         ("A1", "glm53_a1_1h", 3, 2, 1)
     ]
-    # seed.sql ends with migration 0004's backfill: only T0002 ran on A1's standard dims [6, 20],
-    # so it is the lane's one frontier step, and the lane counters agree.
-    flags = conn.execute("SELECT id, standard, frontier_step FROM nodes ORDER BY id").fetchall()
+    # seed.sql ends with migration 0005's backfill: only T0002 was graded, so it is the lane's
+    # one frontier step, and the lane counters agree.
+    flags = conn.execute("SELECT id, yardstick IS NOT NULL, frontier_step, speedup FROM nodes ORDER BY id").fetchall()
     assert flags == [
-        ("A1:glm53_a1_1h:T0001", 0, 0),
-        ("A1:glm53_a1_1h:T0002", 1, 1),
-        ("A1:glm53_a1_1h:T0003", 0, 0),
+        ("A1:glm53_a1_1h:T0001", 0, 0, None),
+        ("A1:glm53_a1_1h:T0002", 1, 1, 1.27),
+        ("A1:glm53_a1_1h:T0003", 0, 0, None),
     ]
     assert conn.execute("SELECT standard, steps FROM lane_stats WHERE lane = 'A1'").fetchone() == (1, 1)
     assert seed_mod.flag_backfill_sql() in seed_sql
@@ -323,8 +325,8 @@ def test_seed_from_apin_generates_valid_sql(tmp_path: Path) -> None:
 def test_seed_from_apin_writes_the_flag_backfill_for_the_rollout_repair(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """--backfill-sql writes the BACKFILL block alone. Applied after a deploy, it repairs the
-    trials the old Worker wrote between `migrations apply` and `deploy`, and it is idempotent."""
+    """--backfill-sql writes the BACKFILL block alone. It recomputes the step flags of trials
+    written without them, with the 5% margin, and it is idempotent."""
     seed_mod = _load_seed_module()
     out = tmp_path / "backfill.sql"
     seed_mod.main(["--backfill-sql", str(out)])
@@ -337,33 +339,35 @@ def test_seed_from_apin_writes_the_flag_backfill_for_the_rollout_repair(
     conn.executescript((REPO_ROOT / "flywheel" / "schema.sql").read_text(encoding="utf-8"))
     for mig in sorted((REPO_ROOT / "flywheel" / "migrations").glob("*.sql")):
         conn.executescript(mig.read_text(encoding="utf-8"))
-    # Trials as the old Worker writes them: neither flag set.
+    # Trials written straight into the table: no step flag set.
     rows = [
-        ("A1:r:T1", "A1", "keep", 0.01, "[6, 20]", "2026-01-01T00:01:00Z"),
-        ("A1:r:T2", "A1", "keep", 0.03, "[6, 20]", "2026-01-01T00:02:00Z"),
-        ("A1:r:T3", "A1", "keep", 0.02, "[6, 20]", "2026-01-01T00:03:00Z"),
-        ("A1:r:T4", "A1", "keep", 0.09, "[6]", "2026-01-01T00:04:00Z"),
-        ("S1:r:T1", "S1", "discard_tier1", 0.5, None, "2026-01-01T00:01:00Z"),
-        ("S1:r:T2", "S1", "keep_simpler", 0.2, None, "2026-01-01T00:02:00Z"),
+        ("A1:r:T1", "A1", "keep", 1.0, "y", "2026-01-01T00:01:00Z"),
+        ("A1:r:T2", "A1", "keep", 1.03, "y", "2026-01-01T00:02:00Z"),
+        ("A1:r:T3", "A1", "keep", 1.05, "y", "2026-01-01T00:03:00Z"),
+        ("A1:r:T4", "A1", "keep", 9.0, None, "2026-01-01T00:04:00Z"),
+        ("A1:r:T5", "A1", "keep", None, "y", "2026-01-01T00:05:00Z"),
+        ("S1:r:T1", "S1", "discard_tier1", 5.0, "y", "2026-01-01T00:01:00Z"),
+        ("S1:r:T2", "S1", "keep_simpler", 2.0, "y", "2026-01-01T00:02:00Z"),
     ]
     conn.executemany(
-        "INSERT INTO nodes (id, lane, run_id, decision, soft_min_eff, dims, created_at) VALUES (?, ?, 'r', ?, ?, ?, ?)",
+        "INSERT INTO nodes (id, lane, run_id, decision, speedup, yardstick, created_at) VALUES (?, ?, 'r', ?, ?, ?, ?)",
         rows,
     )
-    assert conn.execute("SELECT SUM(standard) + SUM(frontier_step) FROM nodes").fetchone() == (0,)
+    assert conn.execute("SELECT SUM(frontier_step) FROM nodes").fetchone() == (0,)
     for _ in range(2):
         conn.executescript(sql)
-        flags = conn.execute("SELECT id, standard, frontier_step FROM nodes ORDER BY id").fetchall()
+        flags = conn.execute("SELECT id, yardstick IS NOT NULL, frontier_step FROM nodes ORDER BY id").fetchall()
         assert flags == [
             ("A1:r:T1", 1, 1),
-            ("A1:r:T2", 1, 1),
-            ("A1:r:T3", 1, 0),
+            ("A1:r:T2", 1, 0),
+            ("A1:r:T3", 1, 1),
             ("A1:r:T4", 0, 0),
+            ("A1:r:T5", 1, 0),
             ("S1:r:T1", 1, 0),
             ("S1:r:T2", 1, 1),
         ]
         stats = conn.execute("SELECT lane, standard, steps, steps_dirty FROM lane_stats ORDER BY lane").fetchall()
-        assert stats == [("A1", 3, 2, 0), ("S1", 2, 1, 0)]
+        assert stats == [("A1", 4, 2, 0), ("S1", 2, 1, 0)]
     conn.close()
 
 
@@ -389,6 +393,8 @@ def test_token_only_defaults_to_public_url_and_post_trial_row(monkeypatch: pytes
             "lane": "A4",
             "hypothesis": "Try sinh warp",
             "decision": "keep",
+            "speedup": 1.27,
+            "yardstick": "A4-0123456789ab",
             "soft_min_eff": 0.0008,
             "dims": [6, 20],
             "candidate_sha": "abc123",
@@ -403,6 +409,8 @@ def test_token_only_defaults_to_public_url_and_post_trial_row(monkeypatch: pytes
     assert calls[0]["body"]["id"] == "A4:r1:T0002"
     assert calls[0]["body"]["parent_id"] == "A4:r1:T0001"
     assert calls[0]["body"]["verified"] == 0
+    assert calls[0]["body"]["speedup"] == 1.27 and calls[0]["body"]["yardstick"] == "A4-0123456789ab"
+    assert calls[0]["body"]["soft_min_eff"] == 0.0008
 
 
 def test_cli_claim_and_release_report_next_step(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

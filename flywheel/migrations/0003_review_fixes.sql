@@ -6,8 +6,6 @@
 --   * lane_stats: one row per lane, kept current by triggers on run_stats, so totals, lane
 --     lists and counts read a row per lane instead of a row per run.
 --   * author_stats + flywheel_counters: the number of distinct trial authors as one row.
---   * idx_nodes_reviewed_eff: the best replicated/verified trial with source per lane, the
---     bar a new trial must beat to enter the verification queue.
 --
 -- Additive for data. Apply with: npx wrangler d1 migrations apply apin-flywheel --remote
 -- Like 0002, the triggers avoid conflict clauses (an outer statement's conflict mode
@@ -15,8 +13,6 @@
 -- `+soft_min_eff` keeps the run-order lookups on idx_nodes_run_created: without the unary
 -- plus SQLite may pick a (lane, soft_min_eff) index and read every scored trial of the lane per write.
 
-CREATE INDEX IF NOT EXISTS idx_nodes_reviewed_eff ON nodes (lane, soft_min_eff)
-  WHERE state IN ('replicated', 'verified') AND source_sha IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_run_stats_run ON run_stats (run_id);
 
 -- lane_stats ----------------------------------------------------------------
@@ -230,13 +226,5 @@ CREATE INDEX IF NOT EXISTS idx_nodes_lane_newest ON nodes (lane, created_at, id)
 CREATE INDEX IF NOT EXISTS idx_nodes_model_newest ON nodes (agent_model, created_at, id);
 DROP INDEX IF EXISTS idx_nodes_model_created;
 
--- Frontier pick per lane, in the exact frontier order, so it reads one index row even when the
--- lane has no eligible trial or a long score tie. The expressions and WHERE clauses must match
--- laneFrontiers() in src/index.ts. They replace idx_nodes_lane_eff (0002), dropped here.
-CREATE INDEX IF NOT EXISTS idx_nodes_frontier_pick ON nodes
-  (lane, soft_min_eff DESC, verified DESC, (coalesce(real_stan_passed, -1)) DESC, created_at DESC, id DESC)
-  WHERE state NOT IN ('retracted', 'disputed') AND (verified = 1 OR decision IN ('keep', 'keep_baseline', 'keep_simpler'));
-CREATE INDEX IF NOT EXISTS idx_nodes_frontier_any ON nodes
-  (lane, soft_min_eff DESC, verified DESC, (coalesce(real_stan_passed, -1)) DESC, created_at DESC, id DESC)
-  WHERE state NOT IN ('retracted', 'disputed');
+-- idx_nodes_lane_eff (0002) is no longer read.
 DROP INDEX IF EXISTS idx_nodes_lane_eff;

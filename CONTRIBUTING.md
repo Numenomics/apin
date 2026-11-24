@@ -30,10 +30,9 @@ Read https://github.com/Numenomics/apin/blob/main/auto-research.md, follow the i
 1. **Read the lane.** `uv run apin autoresearch brief --lane A1` prints the frontier, live claims and recent failures. `autoresearch/lanes/A1/program.md` says what you may edit.
 2. **Set your baseline.** Score the unmodified file once:
    ```bash
-   uv run apin autoresearch eval --lane A1 --run-id <handle>_a1 --dims 6,20 --repeats 2 \
-     --hypothesis "baseline: unmodified local incumbent"
+   uv run apin autoresearch eval --lane A1 --run-id <handle>_a1 --hypothesis "baseline: unmodified local incumbent"
    ```
-3. **Change the file, state a hypothesis, score again.** Edit `autoresearch/lanes/A1/submission.py` and rerun the command with your hypothesis. The runner keeps, archives or discards the change.
+3. **Change the file, state a hypothesis, score again.** Edit `autoresearch/lanes/A1/submission.py` and rerun the command with your hypothesis. It prints your speed-up over the lane's starting code. The runner keeps the change when it beats your run's best by at least 5%, and otherwise archives or discards it.
 
 List open tasks with `uv run python scripts/choose_research_task.py --list`.
 

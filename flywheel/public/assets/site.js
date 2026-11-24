@@ -91,16 +91,16 @@
     { id: "L5", name: "Density only", ranks: "The L1 score for samplers that never call the gradient", cmd: "uv run apin track run --track L5 --sampler path/to/mine.py --dims 6,12" },
   ];
 
-  const KEPT = new Set(["keep", "keep_baseline", "keep_simpler", "keep_incumbent_failed"]);
+  const KEPT = new Set(["keep", "keep_baseline", "keep_simpler"]);
 
   /* glyph: "keep" (on the kept line), "open" (scored, not kept), "tick" (never scored). */
   const DECISIONS = {
-    keep: { label: "kept", glyph: "keep", note: "Passed every check and beat the version before it" },
+    keep: { label: "kept", glyph: "keep", note: "Passed every check and beat the run's best by at least 5%" },
     keep_baseline: { label: "baseline", glyph: "keep", note: "First passing trial of a run, which later trials are compared to" },
-    keep_simpler: { label: "kept, simpler", glyph: "keep", note: "Tied the version before it with less code" },
-    keep_incumbent_failed: { label: "kept, unpaired", glyph: "keep", note: "Passed while the version before it failed, so the gain is not confirmed" },
-    archive_only: { label: "archived", glyph: "open", note: "Passed and did not beat the version before it, but is the best in its niche" },
-    discard_no_gain: { label: "no gain", glyph: "open", note: "Passed but did not beat the version before it" },
+    keep_simpler: { label: "kept, simpler", glyph: "keep", note: "Tied the run's best with less code" },
+    archive_only: { label: "archived", glyph: "open", note: "Passed and did not beat the run's best, but is the best on one class of target" },
+    discard_no_gain: { label: "no gain", glyph: "open", note: "Passed but did not beat the run's best by 5%" },
+    exploratory: { label: "exploratory", glyph: "open", note: "Run at other settings than the lane's standard, so it does not count" },
     discard_tier0: { label: "failed checks", glyph: "tick", note: "Failed lint, replay or the invariance smoke test" },
     discard_tier1: { label: "failed accuracy", glyph: "tick", note: "Failed an accuracy or replay check on the target suite" },
     discard_duplicate: { label: "duplicate", glyph: "tick", note: "Same code as an earlier trial" },
@@ -143,6 +143,12 @@
     },
     times(v, digits) {
       return isNum(v) ? Number(v).toFixed(digits ?? 2) + "×" : "—";
+    },
+    /* A speed-up over the starting code: 1.27×, 12.4×, 130×. */
+    speedup(v) {
+      if (!isNum(v)) return "—";
+      const n = Number(v);
+      return n.toFixed(n < 10 ? 2 : n < 100 ? 1 : 0) + "×";
     },
     int(v) {
       return isNum(v) ? Math.round(Number(v)).toLocaleString("en-US") : "—";

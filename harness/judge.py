@@ -1,9 +1,8 @@
 """Read-only judge module (Karpathy 3-file contract) & Lane A1 fixed HMC transition kernel.
 
 Contract (`autoresearch/lanes/A1/program.md`):
-  - `harness/judge.py` is read-only to autoresearch agents; its digest (together with
-    `logdensity.py`, `ipc.py`, `shapes.py`, `invariance.py`, and `autoresearch.py`) is
-    recorded on every trial row in `ledger.jsonl`.
+  - `harness/judge.py` is read-only to autoresearch agents. `judge_digest()` covers every
+    module that can change a score and is recorded on every trial row and frozen score.
   - Lane A1 submissions (`autoresearch/lanes/A1/submission.py`) implement ONLY:
 
         def adapt_metric(oracle, budget, rng) -> tuple[metric_tuning, x0]
@@ -45,11 +44,25 @@ A1_EPS_MAX = 10.0
 
 
 def judge_digest() -> str:
-    """Deterministic SHA-256 prefix over all read-only judge modules."""
-    from . import autoresearch, invariance, ipc, shapes
+    """SHA-256 prefix over the modules that can change a score.
+
+    A frozen score (a lane's yardstick.json, the benchmark's tests/frozen_scores.json) is valid
+    only under the digest it was scored with, so the digest must cover exactly the code that
+    turns a file into numbers or into a pass or fail:
+      - logdensity.py: the oracle, budget and cost accounting, the import lint
+      - ipc.py and sandbox.py: the isolated workers, their replay and their confinement (a change
+        to what a worker may do can turn a valid sampler into a crash)
+      - shapes.py: the target distributions
+      - invariance.py: the invariance, rank and mixing checks and the efficiency measure
+      - judge.py: the lane seams and the fixed kernels of lanes A1 and A4
+      - grade.py: the suites, the seeds, the scoring configuration and the confirmation rule
+    The lane loop (autoresearch.py: ledger, decisions, archive, output) is left out. Its
+    bookkeeping never changes a score, and hashing it would void every frozen score on each edit.
+    """
+    from . import grade, invariance, ipc, sandbox, shapes
 
     h = hashlib.sha256()
-    for mod in (logdensity, ipc, shapes, invariance, sys.modules[__name__], autoresearch):
+    for mod in (logdensity, ipc, sandbox, shapes, invariance, sys.modules[__name__], grade):
         h.update(Path(mod.__file__).read_bytes())
     return h.hexdigest()[:16]
 

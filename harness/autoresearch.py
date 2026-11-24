@@ -1,21 +1,26 @@
-"""Slice 5 Autoresearch runner: Karpathy 3-file contract + paired MAP-Elites archive.
+"""The lane trial loop: `apin autoresearch eval`.
 
-Hardened post-review & post-dogfood:
-  - Read-only `harness/judge.py` owns Lane A1's fixed transition kernel (`adapt_metric` seam).
-  - Snapshots `submission.py` at trial start so mid-eval edits never race with active trials.
-  - Pre-eval novelty filter rejects both exact-file duplicates and AST-equivalent
-    (comment/whitespace-only) re-submissions against `ledger.jsonl` (with `--dry-run` pre-check).
-  - Per-`--run-id` isolated `incumbent.py` and `archive/` (concurrent run IDs never collide).
-  - Built-in FIFO file-locked evaluation queue (`harness/queue.py`) serializes CPU-bound evals
-    across parallel agents while letting reasoning and editing overlap freely.
-  - Tier 0 & Tier 1 run untrusted submissions inside isolated out-of-process brokered workers
-    (`harness/ipc.py`) with `adapt()` cost amortized to a realistic sampling horizon
-    (`horizon_steps=500`, ~1:5 warmup:sampling) so warmup-starving MALA hacks cannot game Tier 1.
-  - Multi-seed `--repeats` paired evaluation reduces coin-flip single-seed variance.
-  - Simplicity regularizer credits fewer LOC, fewer magic constants, or >=15% lower overhead
-    within `±NOISE_MARGIN` (aligned with `program.md` Rule 2.5).
-  - Records full trial config (`dim`, `seed`, `repeats`, `k_steps`, `adapt_draws`, `horizon_steps`,
-    `magic_constants`, `queue_wait_s`) in both `ledger.jsonl` and `results.tsv`.
+A trial is: pre-checks (lint, duplicate filter, snapshot, evaluation queue), then one run of the
+grader (harness/grade.py) on the candidate at the standard public configuration, then a decision
+from the candidate's speed-up over the lane's starting code.
+
+Each lane directory holds its frozen starting code (`start.py`) and the frozen public-seed score
+of that code (`yardstick.json`, written by scripts/freeze_harbor_references.py). The speed-up is
+candidate soft-min / yardstick soft-min. It is deterministic for a given file and comparable across
+runs and agents, because every trial is scored on the same seeds and configuration.
+
+Decisions (KEPT_DECISIONS in harness/flywheel.py are the kept ones):
+  keep_baseline    the first graded trial of a run (or of a run under a new yardstick)
+  keep             speed-up >= IMPROVEMENT_MARGIN x the best speed-up kept so far in this run
+  keep_simpler     within TIE_BAND of that best and simpler than the current incumbent
+  archive_only     no overall gain, but a new best score for one target class (MAP-Elites cell)
+  discard_no_gain  anything else that passed every check
+  discard_tier0 / discard_tier1   failed a check (Tier 1 after the confirmation recheck)
+  discard_duplicate / discard_error
+  exploratory      passed every check at a non-standard configuration: never kept, no speed-up
+
+Every run keeps its own `incumbent.py`, `archive/`, `ledger.jsonl` and `results.tsv` under
+`autoresearch/lanes/<LANE>/runs/<run-id>/`.
 """
 
 from __future__ import annotations
@@ -26,23 +31,36 @@ import hashlib
 import json
 import math
 import shutil
-import subprocess
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import numpy as np
-
-from . import flywheel, invariance, ipc, judge, logdensity, queue, shapes
+from . import flywheel, grade, judge, logdensity, queue
+from .grade import IMPROVEMENT_MARGIN
 from .models import ROOT
 
-NOISE_MARGIN = 0.02  # +/- 2% tie band where simplicity regularizer breaks ties
+# Tie band for the simplicity rule. At the standard configuration, copies of one sampler that
+# differ only in their random numbers score within 2.5% of each other (p95 1.1%, the A/A
+# calibration in harbor/README.md). A candidate within 2% of the best is therefore
+# indistinguishable from it, and the simpler file wins.
+TIE_BAND = 0.02
+START_FILE = "start.py"
+YARDSTICK_FILE = "yardstick.json"
+# A rerun (`apin autoresearch verify-next`) uses the same grader on the same seeds, so it should
+# reproduce the posted speed-up exactly. The tolerance only absorbs floating-point differences
+# between machines.
+REPLICATION_TOLERANCE = 1e-3
 _TRIVIAL_CONSTS = frozenset({-1, 0, 1, 2, -1.0, 0.0, 1.0, 2.0})
 
 
-def _judge_digest() -> str:
-    return judge.judge_digest()
+class YardstickError(RuntimeError):
+    """The lane has no yardstick that matches today's judge, configuration and starting code."""
+
+
+def _sig(v, digits: int = 6) -> float | None:
+    if v is None or isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        return None
+    return float(f"{float(v):.{digits}g}")
 
 
 def _submission_stats(path: Path) -> tuple[str, str, int, int]:
@@ -70,18 +88,20 @@ def _load_ledger(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+TSV_COLUMNS = (
+    "trial_id", "timestamp", "candidate_sha", "loc", "magic_constants",
+    "dims", "seed", "repeats", "k_steps", "adapt_draws", "horizon_steps",
+    "tier0_ok", "tier1_ok", "speedup", "yardstick", "best_speedup", "ratio_vs_best",
+    "soft_min_eff", "short_horizon_soft_min", "long_horizon_soft_min", "median_adapt_cost",
+    "b2_max", "overhead_ratio", "queue_wait_s", "decision", "archive_cells",
+    "codex_refs", "hypothesis",
+)
+
+
 def _write_results_tsv(ledger_path: Path, tsv_path: Path) -> None:
     rows = _load_ledger(ledger_path)
-    cols = [
-        "trial_id", "timestamp", "candidate_sha", "loc", "magic_constants",
-        "dim", "dims", "seed", "repeats", "k_steps", "adapt_draws", "horizon_steps",
-        "tier0_ok", "tier1_ok", "incumbent_ok", "soft_min_eff", "incumbent_soft_min", "ratio_vs_incumbent",
-        "short_horizon_soft_min", "long_horizon_soft_min", "median_adapt_cost",
-        "b2_max", "overhead_ratio", "queue_wait_s", "decision", "archive_cells",
-        "codex_refs", "hypothesis",
-    ]
     with open(tsv_path, "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=cols, delimiter="\t", extrasaction="ignore")
+        w = csv.DictWriter(fh, fieldnames=TSV_COLUMNS, delimiter="\t", extrasaction="ignore")
         w.writeheader()
         for r in rows:
             flat = {
@@ -105,264 +125,52 @@ def _append_row(ledger_path: Path, tsv_path: Path, row: dict, *, run_id: str | N
     return row
 
 
-_LOAD_CHECK = (
-    "import sys; from pathlib import Path; from harness import judge, sandbox; "
-    "p = Path(sys.argv[1]); sandbox.confine_worker(p); judge.resolve_lane_submission(p, sys.argv[2] or None)"
-)
+# ---------------------------------------------------------------------------------------------
+# Yardstick
+# ---------------------------------------------------------------------------------------------
 
-
-def _load_check(sub_path: Path, lane: str | None) -> None:
-    """Check that a submission imports and exposes its lane's seam, in a confined child process.
-
-    A submission is untrusted code: a benchmark candidate, or another contributor's trial being
-    rerun. It must never be imported in this process, which computes the statistics and writes
-    the verdict, so the import happens in a child confined like the sampling workers."""
+def load_yardstick(lane: str, *, autoresearch_dir: Path = ROOT / "autoresearch", digest: str | None = None) -> dict:
+    """The lane's frozen public-seed score of its starting code. Raises YardstickError unless it
+    matches today's judge digest, the standard configuration and the bytes of `start.py`."""
+    lane_dir = Path(autoresearch_dir) / "lanes" / lane
+    path = lane_dir / YARDSTICK_FILE
+    fix = "Refreeze it: uv run python scripts/freeze_harbor_references.py --public-only --lanes " + lane
+    if not path.is_file():
+        raise YardstickError(f"lane {lane} has no {YARDSTICK_FILE}. {fix}")
     try:
-        res = subprocess.run(
-            [sys.executable, "-c", _LOAD_CHECK, str(Path(sub_path).resolve()), lane or ""],
-            capture_output=True, text=True, timeout=120, cwd=str(ROOT),
-        )
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError("submission did not finish importing within 120 s") from e
-    if res.returncode != 0:
-        lines = [ln for ln in res.stderr.strip().splitlines() if ln.strip()]
-        raise RuntimeError(lines[-1] if lines else f"submission failed to load (exit {res.returncode})")
+        yd = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise YardstickError(f"cannot read {path}: {e}") from e
+    digest = digest or judge.judge_digest()
+    start = lane_dir / START_FILE
+    problems = []
+    if yd.get("schema") != grade.YARDSTICK_SCHEMA or yd.get("lane") != lane or yd.get("role") != "start":
+        problems.append("wrong schema or lane")
+    if yd.get("judge_digest") != digest:
+        problems.append(f"judge digest {yd.get('judge_digest')} is not today's {digest}")
+    if yd.get("config") != grade.config():
+        problems.append("its configuration is not the standard one")
+    if start.is_file() and grade.sha256(start) != yd.get("sha256"):
+        problems.append(f"{START_FILE} changed after it was frozen")
+    if yd.get("id") != grade.yardstick_id(yd):
+        problems.append("its id does not match its contents")
+    if not grade.soft_min(yd):
+        problems.append("the starting code failed a check when it was frozen")
+    if problems:
+        raise YardstickError(f"the yardstick of lane {lane} is stale: {'; '.join(problems)}. {fix}")
+    return yd
 
 
-def _eval_tier0(
-    sub_path: Path,
-    seed: int,
-    work_dir: Path,
-    *,
-    lane: str | None = None,
-    horizon_steps: int = 500,
-) -> tuple[bool, dict]:
-    """Tier 0 fast reject: AST lint, lane seam, isolated ABI + replay, calibrated invariance smoke."""
-    try:
-        logdensity.check_imports(sub_path.read_text())
-        _load_check(sub_path, lane)
-    except Exception as e:
-        return False, {"stage": "load_lint", "error": str(e)}
-
-    # 1. Isolated 3-process ABI + frozen tuning + 5-step replay on a fresh rotated Gaussian (d=4)
-    g4 = shapes.IllCondGaussian(dim=4, seed=seed + 11, rotated=True, kappa=25.0)
-    try:
-        _, summary = ipc.execute_run_isolated(
-            g4, sub_path, logdensity.Budget(1, 20, 200_000, 30.0),
-            run_seed=seed + 13, work_dir=work_dir / "t0_abi", replay_count=5, lane=lane,
-        )
-    except Exception as e:
-        return False, {"stage": "abi_replay", "error": str(e)}
-
-    # 2. Isolated exact-draw invariance + dispersed-start mixing smoke on rotated Gaussian & small funnel
-    smoke_targets = [
-        shapes.IllCondGaussian(dim=6, seed=seed + 17, rotated=True, kappa=25.0),
-        shapes.NealsFunnel(dim=4, seed=seed + 19, rotated=False, v_sd=2.0),
-    ]
-    checks = []
-    for tgt in smoke_targets:
-        res = invariance.check_target_invariance(
-            tgt, sub_path, seed=seed + 23, n_chains=48, k_steps=12, adapt_draws=80,
-            alpha=0.0005, lane=lane, isolated=True, horizon_steps=horizon_steps,
-        )
-        checks.append({
-            "target": tgt.family, "passed": res.passed, "max_z": round(res.max_z, 3),
-            "z_thresh": round(res.z_threshold, 3), "b2_max": round(res.b2_max, 5),
-            "move": round(res.mean_movement_sd, 4), "adapt_cost": round(res.adapt_cost, 1),
-            "reason": res.reason,
-        })
-        if not res.passed:
-            return False, {"stage": "invariance_smoke", "checks": checks, "error": res.reason}
-
-    return True, {"stage": "passed", "tuning_bytes": summary["adapt"]["tuning_bytes"], "checks": checks}
+def _yardstick_score(yd: dict) -> dict:
+    """A frozen yardstick read as a grader result, for a file byte-identical to start.py."""
+    out = {k: yd[k] for k in grade.FROZEN_KEYS if k in yd}
+    out["wall_s"] = 0.0
+    return out
 
 
-def _build_tier1_suite(dim: int, seed: int, dims: tuple[int, ...] | None = None) -> list[shapes.AnalyticTarget]:
-    """Fresh aligned + rotated Tier 1 suite, optionally with a higher-dim scaling ladder."""
-    ladder = tuple(dims) if dims else (int(dim),)
-    d0 = ladder[0]
-    targets: list[shapes.AnalyticTarget] = [
-        shapes.IllCondGaussian(d0, seed + 1, rotated=False, kappa=50.0),
-        shapes.IllCondGaussian(d0, seed + 2, rotated=True, kappa=50.0),
-        shapes.NealsFunnel(d0, seed + 3, rotated=True, v_sd=2.0),
-        shapes.Banana(d0, seed + 4, rotated=True),
-        shapes.HybridRosenbrock(d0, seed + 5, rotated=False, b=5.0),
-        shapes.StudentT(d0, seed + 6, rotated=False, nu=1.5),
-        shapes.StudentT(d0, seed + 7, rotated=True, nu=3.0),
-        shapes.GaussianMixture(d0, seed + 8, rotated=True, separation=2.5),
-    ]
-    for idx, d_hi in enumerate(ladder[1:], start=1):
-        off = 20 * idx
-        targets.extend([
-            shapes.IllCondGaussian(d_hi, seed + off + 1, rotated=True, kappa=50.0),
-            shapes.NealsFunnel(d_hi, seed + off + 2, rotated=True, v_sd=2.0),
-            shapes.Banana(d_hi, seed + off + 3, rotated=True),
-            shapes.HybridRosenbrock(d_hi, seed + off + 4, rotated=False, b=5.0),
-            shapes.StudentT(d_hi, seed + off + 5, rotated=True, nu=3.0),
-        ])
-    return targets
-
-
-def _eval_tier1_suite(
-    sub_path: Path,
-    suite: list[shapes.AnalyticTarget],
-    seed: int,
-    *,
-    n_chains: int = 64,
-    k_steps: int = 20,
-    adapt_draws: int = 120,
-    lane: str | None = None,
-    horizon_steps: int = 500,
-) -> dict:
-    """Evaluate a submission across a fresh aligned + rotated analytic suite via isolated workers."""
-    per_target = []
-    by_class: dict[str, list[float]] = {}
-    by_class_short: dict[str, list[float]] = {}
-    by_class_long: dict[str, list[float]] = {}
-    all_ok = True
-    b2_worst = 0.0
-    oh_vals = []
-    adapt_vals = []
-    for i, tgt in enumerate(suite):
-        res = invariance.check_target_invariance(
-            tgt, sub_path, seed=seed + 100 * i, n_chains=n_chains, k_steps=k_steps,
-            adapt_draws=adapt_draws, lane=lane, isolated=True, horizon_steps=horizon_steps,
-        )
-        # Dual-horizon geometric mean (H_short=150 & H_long=1000) rewards genuine fast warmup
-        # without letting warmup starvation hijack steady-state sampling quality.
-        eff_val = res.dual_horizon_eff if res.dual_horizon_eff > 0 else res.empirical_efficiency
-        per_target.append({
-            "family": tgt.family, "dim": tgt.dim, "rotated": tgt.rotated, "passed": res.passed,
-            "emp_eff": eff_val, "short_horizon_eff": res.short_horizon_eff,
-            "long_horizon_eff": res.long_horizon_eff, "b2_max": res.b2_max,
-            "max_z": res.max_z, "z_threshold": res.z_threshold,
-            "adapt_cost": res.adapt_cost, "adapt_cost_amortized": res.adapt_cost_amortized,
-            "cost_per_chain": res.cost_per_chain, "overhead_ratio": res.overhead_ratio,
-            "reason": res.reason,
-        })
-        if not res.passed:
-            all_ok = False
-        b2_worst = max(b2_worst, res.b2_max)
-        oh_vals.append(res.overhead_ratio)
-        adapt_vals.append(res.adapt_cost)
-        if not tgt.multimodal:
-            by_class.setdefault(tgt.family, []).append(eff_val)
-            by_class_short.setdefault(tgt.family, []).append(res.short_horizon_eff)
-            by_class_long.setdefault(tgt.family, []).append(res.long_horizon_eff)
-
-    class_geo = {
-        c: float(np.exp(np.mean(np.log(np.maximum(vs, 1e-18))))) for c, vs in by_class.items()
-    }
-    class_short = {
-        c: float(np.exp(np.mean(np.log(np.maximum(vs, 1e-18))))) for c, vs in by_class_short.items()
-    }
-    class_long = {
-        c: float(np.exp(np.mean(np.log(np.maximum(vs, 1e-18))))) for c, vs in by_class_long.items()
-    }
-    soft_min = invariance.soft_min_power_mean(list(class_geo.values()), p=-4.0) if all_ok else 0.0
-    short_sm = invariance.soft_min_power_mean(list(class_short.values()), p=-4.0) if all_ok else 0.0
-    long_sm = invariance.soft_min_power_mean(list(class_long.values()), p=-4.0) if all_ok else 0.0
-    geomean = float(np.exp(np.mean(np.log(np.maximum(list(class_geo.values()), 1e-18))))) if class_geo else 0.0
-    return {
-        "passed": all_ok,
-        "soft_min_eff": soft_min,
-        "short_horizon_soft_min": short_sm,
-        "long_horizon_soft_min": long_sm,
-        "median_adapt_cost": float(np.median(adapt_vals)) if adapt_vals else 0.0,
-        "geomean_eff": geomean,
-        "b2_max": b2_worst,
-        "overhead_ratio": float(np.median(oh_vals)) if oh_vals else 0.0,
-        "by_class": class_geo,
-        "per_target": per_target,
-    }
-
-
-def _eval_tier1_multi(
-    sub_path: Path,
-    suites: list[tuple[int, list[shapes.AnalyticTarget]]],
-    *,
-    n_chains: int,
-    k_steps: int,
-    adapt_draws: int,
-    lane: str | None,
-    horizon_steps: int,
-) -> dict:
-    """Evaluate across one or more freshly seeded suites and aggregate via geometric mean."""
-    if len(suites) == 1:
-        rseed, suite = suites[0]
-        return _eval_tier1_suite(
-            sub_path, suite, seed=rseed + 1000, n_chains=n_chains, k_steps=k_steps,
-            adapt_draws=adapt_draws, lane=lane, horizon_steps=horizon_steps,
-        )
-    runs = [
-        _eval_tier1_suite(
-            sub_path, suite, seed=rseed + 1000, n_chains=n_chains, k_steps=k_steps,
-            adapt_draws=adapt_draws, lane=lane, horizon_steps=horizon_steps,
-        )
-        for rseed, suite in suites
-    ]
-    all_ok = all(r["passed"] for r in runs)
-    classes = sorted({c for r in runs for c in r["by_class"]})
-    by_class = {
-        c: float(np.exp(np.mean(np.log(np.maximum([r["by_class"][c] for r in runs if c in r["by_class"]], 1e-18)))))
-        for c in classes
-    }
-    soft_min = (
-        float(np.exp(np.mean(np.log(np.maximum([r["soft_min_eff"] for r in runs], 1e-18)))))
-        if all_ok else 0.0
-    )
-    short_sm = (
-        float(np.exp(np.mean(np.log(np.maximum([r["short_horizon_soft_min"] for r in runs], 1e-18)))))
-        if all_ok else 0.0
-    )
-    long_sm = (
-        float(np.exp(np.mean(np.log(np.maximum([r["long_horizon_soft_min"] for r in runs], 1e-18)))))
-        if all_ok else 0.0
-    )
-    geomean = float(np.exp(np.mean(np.log(np.maximum(list(by_class.values()), 1e-18))))) if by_class else 0.0
-    return {
-        "passed": all_ok,
-        "soft_min_eff": soft_min,
-        "short_horizon_soft_min": short_sm,
-        "long_horizon_soft_min": long_sm,
-        "median_adapt_cost": float(np.median([r["median_adapt_cost"] for r in runs])),
-        "geomean_eff": geomean,
-        "b2_max": max(r["b2_max"] for r in runs),
-        "overhead_ratio": float(np.median([r["overhead_ratio"] for r in runs])),
-        "by_class": by_class,
-        "per_repeat": runs,
-        "per_target": [t for r in runs for t in r["per_target"]],
-    }
-
-
-def _eval_class_paired_multi(
-    specialist_path: Path,
-    suites: list[tuple[int, list[shapes.AnalyticTarget]]],
-    cls_name: str,
-    *,
-    n_chains: int,
-    k_steps: int,
-    adapt_draws: int,
-    lane: str | None,
-    horizon_steps: int,
-) -> tuple[bool, float]:
-    """Evaluate an archived MAP-Elites specialist on the exact same class targets & seeds."""
-    vals = []
-    for rseed, suite in suites:
-        for i, tgt in enumerate(suite):
-            if tgt.family != cls_name:
-                continue
-            res = invariance.check_target_invariance(
-                tgt, specialist_path, seed=rseed + 1000 + 100 * i, n_chains=n_chains, k_steps=k_steps,
-                adapt_draws=adapt_draws, lane=lane, isolated=True, horizon_steps=horizon_steps,
-            )
-            if not res.passed:
-                return False, 0.0
-            vals.append(res.dual_horizon_eff if res.dual_horizon_eff > 0 else res.empirical_efficiency)
-    if not vals:
-        return False, 0.0
-    return True, float(np.exp(np.mean(np.log(np.maximum(vals, 1e-18)))))
-
+# ---------------------------------------------------------------------------------------------
+# Decisions
+# ---------------------------------------------------------------------------------------------
 
 def _overhead_bucket(ratio: float) -> str:
     if ratio < 1.0:
@@ -374,7 +182,7 @@ def _overhead_bucket(ratio: float) -> str:
 
 def _is_simpler(cand_loc: int, inc_loc: int, cand_consts: int, inc_consts: int,
                 cand_oh: float, inc_oh: float) -> bool:
-    """Rule 2.5 simplicity regularizer: fewer LOC, or (loc <= inc) with fewer magic constants or >=15% lower overhead."""
+    """Simplicity rule: fewer LOC, or (loc <= inc) with fewer magic constants or >=15% lower overhead."""
     if cand_loc < inc_loc:
         return True
     if cand_loc <= inc_loc and cand_consts < inc_consts:
@@ -384,19 +192,69 @@ def _is_simpler(cand_loc: int, inc_loc: int, cand_consts: int, inc_consts: int,
     return False
 
 
+def decide(speedup: float, best: float | None, simpler: bool) -> str:
+    """Decision for a graded trial that passed every check, given the best speed-up kept so far
+    in this run (None for the run's first graded trial)."""
+    if best is None:
+        return "keep_baseline"
+    if speedup >= IMPROVEMENT_MARGIN * best:
+        return "keep"
+    if speedup >= (1.0 - TIE_BAND) * best and simpler:
+        return "keep_simpler"
+    return "discard_no_gain"
+
+
+def _run_state(prior: list[dict], yardstick: str | None) -> tuple[dict | None, dict | None]:
+    """(best kept row, incumbent row) among this run's kept rows graded against `yardstick`."""
+    kept = [r for r in prior if r.get("decision") in flywheel.KEPT_DECISIONS and yardstick is not None
+            and r.get("yardstick") == yardstick and isinstance(r.get("speedup"), (int, float))]
+    if not kept:
+        return None, None
+    best = kept[0]
+    for r in kept[1:]:
+        if r["speedup"] > best["speedup"]:
+            best = r
+    return best, kept[-1]
+
+
+def _update_archive(archive_dir: Path, snap_path: Path, score: dict, *, trial_id: str, cand_sha: str,
+                    yardstick: str, speedup: float, hypothesis: str) -> list[str]:
+    """MAP-Elites cells (target class x overhead bucket): store the candidate where it beats the
+    cell's specialist by IMPROVEMENT_MARGIN. Every graded trial is scored on the same seeds, so the
+    stored class scores compare directly and the specialist is never rescored."""
+    cells = []
+    oh_tag = _overhead_bucket(float(score.get("overhead_ratio") or 0.0))
+    for cls_name, cls_score in (score.get("by_class") or {}).items():
+        cell_dir = archive_dir / f"{cls_name}__{oh_tag}"
+        meta_file, spec_file = cell_dir / "best.json", cell_dir / "submission.py"
+        store = True
+        if meta_file.is_file() and spec_file.is_file():
+            prev = json.loads(meta_file.read_text())
+            if prev.get("candidate_sha") == cand_sha:
+                store = False
+            elif prev.get("yardstick") == yardstick and isinstance(prev.get("score"), (int, float)):
+                store = cls_score >= IMPROVEMENT_MARGIN * float(prev["score"])
+        if store:
+            cell_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(snap_path, spec_file)
+            meta_file.write_text(json.dumps({
+                "trial_id": trial_id, "candidate_sha": cand_sha, "score": cls_score, "yardstick": yardstick,
+                "speedup": speedup, "hypothesis": hypothesis,
+            }, indent=1))
+            cells.append(cell_dir.name)
+    return cells
+
+
+# ---------------------------------------------------------------------------------------------
+# One trial
+# ---------------------------------------------------------------------------------------------
+
 def evaluate_lane_trial(
     lane: str,
     hypothesis: str,
     *,
+    cfg: dict | None = None,
     codex_refs: list[str] | None = None,
-    seed: int | None = None,
-    dim: int = 6,
-    dims: tuple[int, ...] | None = None,
-    n_chains: int = 48,
-    k_steps: int = 16,
-    adapt_draws: int = 100,
-    horizon_steps: int = 500,
-    repeats: int = 1,
     autoresearch_dir: Path = ROOT / "autoresearch",
     run_id: str = "default",
     allow_duplicate: bool = False,
@@ -406,12 +264,17 @@ def evaluate_lane_trial(
     combines: list[str] | None = None,
     fork_of: list[str] | None = None,
 ) -> dict:
-    """Run one complete Karpathy-ratchet + paired MAP-Elites autoresearch trial on `lane`.
+    """Run one trial of `lane` and return its ledger row.
 
-    ``combines`` / ``fork_of`` name Flywheel trial ids whose mechanism this candidate reuses
-    or whose source it started from; they are posted as extra parents next to the incumbent.
+    `cfg` defaults to the standard public configuration (grade.config()). Any other configuration
+    makes the trial exploratory: it is graded and recorded, but it gets no speed-up, is never kept
+    and never becomes the incumbent. ``combines`` / ``fork_of`` name Flywheel trial ids whose
+    mechanism this candidate reuses or whose source it started from. They are posted as extra
+    parents next to the incumbent.
     """
-    lane_dir = autoresearch_dir / "lanes" / lane
+    cfg = grade.config() if cfg is None else dict(cfg)
+    exploratory = not grade.is_standard(cfg)
+    lane_dir = Path(autoresearch_dir) / "lanes" / lane
     sub_path = Path(submission_path) if submission_path is not None else (lane_dir / "submission.py")
     if not sub_path.is_file():
         raise FileNotFoundError(f"missing editable submission at {sub_path}")
@@ -422,7 +285,6 @@ def evaluate_lane_trial(
     tsv_path = run_dir / "results.tsv"
     incumbent_path = run_dir / "incumbent.py"
     archive_dir = run_dir / "archive"
-    archive_dir.mkdir(parents=True, exist_ok=True)
 
     prior = _load_ledger(ledger_path)
     last_kept = next((r for r in reversed(prior) if r.get("decision") in flywheel.KEPT_DECISIONS), None)
@@ -432,23 +294,21 @@ def evaluate_lane_trial(
     parent_links = flywheel.parent_links(parent_node_id, combines=combines, fork_of=fork_of)
     extra_parents = [p for p in parent_links if p["relation"] != "incumbent"]
     trial_id = f"T{len(prior) + 1:04d}"
-    seed = int(seed if seed is not None else (20261120 + len(prior) * 97))
-    repeats = max(1, int(repeats))
+    digest = judge.judge_digest()
     t0 = time.perf_counter()
 
-    # Snapshot submission.py before any read/eval so concurrent mid-eval edits cannot race
-    raw_text = sub_path.read_text()
+    # Snapshot submission.py before any read or eval, so a concurrent edit cannot race the trial.
+    raw = sub_path.read_bytes()
+    raw_text = raw.decode("utf-8", errors="replace")
     if dry_run:
         snap_path = sub_path
-        cand_sha, cand_ast_sha, cand_loc, cand_consts = _submission_stats(sub_path)
     else:
         trial_work = run_dir / "trials" / trial_id
         trial_work.mkdir(parents=True, exist_ok=True)
         snap_path = trial_work / "submission_snapshot.py"
-        snap_path.write_text(raw_text)
-        cand_sha, cand_ast_sha, cand_loc, cand_consts = _submission_stats(snap_path)
+        snap_path.write_bytes(raw)
+    cand_sha, cand_ast_sha, cand_loc, cand_consts = _submission_stats(snap_path)
 
-    dim_ladder = tuple(int(x) for x in dims) if dims else (int(dim),)
     base_meta = {
         "trial_id": trial_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -457,21 +317,24 @@ def evaluate_lane_trial(
         "ast_sha": cand_ast_sha,
         "loc": cand_loc,
         "magic_constants": cand_consts,
-        "judge_digest": _judge_digest(),
-        "dim": dim_ladder[0],
-        "dims": list(dim_ladder),
-        "seed": seed,
-        "repeats": repeats,
-        "k_steps": int(k_steps),
-        "adapt_draws": int(adapt_draws),
-        "horizon_steps": int(horizon_steps),
+        "judge_digest": digest,
+        "dims": list(cfg["dims"]),
+        "seed": cfg["seed"],
+        "repeats": cfg["repeats"],
+        "n_chains": cfg["n_chains"],
+        "k_steps": cfg["k_steps"],
+        "adapt_draws": cfg["adapt_draws"],
+        "horizon_steps": cfg["horizon_steps"],
+        "exploratory": exploratory,
+        "yardstick": None,
+        "speedup": None,
         "hypothesis": hypothesis,
         "codex_refs": list(codex_refs or []),
     }
     if extra_parents:
         base_meta["parents"] = extra_parents
 
-    # Pre-eval novelty filter: reject exact duplicate OR AST-equivalent (comment/whitespace-only) diff
+    # Novelty filter: reject an exact duplicate or an AST-equivalent (comment or whitespace) change.
     is_dup = any(
         r.get("candidate_sha") == cand_sha or (r.get("ast_sha") and r.get("ast_sha") == cand_ast_sha)
         for r in prior
@@ -481,7 +344,7 @@ def evaluate_lane_trial(
         lint_error = None
         try:
             logdensity.check_imports(raw_text)
-            _load_check(snap_path, lane)
+            grade.load_check(snap_path, lane)
         except Exception as e:
             lint_error = str(e)
         return {
@@ -499,210 +362,178 @@ def evaluate_lane_trial(
             "wall_s": round(time.perf_counter() - t0, 3),
         }
 
-    if not allow_duplicate and is_dup:
-        row = {
-            **base_meta,
-            "tier0_ok": False, "tier1_ok": False, "queue_wait_s": 0.0,
-            "decision": "discard_duplicate",
-            "wall_s": round(time.perf_counter() - t0, 3),
-        }
+    def finish(row: dict) -> dict:
+        row["wall_s"] = round(time.perf_counter() - t0, 3)
         return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id,
                            parents=parent_links, source=raw_text)
 
+    if not allow_duplicate and is_dup:
+        return finish({**base_meta, "tier0_ok": False, "tier1_ok": False, "queue_wait_s": 0.0,
+                       "decision": "discard_duplicate"})
+
+    yd = None if exploratory else load_yardstick(lane, autoresearch_dir=autoresearch_dir, digest=digest)
+    best_row, inc_row = _run_state(prior, yd["id"] if yd else None)
+    best = float(best_row["speedup"]) if best_row else None
+    if yd is not None:
+        base_meta.update(yardstick=yd["id"], best_speedup=best,
+                         best_trial=best_row.get("trial_id") if best_row else None)
+
     with queue.eval_slot(f"autoresearch:{lane}/{run_id}/{trial_id}", enabled=use_queue) as queue_wait_s:
-        t0_ok, t0_info = _eval_tier0(
-            snap_path, seed=seed, work_dir=trial_work, lane=lane, horizon_steps=horizon_steps,
-        )
-        if not t0_ok:
-            row = {
-                **base_meta,
-                "tier0_ok": False, "tier0_info": t0_info, "tier1_ok": False,
-                "queue_wait_s": round(queue_wait_s, 3),
-                "decision": "discard_tier0",
-                "wall_s": round(time.perf_counter() - t0, 3),
-            }
-            return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id,
-                           parents=parent_links, source=raw_text)
-
-        # Tier 1: paired fresh suites for candidate AND incumbent on identical fresh seeds
-        suites = [(seed + r * 7919, _build_tier1_suite(dim_ladder[0], seed + r * 7919, dims=dim_ladder)) for r in range(repeats)]
-        try:
-            cand_res = _eval_tier1_multi(
-                snap_path, suites, n_chains=n_chains, k_steps=k_steps,
-                adapt_draws=adapt_draws, lane=lane, horizon_steps=horizon_steps,
-            )
-        except Exception as e:
-            row = {
-                **base_meta,
-                "tier0_ok": True, "tier1_ok": False, "queue_wait_s": round(queue_wait_s, 3),
-                "decision": "discard_error",
-                "error": f"{type(e).__name__}: {e}",
-                "wall_s": round(time.perf_counter() - t0, 3),
-            }
-            return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id,
-                           parents=parent_links, source=raw_text)
-
-        inc_sha = None
-        inc_ok: bool | None = None
-        if not incumbent_path.is_file():
-            inc_res = None
-            ratio = 1.0 if cand_res["passed"] else 0.0
-            decision = "keep_baseline" if cand_res["passed"] else "discard_tier1"
+        if yd is not None and grade.sha256(snap_path) == yd["sha256"]:
+            # The lane's own starting code: its score at this configuration is the yardstick.
+            score, graded_from = _yardstick_score(yd), "yardstick"
         else:
-            inc_sha, _, inc_loc, inc_consts = _submission_stats(incumbent_path)
-            inc_res = _eval_tier1_multi(
-                incumbent_path, suites, n_chains=n_chains, k_steps=k_steps,
-                adapt_draws=adapt_draws, lane=lane, horizon_steps=horizon_steps,
-            )
-            inc_ok = bool(inc_res["passed"])
-            inc_sm = inc_res["soft_min_eff"] if inc_ok else 0.0
-            cand_sm = cand_res["soft_min_eff"]
-            ratio = (cand_sm / inc_sm) if inc_sm > 0 else (math.inf if cand_sm > 0 else 0.0)
-            if not cand_res["passed"]:
-                decision = "discard_tier1"
-            elif not inc_ok:
-                decision = "keep_incumbent_failed"
-            elif ratio >= 1.0 + NOISE_MARGIN:
-                decision = "keep"
-            elif ratio >= 1.0 - NOISE_MARGIN and _is_simpler(
-                cand_loc, inc_loc, cand_consts, inc_consts,
-                cand_res["overhead_ratio"], inc_res["overhead_ratio"],
-            ):
-                decision = "keep_simpler"
-            else:
-                decision = "discard_no_gain"
+            graded_from = "grader"
+            try:
+                score = grade.score_file(snap_path, lane, cfg, trial_work / "grade")
+            except Exception as e:
+                return finish({**base_meta, "tier0_ok": False, "tier1_ok": False,
+                               "queue_wait_s": round(queue_wait_s, 3), "decision": "discard_error",
+                               "error": f"{type(e).__name__}: {e}"})
 
-        # Paired MAP-Elites specialist archive update (same fresh seeds for candidate vs existing specialist!)
-        archived_cells: list[str] = []
-        if cand_res["passed"]:
-            oh_tag = _overhead_bucket(cand_res["overhead_ratio"])
-            for cls_name, cls_score in cand_res["by_class"].items():
-                cell_key = f"{cls_name}__{oh_tag}"
-                cell_dir = archive_dir / cell_key
-                meta_file = cell_dir / "best.json"
-                spec_file = cell_dir / "submission.py"
-                should_store = False
-                if not meta_file.is_file() or not spec_file.is_file():
-                    should_store = True
-                else:
-                    prev_meta = json.loads(meta_file.read_text())
-                    prev_sha = prev_meta.get("candidate_sha")
-                    if prev_sha == cand_sha:
-                        should_store = False
-                    elif inc_res is not None and prev_sha == inc_sha and cls_name in inc_res["by_class"]:
-                        prev_paired = inc_res["by_class"][cls_name]
-                        should_store = cls_score > prev_paired * (1.0 + NOISE_MARGIN)
-                    else:
-                        prev_ok, prev_paired = _eval_class_paired_multi(
-                            spec_file, suites, cls_name, n_chains=n_chains, k_steps=k_steps,
-                            adapt_draws=adapt_draws, lane=lane, horizon_steps=horizon_steps,
-                        )
-                        should_store = (not prev_ok) or (cls_score > prev_paired * (1.0 + NOISE_MARGIN))
-                if should_store:
-                    cell_dir.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(snap_path, spec_file)
-                    meta_file.write_text(json.dumps({
-                        "trial_id": trial_id, "candidate_sha": cand_sha, "score": cls_score,
-                        "soft_min_eff": cand_res["soft_min_eff"], "hypothesis": hypothesis,
-                    }, indent=1))
-                    archived_cells.append(cell_key)
-            if decision == "discard_no_gain" and archived_cells:
+        sp = grade.speedup(score, yd) if yd is not None else None
+        if not score.get("tier0_ok"):
+            decision = "discard_tier0"
+        elif not score.get("valid") or score.get("unpaired") or (not exploratory and sp is None):
+            decision = "discard_tier1"
+        elif exploratory:
+            decision = "exploratory"
+        else:
+            simpler = inc_row is not None and _is_simpler(
+                cand_loc, int(inc_row.get("loc") or 0), cand_consts, int(inc_row.get("magic_constants") or 0),
+                float(score.get("overhead_ratio") or 0.0), float(inc_row.get("overhead_ratio") or 0.0))
+            decision = decide(sp, best, simpler)
+
+        archived: list[str] = []
+        if sp is not None:
+            archived = _update_archive(archive_dir, snap_path, score, trial_id=trial_id, cand_sha=cand_sha,
+                                       yardstick=yd["id"], speedup=sp, hypothesis=hypothesis)
+            if decision == "discard_no_gain" and archived:
                 decision = "archive_only"
-
-        if decision in ("keep", "keep_simpler", "keep_baseline", "keep_incumbent_failed"):
+        if decision in flywheel.KEPT_DECISIONS:
             shutil.copy2(snap_path, incumbent_path)
 
-    (trial_work / "metrics.json").write_text(
-        json.dumps({"tier0": t0_info, "candidate": cand_res, "incumbent": inc_res}, indent=1)
-    )
+    (trial_work / "metrics.json").write_text(json.dumps(
+        {"config": cfg, "yardstick": yd["id"] if yd else None, "graded_from": graded_from, "score": score},
+        indent=1, default=str))
     shutil.copy2(snap_path, trial_work / "submission.py")
 
     row = {
         **base_meta,
-        "tier0_ok": True,
-        "tier1_ok": cand_res["passed"],
-        "incumbent_ok": inc_ok,
-        "soft_min_eff": round(cand_res["soft_min_eff"], 6),
-        "incumbent_soft_min": round(inc_res["soft_min_eff"], 6) if inc_res else round(cand_res["soft_min_eff"], 6),
-        "short_horizon_soft_min": round(cand_res.get("short_horizon_soft_min", 0.0), 6),
-        "long_horizon_soft_min": round(cand_res.get("long_horizon_soft_min", 0.0), 6),
-        "median_adapt_cost": round(cand_res.get("median_adapt_cost", 0.0), 1),
-        "ratio_vs_incumbent": round(ratio, 4) if math.isfinite(ratio) else None,
-        "b2_max": round(cand_res["b2_max"], 5),
-        "overhead_ratio": round(cand_res["overhead_ratio"], 3),
+        "tier0_ok": bool(score.get("tier0_ok")),
+        "tier1_ok": bool(score.get("valid")) and not score.get("unpaired"),
+        "confirmed": bool((score.get("confirmation") or {}).get("ran") and score["confirmation"].get("passed")),
+        "graded_from": graded_from,
+        "speedup": _sig(sp),
+        "ratio_vs_best": _sig(sp / best) if (sp is not None and best) else None,
+        "soft_min_eff": _sig(score.get("soft_min_eff", 0.0)),
+        "short_horizon_soft_min": _sig(score.get("short_horizon_soft_min", 0.0)),
+        "long_horizon_soft_min": _sig(score.get("long_horizon_soft_min", 0.0)),
+        "median_adapt_cost": round(float(score.get("median_adapt_cost") or 0.0), 1),
+        "b2_max": round(float(score.get("b2_max") or 0.0), 5),
+        "overhead_ratio": round(float(score.get("overhead_ratio") or 0.0), 3),
+        "by_class": {k: _sig(v) for k, v in (score.get("by_class") or {}).items()},
         "queue_wait_s": round(queue_wait_s, 3),
-        "archive_cells": archived_cells,
-        "by_class": {k: round(v, 6) for k, v in cand_res["by_class"].items()},
+        "archive_cells": archived,
         "decision": decision,
-        "wall_s": round(time.perf_counter() - t0, 3),
     }
-    return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id,
-                           parents=parent_links, source=raw_text)
+    if decision in flywheel.KEPT_DECISIONS:
+        row["best_speedup_after"] = max(row["speedup"], best or 0.0)
+    if decision.startswith("discard_tier"):
+        row["error"] = score.get("error") or (
+            "passed only on the confirmation seed; the public seed left a target without an efficiency, "
+            "so there is no score to compare" if score.get("unpaired") else "failed")
+        row["failed_targets"] = score.get("failed_targets", [])
+        if not score.get("tier0_ok"):
+            row["tier0_info"] = score.get("tier0_info")
+    return finish(row)
 
 
-REPLICATION_TOLERANCE = 0.25  # a rerun passes at >= 75% of the claimed soft_min_eff
+def trial_report(row: dict, run_id: str) -> list[str]:
+    """The lines `apin autoresearch eval` prints for one trial row."""
+    dims = ",".join(str(x) for x in (row.get("dims") or []))
+    lines = [f"{row['trial_id']} [{row['lane']}] decision={row['decision']} speedup={row.get('speedup')} "
+             f"tier0={row.get('tier0_ok')} tier1={row.get('tier1_ok')} dims={dims} repeats={row.get('repeats')} "
+             f"seed={row.get('seed')} yardstick={row.get('yardstick')} qwait={row.get('queue_wait_s')}s "
+             f"wall={row.get('wall_s')}s"]
+    if not row.get("exploratory"):
+        sp = row.get("speedup")
+        lines.append(f"METRIC speedup={sp if sp is not None else 0}")
+    for key in ("soft_min_eff", "short_horizon_soft_min", "long_horizon_soft_min", "median_adapt_cost",
+                "overhead_ratio", "b2_max"):
+        if row.get(key) is not None:
+            lines.append(f"METRIC {key}={row[key]}")
+    for cls_name, cls_val in sorted((row.get("by_class") or {}).items()):
+        lines.append(f"CLASS_METRIC {cls_name}={cls_val}")
+    if row.get("error"):
+        lines.append(f"Failed a check: {row['error']}")
+
+    kept = row.get("decision") in flywheel.KEPT_DECISIONS
+    if kept:
+        best, best_trial = row.get("best_speedup_after"), (
+            row["trial_id"] if row.get("best_speedup_after") == row.get("speedup") else row.get("best_trial"))
+    else:
+        best, best_trial = row.get("best_speedup"), row.get("best_trial")
+    best_txt = (f"Best so far in run {run_id}: {best}x the starting code ({best_trial})." if best is not None
+                else f"Run {run_id} has no kept trial yet.")
+    if row.get("exploratory"):
+        lines.append(f"EXPLORATORY: dims={dims} repeats={row.get('repeats')} seed={row.get('seed')} is not the "
+                     "standard configuration. This trial has no speed-up and was not kept. "
+                     "Run without --dims, --dim, --repeats, --seed and --horizon-steps to grade it.")
+    elif kept:
+        lines.append(f"{best_txt} This trial was kept ({row['decision']}).")
+    else:
+        lines.append(f"{best_txt} This trial was not kept ({row['decision']}).")
+    return lines
 
 
 def rerun_for_verification(
     source_path: Path,
     lane: str,
     *,
-    claimed_soft_min: float | None,
-    dims: tuple[int, ...] = (6, 20),
-    seed: int | None = None,
-    repeats: int = 2,
-    n_chains: int = 48,
-    k_steps: int = 16,
-    adapt_draws: int = 100,
-    horizon_steps: int = 500,
+    claimed_speedup: float | None,
+    claimed_yardstick: str | None,
     tolerance: float = REPLICATION_TOLERANCE,
     work_dir: Path | None = None,
     use_queue: bool = True,
+    autoresearch_dir: Path = ROOT / "autoresearch",
 ) -> dict:
-    """Independently rerun a fetched trial source through Tier 0 + Tier 1 on fresh seeds.
+    """Rerun a fetched trial through the grader on the standard public configuration.
 
-    Passes when Tier 0 and Tier 1 pass and the reproduced soft_min_eff reaches
-    ``(1 - tolerance)`` of the claimed value. Returns ``{passed, metrics}`` for
-    ``POST /api/verify/:id/result``. Nothing is written to any ledger.
+    The rerun is the same computation as the trial it checks, so it should reproduce the posted
+    speed-up to within `tolerance` (relative). Returns ``{comparable, passed, metrics, reason}``.
+    `comparable` is False when the trial was graded against another yardstick (an older judge or
+    starting code) or posted no speed-up. Such a rerun says nothing about the trial. Nothing is
+    written to any ledger.
     """
-    import secrets
-
-    seed = int(seed if seed is not None else 30_000_000 + secrets.randbelow(10_000_000))
-    dims = tuple(int(d) for d in dims) or (6,)
-    work = work_dir or (source_path.parent / "verify_work")
+    yd = load_yardstick(lane, autoresearch_dir=autoresearch_dir)
+    metrics: dict = {"yardstick": yd["id"], "judge_digest": yd["judge_digest"], "config": grade.config(),
+                     "claimed_speedup": claimed_speedup, "claimed_yardstick": claimed_yardstick,
+                     "tolerance": tolerance}
+    if claimed_yardstick != yd["id"] or not isinstance(claimed_speedup, (int, float)):
+        why = ("it posted no speed-up" if claimed_yardstick is None or claimed_speedup is None
+               else f"it was graded against yardstick {claimed_yardstick}, this checkout has {yd['id']}")
+        return {"comparable": False, "passed": False, "metrics": metrics, "reason": f"not comparable: {why}"}
+    work = work_dir or (Path(source_path).parent / "verify_work")
     work.mkdir(parents=True, exist_ok=True)
-    t0 = time.perf_counter()
-    metrics: dict = {
-        "seed": seed, "dims": list(dims), "repeats": int(repeats), "judge_digest": _judge_digest(),
-        "claimed_soft_min_eff": claimed_soft_min, "tolerance": tolerance,
-    }
-    with queue.eval_slot(f"verify:{lane}/{source_path.name}", enabled=use_queue):
-        t0_ok, t0_info = _eval_tier0(source_path, seed=seed, work_dir=work, lane=lane, horizon_steps=horizon_steps)
-        metrics["tier0_ok"] = bool(t0_ok)
-        if not t0_ok:
-            metrics["tier0_info"] = t0_info
-            metrics["wall_s"] = round(time.perf_counter() - t0, 3)
-            return {"passed": False, "metrics": metrics, "reason": f"tier0 failed: {t0_info.get('stage')}"}
-        suites = [(seed + r * 7919, _build_tier1_suite(dims[0], seed + r * 7919, dims=dims)) for r in range(max(1, int(repeats)))]
-        res = _eval_tier1_multi(
-            source_path, suites, n_chains=n_chains, k_steps=k_steps,
-            adapt_draws=adapt_draws, lane=lane, horizon_steps=horizon_steps,
-        )
-    soft = float(res["soft_min_eff"])
-    ratio = (soft / claimed_soft_min) if claimed_soft_min else None
+    with queue.eval_slot(f"verify:{lane}/{Path(source_path).name}", enabled=use_queue):
+        score = grade.score_file(Path(source_path), lane, grade.config(), work)
+    sp = grade.speedup(score, yd)
     metrics.update({
-        "tier1_ok": bool(res["passed"]),
-        "soft_min_eff": round(soft, 6),
-        "ratio_vs_claimed": round(ratio, 4) if ratio is not None and math.isfinite(ratio) else None,
-        "overhead_ratio": round(float(res["overhead_ratio"]), 3),
-        "b2_max": round(float(res["b2_max"]), 5),
-        "wall_s": round(time.perf_counter() - t0, 3),
+        "tier0_ok": bool(score.get("tier0_ok")), "tier1_ok": bool(score.get("valid")),
+        "speedup": _sig(sp), "soft_min_eff": _sig(score.get("soft_min_eff")),
+        "overhead_ratio": _sig(score.get("overhead_ratio")), "b2_max": _sig(score.get("b2_max")),
+        "wall_s": score.get("wall_s"),
     })
-    passed = bool(res["passed"]) and (ratio is None or ratio >= 1.0 - tolerance)
-    reason = "tier1 failed" if not res["passed"] else (
-        f"reproduced {soft:.4g} vs claimed {claimed_soft_min:.4g}" if claimed_soft_min else f"reproduced {soft:.4g}"
-    )
-    return {"passed": passed, "metrics": metrics, "reason": reason}
+    if sp is None:
+        return {"comparable": True, "passed": False, "metrics": metrics,
+                "reason": f"failed a check on rerun: {score.get('error') or 'no score'}"}
+    rel = abs(sp / float(claimed_speedup) - 1.0)
+    metrics["relative_difference"] = _sig(rel, 3)
+    passed = rel <= tolerance
+    reason = (f"reproduced {sp:.6g}x (posted {claimed_speedup:.6g}x)" if passed
+              else f"mismatch: rerun {sp:.6g}x, posted {claimed_speedup:.6g}x ({rel:.2%} apart)")
+    return {"comparable": True, "passed": passed, "metrics": metrics, "reason": reason}
 
 
 def format_evaluator_json(
@@ -711,27 +542,27 @@ def format_evaluator_json(
     run_id: str = "default",
     autoresearch_dir: Path = ROOT / "autoresearch",
 ) -> dict:
-    """Format an autoresearch trial row as an immutable evaluator JSON object.
+    """Format a trial row as one `{valid, score, metrics, evidence}` evaluator object.
 
-    Follows the `{valid, score, metrics, evidence}` contract used by
-    `Auto-research-agent` (`RSI-top` / `Fork-and-Flush`) so `apin autoresearch eval --json`
-    works directly as a drop-in evaluator. Missing or non-finite observations are omitted
-    from `metrics` rather than replaced with sentinels.
+    `score` is the speed-up over the lane's starting code (0.0 when the trial failed a check or
+    was exploratory). Missing or non-finite observations are left out of `metrics`.
     """
     is_dry = bool(row.get("dry_run"))
     valid = (row.get("decision") == "dry_run_ok") if is_dry else bool(row.get("tier0_ok") and row.get("tier1_ok"))
-    raw_score = row.get("soft_min_eff")
-    score_val = float(raw_score) if (valid and isinstance(raw_score, (int, float)) and math.isfinite(raw_score)) else 0.0
+    sp = row.get("speedup")
+    score_val = float(sp) if (valid and isinstance(sp, (int, float)) and math.isfinite(sp)) else 0.0
 
     metrics: dict[str, float | int] = {}
     for key in (
+        "speedup",
         "soft_min_eff",
-        "ratio_vs_incumbent",
         "short_horizon_soft_min",
         "long_horizon_soft_min",
         "median_adapt_cost",
         "overhead_ratio",
         "b2_max",
+        "best_speedup",
+        "ratio_vs_best",
         "loc",
         "magic_constants",
         "wall_s",
@@ -764,6 +595,9 @@ def format_evaluator_json(
         "metrics": metrics,
         "evidence": evidence,
         "decision": row.get("decision"),
+        "kept": row.get("decision") in flywheel.KEPT_DECISIONS,
+        "exploratory": bool(row.get("exploratory")),
+        "yardstick": row.get("yardstick"),
         "trial_id": trial_id,
         "lane": lane,
     }
@@ -811,6 +645,15 @@ def _brief_notes(lane: str | None, flywheel_url: str, limit: int) -> list[str]:
     return lines
 
 
+def _local_yardstick_id(lane: str | None, autoresearch_dir: Path) -> str | None:
+    if not lane:
+        return None
+    try:
+        return json.loads((Path(autoresearch_dir) / "lanes" / lane / YARDSTICK_FILE).read_text()).get("id")
+    except (OSError, ValueError):
+        return None
+
+
 def build_research_brief(
     lane: str = "all",
     *,
@@ -841,32 +684,22 @@ def build_research_brief(
             nodes = _extract_list(nodes_raw, "nodes", "items")
             claims = _extract_list(claims_raw, "claims", "items")
 
-            local_digest = _judge_digest()
+            local_digest = judge.judge_digest()
+            local_yd = _local_yardstick_id(None if all_lanes else lane, autoresearch_dir)
             lines.append(f"## Live Flywheel Frontier (`{flywheel_url}` | local judge_digest=`{local_digest}`)")
             if frontier:
                 for row in frontier:
                     rlane = row.get("lane") or "?"
-                    sm = row.get("soft_min_eff")
-                    sm_s = f"{float(sm):.4g}" if isinstance(sm, (int, float)) else "n/a"
+                    sp = row.get("speedup")
+                    sp_s = f"{float(sp):.4g}x" if isinstance(sp, (int, float)) else "n/a"
                     ver = "verified" if row.get("verified") else "unverified"
-                    rdims = row.get("dims")
-                    dims_s = ",".join(str(x) for x in rdims) if isinstance(rdims, list) and rdims else "?"
-                    rdigest = ""
-                    mj = row.get("metrics_json")
-                    if isinstance(mj, str) and mj:
-                        try:
-                            rdigest = str(json.loads(mj).get("judge_digest") or "")[:8]
-                        except ValueError:
-                            rdigest = ""
-                    elif isinstance(mj, dict):
-                        rdigest = str(mj.get("judge_digest") or "")[:8]
-                    compat = ""
-                    if (rdigest and not local_digest.startswith(rdigest)) or dims_s != "6,20":
-                        compat = " [diff dims/judge — compare vs local incumbent]"
+                    ryd = row.get("yardstick")
+                    mine = local_yd if not all_lanes else _local_yardstick_id(rlane, autoresearch_dir)
+                    compat = " [other yardstick: not comparable with your trials]" if ryd and mine and ryd != mine else ""
                     title = str(row.get("title") or row.get("hypothesis") or row.get("id") or "")[:80]
                     tag = " <-- THIS LANE" if rlane == lane else ""
                     lines.append(
-                        f"- **{rlane}** ({ver}, soft_min={sm_s}, dims={dims_s}, judge={rdigest or '?'}): "
+                        f"- **{rlane}** ({ver}, speedup={sp_s}, yardstick={ryd or '?'}): "
                         f"`{row.get('id', '?')}` — {title}{compat}{tag}"
                     )
             else:
@@ -920,12 +753,13 @@ def build_research_brief(
                 if r.get("decision") in flywheel.KEPT_DECISIONS:
                     break
                 tail_non_kept += 1
-            best = kept[-1] if kept else ledger[-1]
+            graded = [r for r in kept if isinstance(r.get("speedup"), (int, float))]
+            best = max(graded, key=lambda r: r["speedup"]) if graded else (kept[-1] if kept else ledger[-1])
             lines.append(
-                f"- Incumbent: `{best.get('trial_id')}` decision={best.get('decision')} "
-                f"soft_min={best.get('soft_min_eff')} short={best.get('short_horizon_soft_min')} "
-                f"long={best.get('long_horizon_soft_min')} adapt_cost={best.get('median_adapt_cost')} "
-                f"overhead={best.get('overhead_ratio')}x"
+                f"- Best kept: `{best.get('trial_id')}` decision={best.get('decision')} "
+                f"speedup={best.get('speedup')}x soft_min={best.get('soft_min_eff')} "
+                f"short={best.get('short_horizon_soft_min')} long={best.get('long_horizon_soft_min')} "
+                f"adapt_cost={best.get('median_adapt_cost')} overhead={best.get('overhead_ratio')}x"
             )
             by_cls = best.get("by_class") or {}
             if by_cls:
@@ -954,7 +788,8 @@ def build_research_brief(
     lines += [
         "## Action Checklist",
         "- Prefer **composing** compatible verified ideas across lanes before inventing complex heuristics.",
-        "- Verify edits with `uv run apin autoresearch eval --lane " + lane + " --run-id <RUN_ID> --repeats 2 --hypothesis \"...\"`.",
+        "- Score each edit with `uv run apin autoresearch eval --lane " + lane + " --run-id <RUN_ID> --hypothesis \"...\"`. "
+        "It prints the speed-up over the starting code. A difference under 5% is noise.",
         "- Freeze `submission.py` before running full real-Stan verification (`apin run logdensity` + `apin score --submission`).",
     ]
     return "\n".join(lines) + "\n"

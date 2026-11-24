@@ -1,10 +1,10 @@
 {
-  "schema": 1,
+  "schema": 2,
   "lane": "A1",
   "task": "a1-preconditioning",
-  "judge_digest": "99b34c103abe75d3",
+  "judge_digest": "c4ee69e1a8771dd4",
   "config": {
-    "seed": 39389868,
+    "seed": 72432996,
     "dims": [
       6,
       20
@@ -14,9 +14,9 @@
     "k_steps": 16,
     "adapt_draws": 100,
     "horizon_steps": 500,
-    "confirmation_seed": 78210474
+    "confirmation_seed": 75713498
   },
-  "frozen_at": "2026-11-23T06:23:22+00:00",
+  "frozen_at": "2026-11-24T02:52:30+00:00",
   "reference_name": "stan-windowed-diag-metric-2.37",
   "scores": {
     "start": {
@@ -24,9 +24,9 @@
       "role": "start",
       "file": "baseline.py",
       "sha256": "55a02b88bbba03fbe80dd9e688570d3e91e578a6693d504809dab0ca8e90d497",
-      "judge_digest": "99b34c103abe75d3",
+      "judge_digest": "c4ee69e1a8771dd4",
       "config": {
-        "seed": 39389868,
+        "seed": 72432996,
         "dims": [
           6,
           20
@@ -36,114 +36,115 @@
         "k_steps": 16,
         "adapt_draws": 100,
         "horizon_steps": 500,
-        "confirmation_seed": 78210474
+        "confirmation_seed": 75713498
       },
       "valid": true,
       "tier0_ok": true,
       "tier1_ok": true,
-      "soft_min_eff": 0.00046226111322168664,
-      "short_horizon_soft_min": 0.0003618302354080983,
-      "long_horizon_soft_min": 0.0005903954799408597,
-      "b2_max": 0.2815896919171979,
-      "overhead_ratio": 6.196180798480392,
+      "soft_min_eff": 0.00047589115517991545,
+      "short_horizon_soft_min": 0.0003725547396687726,
+      "long_horizon_soft_min": 0.000607695061938704,
+      "median_adapt_cost": 1426.0,
+      "b2_max": 0.20589161951411558,
+      "overhead_ratio": 5.054998851955103,
       "by_class": {
-        "banana": 0.0008339314679778915,
-        "funnel": 0.0020112523656283885,
-        "gaussian_illcond": 0.011301874199177426,
-        "hybrid_rosenbrock": 0.0002984221572523334,
-        "mixture_crossable": 0.025158830747738,
-        "student_t": 0.006726898657057866
+        "banana": 0.0006639099842989208,
+        "funnel": 0.0020672809207467192,
+        "gaussian_illcond": 0.012046997899621745,
+        "hybrid_rosenbrock": 0.0003105507486900204,
+        "mixture_crossable": 0.0185370887666436,
+        "student_t": 0.0059308977068440565
       },
       "per_repeat_soft_min": [
-        0.00048573941152810007,
-        0.00044879144238268895,
-        0.0005447137972009183,
-        0.0004430684005959927,
-        0.0005088754290384555,
-        0.0004920745893465743,
-        0.00042880567734490167,
-        0.0003690701122578215
+        0.0003656426690799825,
+        0.0004454003300376968,
+        0.0003978635531048708,
+        0.00036879565531238215,
+        0.0004589022057997375,
+        0.0006366863382194818,
+        0.0005825282002101327,
+        0.0006468015868938722
       ],
       "per_repeat_by_class": [
         {
-          "gaussian_illcond": 0.012591874532758382,
-          "funnel": 0.0013879012887289997,
-          "banana": 0.0005182181723341039,
-          "hybrid_rosenbrock": 0.0003214620053359378,
-          "student_t": 0.009588494384632938,
-          "mixture_crossable": 0.018918098166850965
+          "gaussian_illcond": 0.008185550027745344,
+          "funnel": 0.001305243455423115,
+          "banana": 0.000570582720469289,
+          "hybrid_rosenbrock": 0.00023535867435850642,
+          "student_t": 0.004211734405142329,
+          "mixture_crossable": 0.01941108362258948
         },
         {
-          "gaussian_illcond": 0.009187122969109632,
-          "funnel": 0.0030625294689650287,
-          "banana": 0.0008045039520967029,
-          "hybrid_rosenbrock": 0.00028793283478790343,
-          "student_t": 0.003006635035555209,
-          "mixture_crossable": 0.025669575043469093
+          "gaussian_illcond": 0.011082546801188893,
+          "funnel": 0.0021157372604620225,
+          "banana": 0.0007948795842554125,
+          "hybrid_rosenbrock": 0.0002857905332631334,
+          "student_t": 0.007640870492871515,
+          "mixture_crossable": 0.029062065575232665
         },
         {
-          "gaussian_illcond": 0.012024472004270176,
-          "funnel": 0.0018129300676716605,
-          "banana": 0.0005979192480910194,
-          "hybrid_rosenbrock": 0.00035895310287635014,
-          "student_t": 0.008553622708353643,
-          "mixture_crossable": 0.018718832977517186
+          "gaussian_illcond": 0.015180012649496224,
+          "funnel": 0.001709278760849381,
+          "banana": 0.0005042097793040485,
+          "hybrid_rosenbrock": 0.00025852710767786883,
+          "student_t": 0.005875184025961919,
+          "mixture_crossable": 0.020657070599282113
         },
         {
-          "gaussian_illcond": 0.012505777269433103,
-          "funnel": 0.002523869065012901,
-          "banana": 0.000716033301110041,
-          "hybrid_rosenbrock": 0.0002848634016997503,
-          "student_t": 0.007942566249178577,
-          "mixture_crossable": 0.03845093394864743
+          "gaussian_illcond": 0.014514968159669987,
+          "funnel": 0.0022022366393093834,
+          "banana": 0.0005177589912382247,
+          "hybrid_rosenbrock": 0.0002382450366207817,
+          "student_t": 0.008796631938667629,
+          "mixture_crossable": 0.026183783243247494
         },
         {
-          "gaussian_illcond": 0.009204934871563113,
-          "funnel": 0.002201067258914281,
-          "banana": 0.0013413226904885052,
-          "hybrid_rosenbrock": 0.00032546315671001455,
-          "student_t": 0.00681923166168233,
-          "mixture_crossable": 0.016538613239171843
+          "gaussian_illcond": 0.007998968549579068,
+          "funnel": 0.0033266586483078867,
+          "banana": 0.0007775919676296641,
+          "hybrid_rosenbrock": 0.0002947185724966004,
+          "student_t": 0.005796724339096665,
+          "mixture_crossable": 0.020161258725101865
         },
         {
-          "gaussian_illcond": 0.019745186584910677,
-          "funnel": 0.0013491451295942448,
-          "banana": 0.0011872252432912037,
-          "hybrid_rosenbrock": 0.00031502929330565107,
-          "student_t": 0.009037076107775242,
-          "mixture_crossable": 0.01877065022229256
+          "gaussian_illcond": 0.013519673944229878,
+          "funnel": 0.0020770513975736046,
+          "banana": 0.0008828282937981454,
+          "hybrid_rosenbrock": 0.0004116893776887652,
+          "student_t": 0.004899195221811631,
+          "mixture_crossable": 0.022300565042642592
         },
         {
-          "gaussian_illcond": 0.012590580021329423,
-          "funnel": 0.001879677200065837,
-          "banana": 0.0009577233346967209,
-          "hybrid_rosenbrock": 0.0002744746120711096,
-          "student_t": 0.006112221381698209,
-          "mixture_crossable": 0.034920540545511095
+          "gaussian_illcond": 0.015553885744542638,
+          "funnel": 0.0025052059892926217,
+          "banana": 0.0004889328119419367,
+          "hybrid_rosenbrock": 0.00041237923949728576,
+          "student_t": 0.004500520790982071,
+          "mixture_crossable": 0.017271451520114042
         },
         {
-          "gaussian_illcond": 0.006686970836219205,
-          "funnel": 0.0024664400193689096,
-          "banana": 0.0008592506279463091,
-          "hybrid_rosenbrock": 0.00023615566177125565,
-          "student_t": 0.005683482817065794,
-          "mixture_crossable": 0.042362584293398016
+          "gaussian_illcond": 0.01319519776018533,
+          "funnel": 0.0018538172046929581,
+          "banana": 0.0009498117422169251,
+          "hybrid_rosenbrock": 0.00041732911816263834,
+          "student_t": 0.007201974714769592,
+          "mixture_crossable": 0.005884268739090949
         }
       ],
       "failed_targets": [],
       "confirmation": {
         "ran": false
       },
-      "wall_s": 474.8
+      "wall_s": 275.7
     },
     "reference": {
       "lane": "A1",
       "role": "reference",
       "file": "reference.py",
       "sha256": "1b24abff1a1b0a70f5673fdeffa101d57d0823ff0ec4f193b49f6a1b0be8a252",
-      "judge_digest": "99b34c103abe75d3",
+      "judge_digest": "c4ee69e1a8771dd4",
       "config": {
-        "seed": 39389868,
+        "seed": 72432996,
         "dims": [
           6,
           20
@@ -153,105 +154,106 @@
         "k_steps": 16,
         "adapt_draws": 100,
         "horizon_steps": 500,
-        "confirmation_seed": 78210474
+        "confirmation_seed": 75713498
       },
       "valid": true,
       "tier0_ok": true,
       "tier1_ok": true,
-      "soft_min_eff": 0.00031748552302321843,
-      "short_horizon_soft_min": 0.00022725837503421767,
-      "long_horizon_soft_min": 0.0004434861913113088,
-      "b2_max": 0.2815896919171979,
-      "overhead_ratio": 5.191400880870315,
+      "soft_min_eff": 0.00033971386626354473,
+      "short_horizon_soft_min": 0.00024293691064203971,
+      "long_horizon_soft_min": 0.0004749334440306855,
+      "median_adapt_cost": 3087.0,
+      "b2_max": 0.1616616049957922,
+      "overhead_ratio": 4.774348397644605,
       "by_class": {
-        "banana": 0.0010328694632320524,
-        "funnel": 0.0017064555988351448,
-        "gaussian_illcond": 0.005549846303491483,
-        "hybrid_rosenbrock": 0.00020360675874828786,
-        "mixture_crossable": 0.01737770465880674,
-        "student_t": 0.005090937937464264
+        "banana": 0.0008444274679675211,
+        "funnel": 0.0016132736970882213,
+        "gaussian_illcond": 0.005874078541560449,
+        "hybrid_rosenbrock": 0.0002182000948746542,
+        "mixture_crossable": 0.017547636514845685,
+        "student_t": 0.0036754704966373538
       },
       "per_repeat_soft_min": [
-        0.00039082266571166904,
-        0.00041918354150938193,
-        0.0004227577966445185,
-        0.00029911515450748897,
-        0.00028738144853225395,
-        0.0003850883698312262,
-        0.0003216523977997651,
-        0.000139981770078062
+        0.00025101565035036806,
+        0.0003355561673010142,
+        0.0003331888792477261,
+        0.0003788191884371183,
+        0.00042560144476906295,
+        0.0005630435631337677,
+        0.00021817365959411975,
+        0.0003191319547747977
       ],
       "per_repeat_by_class": [
         {
-          "gaussian_illcond": 0.006945558485378129,
-          "funnel": 0.0013622213474353546,
-          "banana": 0.002008640211957432,
-          "hybrid_rosenbrock": 0.00024979910124312444,
-          "student_t": 0.007798926608080425,
-          "mixture_crossable": 0.016344196664745805
+          "gaussian_illcond": 0.004659479254076649,
+          "funnel": 0.0016018412582773638,
+          "banana": 0.002281208624194973,
+          "hybrid_rosenbrock": 0.0001603901568223683,
+          "student_t": 0.0029068665609973945,
+          "mixture_crossable": 0.019099314395463547
         },
         {
-          "gaussian_illcond": 0.004193093706595667,
-          "funnel": 0.001993019284011902,
-          "banana": 0.00110831926491842,
-          "hybrid_rosenbrock": 0.000268090589058504,
-          "student_t": 0.0030040961296752574,
-          "mixture_crossable": 0.016726466703487923
+          "gaussian_illcond": 0.0067672608495722665,
+          "funnel": 0.0009450017162861316,
+          "banana": 0.0008764637766960092,
+          "hybrid_rosenbrock": 0.0002147369820910293,
+          "student_t": 0.0041901577842862366,
+          "mixture_crossable": 0.013578817406316558
         },
         {
-          "gaussian_illcond": 0.00624600996718217,
-          "funnel": 0.0019402408194702948,
-          "banana": 0.0004813399070131068,
-          "hybrid_rosenbrock": 0.000277299620780075,
-          "student_t": 0.002852611578399431,
-          "mixture_crossable": 0.014596602095720609
+          "gaussian_illcond": 0.007469524941520082,
+          "funnel": 0.00216163765361056,
+          "banana": 0.00038638559745510643,
+          "hybrid_rosenbrock": 0.00021810415968079476,
+          "student_t": 0.003102816068254969,
+          "mixture_crossable": 0.017256401390800438
         },
         {
-          "gaussian_illcond": 0.0042480324683942155,
-          "funnel": 0.002032793590730809,
-          "banana": 0.0012581215941413627,
-          "hybrid_rosenbrock": 0.000191147190959899,
-          "student_t": 0.00403470093640486,
-          "mixture_crossable": 0.012437494973629414
+          "gaussian_illcond": 0.007124071917082794,
+          "funnel": 0.001189710950213117,
+          "banana": 0.0007240168664398485,
+          "hybrid_rosenbrock": 0.00024291386484587467,
+          "student_t": 0.00298126478783985,
+          "mixture_crossable": 0.018680627577822996
         },
         {
-          "gaussian_illcond": 0.006055106119006191,
-          "funnel": 0.002038498869689402,
-          "banana": 0.0013358974734669418,
-          "hybrid_rosenbrock": 0.00018363985487206851,
-          "student_t": 0.008920062914713507,
-          "mixture_crossable": 0.017499515610603384
+          "gaussian_illcond": 0.004659925944033078,
+          "funnel": 0.0026687918408615533,
+          "banana": 0.0006359385603571258,
+          "hybrid_rosenbrock": 0.000274265701996512,
+          "student_t": 0.005711444815305949,
+          "mixture_crossable": 0.0200138919933226
         },
         {
-          "gaussian_illcond": 0.007404042724493561,
-          "funnel": 0.0012649412305813562,
-          "banana": 0.0019205255901436462,
-          "hybrid_rosenbrock": 0.00024615453041395115,
-          "student_t": 0.0061988662096979594,
-          "mixture_crossable": 0.018450722601517932
+          "gaussian_illcond": 0.0069430984288882894,
+          "funnel": 0.001763202456232731,
+          "banana": 0.0017635209031112867,
+          "hybrid_rosenbrock": 0.00036008475438464936,
+          "student_t": 0.0029887824376075545,
+          "mixture_crossable": 0.0138882219475515
         },
         {
-          "gaussian_illcond": 0.006263236695406678,
-          "funnel": 0.001575971447762589,
-          "banana": 0.0008487943782158858,
-          "hybrid_rosenbrock": 0.00020570978398000485,
-          "student_t": 0.004416096868234517,
-          "mixture_crossable": 0.0191795599246281
+          "gaussian_illcond": 0.004225510546209294,
+          "funnel": 0.0022684732571232533,
+          "banana": 0.00045572313178334113,
+          "hybrid_rosenbrock": 0.00013970791554859802,
+          "student_t": 0.004845883542470358,
+          "mixture_crossable": 0.020976391313902908
         },
         {
-          "gaussian_illcond": 0.004147877363292526,
-          "funnel": 0.0016524284733980216,
-          "banana": 0.0004411906083736458,
-          "hybrid_rosenbrock": 8.947839065433191e-05,
-          "student_t": 0.00685268865784912,
-          "mixture_crossable": 0.02705881498664311
+          "gaussian_illcond": 0.006179237530012659,
+          "funnel": 0.0011041738288431373,
+          "banana": 0.0009043434144300134,
+          "hybrid_rosenbrock": 0.00020409925671685926,
+          "student_t": 0.0035733718505990947,
+          "mixture_crossable": 0.018442451045232167
         }
       ],
       "failed_targets": [],
       "confirmation": {
         "ran": false
       },
-      "wall_s": 603.9,
+      "wall_s": 358.5,
       "name": "stan-windowed-diag-metric-2.37"
     },
     "frontier": {
@@ -259,9 +261,9 @@
       "role": "frontier",
       "file": "frontier.py",
       "sha256": "cbc54bbbd03d85110c0c3a68a7cb9257213fddd463d890c82e9cb849b30a0879",
-      "judge_digest": "99b34c103abe75d3",
+      "judge_digest": "c4ee69e1a8771dd4",
       "config": {
-        "seed": 39389868,
+        "seed": 72432996,
         "dims": [
           6,
           20
@@ -271,116 +273,117 @@
         "k_steps": 16,
         "adapt_draws": 100,
         "horizon_steps": 500,
-        "confirmation_seed": 78210474
+        "confirmation_seed": 75713498
       },
       "valid": true,
       "tier0_ok": true,
       "tier1_ok": true,
-      "soft_min_eff": 0.0008739209582762166,
-      "short_horizon_soft_min": 0.000826968943183802,
-      "long_horizon_soft_min": 0.0009234788459443002,
-      "b2_max": 0.3236251524166098,
-      "overhead_ratio": 9.72357606200563,
+      "soft_min_eff": 0.0010946159337913153,
+      "short_horizon_soft_min": 0.0010324347610268863,
+      "long_horizon_soft_min": 0.0011604032708763283,
+      "median_adapt_cost": 142.0,
+      "b2_max": 0.3719345081247387,
+      "overhead_ratio": 7.40077491426181,
       "by_class": {
-        "banana": 0.001148813860545537,
-        "funnel": 0.004868851858879833,
-        "gaussian_illcond": 0.0015909341098897377,
-        "hybrid_rosenbrock": 0.0007331040946518642,
-        "mixture_crossable": 0.01981344913888699,
-        "student_t": 0.010259796032413102
+        "banana": 0.0012216503278509332,
+        "funnel": 0.005427139320906181,
+        "gaussian_illcond": 0.001662829802698147,
+        "hybrid_rosenbrock": 0.0008315273729660509,
+        "mixture_crossable": 0.02232670418538693,
+        "student_t": 0.010712484245775892
       },
       "per_repeat_soft_min": [
-        0.0008077500426074321,
-        0.0008321626722915391,
-        0.00045499178316678714,
-        0.0009147011033597063,
-        0.0010046237232465862,
-        0.001333922091117492,
-        0.0010418483741416046,
-        0.0008711056837363297
+        0.0009527139301432658,
+        0.0011570875947301865,
+        0.0009982900972873591,
+        0.0010644997614905176,
+        0.0012286367847598447,
+        0.0013552523422192778,
+        0.0006628961933654199,
+        0.0015939468492876662
       ],
       "per_repeat_by_class": [
         {
-          "gaussian_illcond": 0.0005834859225407751,
-          "funnel": 0.004845485146902011,
-          "banana": 0.0007759711163727412,
-          "hybrid_rosenbrock": 0.0007796223163642525,
-          "student_t": 0.009975785793434928,
-          "mixture_crossable": 0.015982720740290092
+          "gaussian_illcond": 0.000832903073347299,
+          "funnel": 0.004315602852650674,
+          "banana": 0.0014412159114314794,
+          "hybrid_rosenbrock": 0.0006697379077283043,
+          "student_t": 0.0185397574015281,
+          "mixture_crossable": 0.01893623755291965
         },
         {
-          "gaussian_illcond": 0.008482372748997914,
-          "funnel": 0.004635116807356233,
-          "banana": 0.0016320155088063496,
-          "hybrid_rosenbrock": 0.0005332404460118038,
-          "student_t": 0.00840391373246658,
-          "mixture_crossable": 0.026474975411729388
+          "gaussian_illcond": 0.002627395115148211,
+          "funnel": 0.004618390920449693,
+          "banana": 0.0009501271590707162,
+          "hybrid_rosenbrock": 0.0008310426089049038,
+          "student_t": 0.007018980331018266,
+          "mixture_crossable": 0.0242779265173305
         },
         {
-          "gaussian_illcond": 0.00029175997028105895,
-          "funnel": 0.005515063291843029,
-          "banana": 0.001082390395333402,
-          "hybrid_rosenbrock": 0.0009424698371414305,
-          "student_t": 0.011213609669913362,
-          "mixture_crossable": 0.024642705694802484
+          "gaussian_illcond": 0.0018386792129636718,
+          "funnel": 0.00510146908903821,
+          "banana": 0.0007784344981064936,
+          "hybrid_rosenbrock": 0.0007460015735422666,
+          "student_t": 0.012752904008822613,
+          "mixture_crossable": 0.021083268594578097
         },
         {
-          "gaussian_illcond": 0.0007655309789924576,
-          "funnel": 0.005118035960150426,
-          "banana": 0.0009283066798850827,
-          "hybrid_rosenbrock": 0.0006939834096147058,
-          "student_t": 0.013411214396230232,
-          "mixture_crossable": 0.016345601603559683
+          "gaussian_illcond": 0.001621679305156125,
+          "funnel": 0.005882178693764714,
+          "banana": 0.0008908319115867529,
+          "hybrid_rosenbrock": 0.0007637381013609113,
+          "student_t": 0.007928280532459222,
+          "mixture_crossable": 0.02528400378211805
         },
         {
-          "gaussian_illcond": 0.002722988208500837,
-          "funnel": 0.005136283184897309,
-          "banana": 0.0007420836425873354,
-          "hybrid_rosenbrock": 0.0007896150128050993,
-          "student_t": 0.006074720406615397,
-          "mixture_crossable": 0.01663122791290445
+          "gaussian_illcond": 0.005814254802112654,
+          "funnel": 0.0069579239268240025,
+          "banana": 0.0014329798728878935,
+          "hybrid_rosenbrock": 0.0008038876316397213,
+          "student_t": 0.011563477213466507,
+          "mixture_crossable": 0.03173960149170329
         },
         {
-          "gaussian_illcond": 0.007852970939502286,
-          "funnel": 0.003906282807107079,
-          "banana": 0.0023568625087996755,
-          "hybrid_rosenbrock": 0.0008565426025426236,
-          "student_t": 0.007653016373367884,
-          "mixture_crossable": 0.018895582672981158
+          "gaussian_illcond": 0.0018978393745024888,
+          "funnel": 0.006386148287999509,
+          "banana": 0.002072398782186641,
+          "hybrid_rosenbrock": 0.0008828402259087002,
+          "student_t": 0.006676110803148154,
+          "mixture_crossable": 0.018428985412710965
         },
         {
-          "gaussian_illcond": 0.0025363053925428762,
-          "funnel": 0.005237659574255147,
-          "banana": 0.0013211100593460946,
-          "hybrid_rosenbrock": 0.0006777731309813813,
-          "student_t": 0.016894907432786564,
-          "mixture_crossable": 0.026761898870441718
+          "gaussian_illcond": 0.0004307547049408344,
+          "funnel": 0.006153262693670853,
+          "banana": 0.0011071041396420091,
+          "hybrid_rosenbrock": 0.0009260142454797446,
+          "student_t": 0.010225489106062132,
+          "mixture_crossable": 0.015338791433444769
         },
         {
-          "gaussian_illcond": 0.0006845419037498377,
-          "funnel": 0.004740354190981649,
-          "banana": 0.0010318723725640726,
-          "hybrid_rosenbrock": 0.0006693489009312877,
-          "student_t": 0.012398033961304776,
-          "mixture_crossable": 0.016569277432514115
+          "gaussian_illcond": 0.0018845517229340405,
+          "funnel": 0.004602332567571638,
+          "banana": 0.0015890765262073189,
+          "hybrid_rosenbrock": 0.001096743076185644,
+          "student_t": 0.016697802606621008,
+          "mixture_crossable": 0.028081081776438557
         }
       ],
       "failed_targets": [],
       "confirmation": {
         "ran": true,
         "passed": true,
-        "seed": 78210474,
+        "seed": 75713498,
         "failed_targets_first_run": [
-          "banana(d=20, rot=True): invariance rejected on r1_sq: |z|=3.94 > 3.82 (b2_max=0.3236)"
+          "gaussian_illcond(d=6, rot=False): invariance rejected on u0: |z|=4.23 > 4.11 (b2_max=0.3719)"
         ],
         "failed_targets": [],
-        "wall_s": 263.3,
+        "wall_s": 172.3,
         "efficiency_source": "first_run_paired"
       },
-      "wall_s": 639.3,
+      "wall_s": 348.8,
       "source": "autoresearch/lanes/A1/submission.py",
       "git_commit": "b85c6e71898c1036023102c5b5969396475ef48c",
-      "copied_from_source": false
+      "copied_from_source": true
     }
   }
 }

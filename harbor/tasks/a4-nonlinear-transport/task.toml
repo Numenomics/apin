@@ -8,7 +8,7 @@ author_name = "Numenomics/apin"
 category = "optimize"
 lane = "A4"
 difficulty = "hard"
-description = "Optimize warm-start & diffeomorphic nonlinear transport under fixed latent HMC judge"
+description = "Improve a transport map for a fixed latent HMC kernel"
 tags = ["mcmc", "optimization", "bayesian", "apin", "A4"]
 
 [agent]

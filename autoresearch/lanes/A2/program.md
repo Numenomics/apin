@@ -15,7 +15,7 @@ Improve `transition()` (and matching warmup parameters in `adapt()`) to eliminat
 2. **Respect `autoresearch/RULINGS.md` strictly:** `requires = ["grad"]` only; no unpriced `hvp`/`hess`, no inspecting `oracle` internals, no target fingerprinting.
 3. **Preserve exact-draw invariance:** Every local step-size or delayed-rejection rule MUST be involutively / detailed-balance exact (check `codex/cards/walnuts-drghmc.md` for WALNUTS reversible micro-step halving and DRGHMC delayed-rejection acceptance ratios). Unadjusted step-size halving without the reverse-path check will be caught immediately by the Tier 0/1 invariance suite!
 4. **Declared `aux_spec`:** If using persistent momentum (DRGHMC) or auxiliary state, declare its exact stationary law (`"gaussian"`, `"unit_sphere"`, `"rademacher"`, or `{"kind": "product", "parts": [...]}`).
-5. **Simplicity regularizer:** Within $\pm 2\%$ soft-min ratio, fewer LOC, fewer magic constants, or $\ge 15\%$ lower `overhead_ratio` wins (`keep_simpler`).
+5. **Simplicity rule:** A candidate within 2% of the run's best speed-up is kept as `keep_simpler` when it has fewer lines, fewer magic constants or at least 15% lower `overhead_ratio` than the incumbent.
 6. **Never stop early** while trial/wall-clock budget remains.
 
 ## 3. Research Loop & Priority Hypotheses
@@ -28,9 +28,9 @@ Improve `transition()` (and matching warmup parameters in `adapt()`) to eliminat
    - **GIST (Gibbs Self-Tuning) / randomized step-size mixture:** Exact randomized step-size distribution $\epsilon \sim p(\epsilon)$ (e.g. two-scale log-uniform mixture of coarse + fine step sizes) satisfying detailed balance trivially while exploring both funnel mouths and necks!
 3. **Evaluate:**
    ```bash
-   apin autoresearch eval --lane A2 --run-id <run_id> --repeats 2 --codex-ref walnuts-drghmc --hypothesis "..."
+   apin autoresearch eval --lane A2 --run-id <run_id> --codex-ref walnuts-drghmc --hypothesis "..."
    ```
-   Use `--dry-run` first to lint/check duplicates without burning a ledger row. On discard, restore from `autoresearch/lanes/A2/runs/<run_id>/incumbent.py` (do **not** run `git checkout`/`git reset` while other agents share the repo).
+   It prints `METRIC speedup=<x>`, the speed-up over the lane's starting code (`start.py`) on the public seeds, and keeps the change when it beats the run's best by at least 5%. Use `--dry-run` first to lint/check duplicates without burning a ledger row. On discard, restore from `autoresearch/lanes/A2/runs/<run_id>/incumbent.py` (do **not** run `git checkout`/`git reset` while other agents share the repo).
 4. **Real-posterior verification (especially `eight_schools_centered`!):**
    ```bash
    apin run logdensity --label a2_cand --opt sampler=autoresearch/lanes/A2/submission.py --models blr,eight_schools_noncentered,eight_schools_centered,gp_regr,garch11 --reps 3

@@ -8,7 +8,7 @@ author_name = "Numenomics/apin"
 category = "optimize"
 lane = "A2"
 difficulty = "hard"
-description = "Optimize multiscale and funnel-surviving transition dynamics"
+description = "Improve the transition dynamics on funnels and multiscale targets"
 tags = ["mcmc", "optimization", "bayesian", "apin", "A2"]
 
 [agent]
