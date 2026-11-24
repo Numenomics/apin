@@ -166,7 +166,20 @@
         margin-bottom: 6px;
         min-height: 32px;
       }
-      #plot .dot {
+      /* Trials that did not set a new best are drawn on the canvas, under the SVG. */
+      #plot-box {
+        position: relative;
+      }
+      #plot-dots {
+        position: absolute;
+        left: 0;
+        top: 0;
+      }
+      #plot {
+        position: relative;
+      }
+      #plot .dot,
+      #plot-box.on-dot {
         cursor: pointer;
       }
       #plot .dot:focus-visible {
@@ -259,7 +272,7 @@
               <select id="f-agent"><option value="">All agents</option></select>
             </div>
           </div>
-          <div id="plot-box"><svg class="chart" id="plot" role="group" aria-label="Trials in this lane and the best efficiency so far"></svg></div>
+          <div id="plot-box"><canvas id="plot-dots" aria-hidden="true"></canvas><svg class="chart" id="plot" role="group" aria-label="Trials in this lane and the best efficiency so far"></svg></div>
           <figcaption class="reading" id="reading"></figcaption>
         </figure>
       </div>

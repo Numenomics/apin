@@ -7,10 +7,6 @@
 
   apin.mount("autoresearch");
 
-  /* The chart reads a lane to its end, page by page (1,000 points each), and draws at most
-     MAX_DOTS of the trials that did not set a new best. Every trial that did is always drawn. */
-  const MAX_DOTS = 6000;
-
   const state = {
     overview: null,
     lane: null,
@@ -19,6 +15,7 @@
     list: { kind: "trial", rows: [], next: null, seq: 0, note: "" },
     selected: null,
     redraw: null,
+    geom: null, // where the last drawn chart put its points, for finding the dot under the pointer
   };
 
   const decision = (n) => DECISIONS[n.decision] || { label: n.decision, glyph: "tick", note: "" };
@@ -164,7 +161,6 @@
     if (c.failed) parts.push("Could not load every trial of this lane. Reload the page to try again.");
     if (n) parts.push(`${fmt.int(n)} ${n === 1 ? "trial" : "trials"}${setup}.`);
     if (!c.loading && !c.failed && all > n) parts.push(`${fmt.int(all - n)} more used other settings and are in the list below.`);
-    if (n > MAX_DOTS) parts.push("The grey dots are a sample.");
     if (n) parts.push("Efficiency is accuracy per unit of cost, and the weakest of six classes of test target dominates it. Higher is better, with no upper limit. A score usually comes from two repeats and can move by a third between seeds.");
     $("#reading").textContent = parts.join(" ");
   }
@@ -195,6 +191,15 @@
     const H = W < 620 ? 340 : Math.round(Math.min(640, Math.max(420, W * 0.5)));
     el.setAttribute("viewBox", `0 0 ${W} ${H}`);
     el.setAttribute("height", H);
+    const canvas = $("#plot-dots");
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    state.geom = null;
     if (!pts.length) {
       el.appendChild(svg("text", { x: W / 2, y: H / 2, "text-anchor": "middle" }, c.loading ? "Loading trials." : c.failed ? "Could not load this lane." : "No trial on the standard setup yet."));
       return;
@@ -236,22 +241,40 @@
 
     const colors = agentColors(pts);
     const picked = state.agent;
-    const dots = svg("g", {});
-    const stride = Math.max(1, Math.ceil((n - steps.length) / MAX_DOTS));
-    pts.forEach((p, i) => {
-      if (p.step || (stride > 1 && i % stride)) return;
-      const mine = picked && who(p) === picked;
-      const g = svg("g", { class: "dot", "data-i": i, "data-node": p.id });
-      if (scored(p)) {
-        g.appendChild(svg("circle", { cx: sx(i), cy: sy(p.soft_min_eff), r: 6, fill: "transparent" }));
-        g.appendChild(svg("circle", { class: "mark", cx: sx(i), cy: sy(p.soft_min_eff), r: mine ? 3.4 : 2.6, fill: mine ? colors.get(picked) || "var(--ink)" : "var(--ink-3)", "fill-opacity": mine ? 0.9 : picked ? 0.14 : 0.34 }));
-      } else {
-        g.appendChild(svg("rect", { x: sx(i) - 4, y: floor - 9, width: 8, height: 12, fill: "transparent" }));
-        g.appendChild(svg("path", { class: "mark", d: `M${sx(i).toFixed(1)} ${floor - 6}V${floor}`, stroke: "var(--ink-3)", "stroke-width": 1.4, "stroke-opacity": mine ? 0.9 : picked ? 0.14 : 0.4, "stroke-linecap": "round", fill: "none" }));
+    state.geom = { n, W, pad, sx, sy, floor };
+
+    /* Every trial that did not set a new best is one dot on the canvas, or a tick on the
+       bottom row when it has no score. A canvas keeps a lane of many thousand trials fast. */
+    const css = getComputedStyle(document.documentElement);
+    const token = (v) => css.getPropertyValue((String(v).match(/--[\w-]+/) || ["--ink"])[0]).trim() || css.getPropertyValue("--ink").trim();
+    const drawDots = (keep, color, alpha, r) => {
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = color;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.4;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      for (let i = 0; i < n; i += 1) {
+        const p = pts[i];
+        if (p.step || !keep(p) || !scored(p)) continue;
+        const x = sx(i);
+        const y = sy(p.soft_min_eff);
+        ctx.moveTo(x + r, y);
+        ctx.arc(x, y, r, 0, 2 * Math.PI);
       }
-      dots.appendChild(g);
-    });
-    el.appendChild(dots);
+      ctx.fill();
+      ctx.beginPath();
+      for (let i = 0; i < n; i += 1) {
+        const p = pts[i];
+        if (p.step || !keep(p) || scored(p)) continue;
+        ctx.moveTo(sx(i), floor - 6);
+        ctx.lineTo(sx(i), floor);
+      }
+      ctx.stroke();
+    };
+    drawDots((p) => !picked || who(p) !== picked, token("--ink-3"), picked ? 0.14 : 0.34, 2.6);
+    if (picked) drawDots((p) => who(p) === picked, token(colors.get(picked) || "--ink"), 0.9, 3.4);
+    ctx.globalAlpha = 1;
 
     if (steps.length) {
       const idx = new Map(pts.map((p, i) => [p.id, i]));
@@ -278,7 +301,7 @@
         g.appendChild(svg("circle", { cx: x, cy: y, r: 11, fill: color, "fill-opacity": faded ? 0.05 : 0.16 }));
         g.appendChild(svg("circle", { class: "mark", cx: x, cy: y, r: 5, fill: color, "fill-opacity": faded ? 0.3 : 1, stroke: "var(--paper)", "stroke-width": 1 }));
         el.appendChild(g);
-        if (x - lastLabel < 16) return;
+        if (x - lastLabel < 64) return; // labels are rotated, so they need room along x to stay readable
         const room = Math.min((y - 14) / Math.sin(rad), (W - 6 - x) / Math.cos(rad));
         const chars = Math.floor(Math.min(room, 190) / 5.9);
         if (chars < 8) return;
@@ -297,12 +320,49 @@
     );
   }
 
-  $("#plot").addEventListener("mousemove", (e) => {
+  /* The canvas dot under the pointer, or -1. Points sit at equal steps along x, so only the
+     few indices near the pointer are checked. */
+  function dotAt(e) {
+    const g = state.geom;
+    if (!g) return -1;
+    const pts = state.chart.points;
+    const box = $("#plot").getBoundingClientRect();
+    const x = e.clientX - box.left;
+    const y = e.clientY - box.top;
+    const span = g.n > 1 ? (g.W - g.pad.l - g.pad.r) / (g.n - 1) : Infinity;
+    const mid = g.n > 1 ? Math.round((x - g.pad.l) / span) : 0;
+    const reach = g.n > 1 ? Math.ceil(7 / span) : 0;
+    let found = -1;
+    let nearest = 7 * 7;
+    for (let i = Math.max(0, mid - reach); i <= Math.min(g.n - 1, mid + reach); i += 1) {
+      const p = pts[i];
+      if (!p || p.step) continue;
+      const dx = g.sx(i) - x;
+      const dy = (scored(p) ? g.sy(p.soft_min_eff) : g.floor - 3) - y;
+      if (dx * dx + dy * dy < nearest) {
+        nearest = dx * dx + dy * dy;
+        found = i;
+      }
+    }
+    return found;
+  }
+
+  $("#plot-box").addEventListener("mousemove", (e) => {
     const g = e.target.closest(".dot");
-    if (!g) return tip.hide();
-    tip.show(e, pointTip(state.chart.points[Number(g.getAttribute("data-i"))]));
+    const i = g ? Number(g.getAttribute("data-i")) : dotAt(e);
+    $("#plot-box").classList.toggle("on-dot", i >= 0 && !g);
+    if (i < 0) return tip.hide();
+    tip.show(e, pointTip(state.chart.points[i]));
   });
-  $("#plot").addEventListener("mouseleave", tip.hide);
+  $("#plot-box").addEventListener("mouseleave", () => {
+    $("#plot-box").classList.remove("on-dot");
+    tip.hide();
+  });
+  $("#plot-box").addEventListener("click", (e) => {
+    if (e.target.closest(".dot")) return; // a step: the page-wide handler opens it
+    const i = dotAt(e);
+    if (i >= 0) openNode(state.chart.points[i].id);
+  });
 
   function renderLane() {
     renderRail();

@@ -386,9 +386,12 @@
       const res = await getJSON("/api/search" + query({ q, lane, kind: "note", limit, offset }));
       /* A search hit carries a snippet around the match in place of the body. The server
          puts the matched word in square brackets, which are removed here. */
-      const words = q.match(/[\p{L}\p{N}_.:-]+/gu) || [];
-      const plain = (text) => words.reduce((t, w) => t.split(`[${w}]`).join(w).split(`[${w.toLowerCase()}]`).join(w.toLowerCase()), String(text || ""));
-      return { ...res, notes: (res.results || []).map((r) => ({ ...r, kind: r.note_kind, body: r.snippet && r.snippet !== r.title ? plain(r.snippet) : "" })) };
+      const words = (q.match(/[\p{L}\p{N}_.:-]+/gu) || []).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+      const marks = words.length ? new RegExp(`\\[(${words.join("|")})\\]`, "giu") : null;
+      const plain = (text) => (marks ? String(text || "").replace(marks, "$1") : String(text || ""));
+      /* A match in the title alone gives a snippet that repeats the title: show no preview then. */
+      const preview = (r) => (String(r.title || "").includes(plain(r.snippet).replace(/^…|…$/g, "")) ? "" : plain(r.snippet));
+      return { ...res, notes: (res.results || []).map((r) => ({ ...r, kind: r.note_kind, body: preview(r) })) };
     },
     node: async (id) => {
       const res = await getJSON("/api/nodes/" + encodeURIComponent(id));
