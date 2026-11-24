@@ -7,16 +7,14 @@
 
   apin.mount("autoresearch");
 
-  /* The chart reads a lane page by page (1,000 points each) and draws at most MAX_DOTS of the
-     trials that did not set a new best. Every trial that did is always drawn. MAX_PAGES is a
-     safety stop far beyond any lane today. Past it, the best comes from the lane summary. */
-  const MAX_PAGES = 200;
+  /* The chart reads a lane to its end, page by page (1,000 points each), and draws at most
+     MAX_DOTS of the trials that did not set a new best. Every trial that did is always drawn. */
   const MAX_DOTS = 6000;
 
   const state = {
     overview: null,
     lane: null,
-    chart: { lane: null, points: [], dims: null, loading: false, failed: false, capped: false, seq: 0 },
+    chart: { lane: null, points: [], dims: null, loading: false, failed: false, seq: 0 },
     agent: "",
     list: { kind: "trial", rows: [], next: null, seq: 0, note: "" },
     selected: null,
@@ -72,20 +70,17 @@
   async function loadChart() {
     const c = state.chart;
     const seq = ++c.seq;
-    Object.assign(c, { lane: state.lane, points: [], dims: null, loading: true, failed: false, capped: false });
+    Object.assign(c, { lane: state.lane, points: [], dims: null, loading: true, failed: false });
     state.agent = "";
     renderLane();
     try {
       let after;
       for (let page = 0; page === 0 || after; page += 1) {
-        if (page === MAX_PAGES) {
-          c.capped = true;
-          break;
-        }
         const res = await api.chart(state.lane, after);
         if (seq !== c.seq) return; // the reader has moved to another lane
-        c.points = c.points.concat(res.points || []);
+        for (const p of res.points || []) c.points.push(p);
         c.dims = res.standard_dims || null;
+        if (res.next_after === after) throw new Error("the chart cursor did not advance");
         after = res.next_after;
         renderLane();
       }
@@ -113,7 +108,7 @@
     const pts = state.chart.points;
     const steps = pts.filter((p) => p.step);
     const summary = state.overview.lanes.find((l) => l.lane === state.lane) || {};
-    const best = state.chart.capped && summary.frontier ? summary.frontier : steps[steps.length - 1];
+    const best = steps[steps.length - 1];
     $("#prompt").innerHTML = cmd(apin.lanePrompt(laneOf(state.lane)), { prose: true });
 
     if (!best) {
@@ -167,9 +162,8 @@
     const setup = Array.isArray(c.dims) ? ` scored on ${c.dims.join(" and ")} dimensions` : "";
     const parts = [];
     if (c.failed) parts.push("Could not load every trial of this lane. Reload the page to try again.");
-    if (n) parts.push(`${fmt.int(n)}${c.capped ? " or more" : ""} ${n === 1 ? "trial" : "trials"}${setup}.`);
-    if (!c.loading && all > n && !c.capped) parts.push(`${fmt.int(all - n)} more used other settings and are in the list below.`);
-    if (c.capped) parts.push("The chart shows the oldest of them.");
+    if (n) parts.push(`${fmt.int(n)} ${n === 1 ? "trial" : "trials"}${setup}.`);
+    if (!c.loading && !c.failed && all > n) parts.push(`${fmt.int(all - n)} more used other settings and are in the list below.`);
     if (n > MAX_DOTS) parts.push("The grey dots are a sample.");
     if (n) parts.push("Efficiency is accuracy per unit of cost, and the weakest of six classes of test target dominates it. Higher is better, with no upper limit. A score usually comes from two repeats and can move by a third between seeds.");
     $("#reading").textContent = parts.join(" ");
@@ -208,12 +202,19 @@
 
     const pad = { l: 64, r: W < 620 ? 58 : 72, t: 24, b: 40 };
     const steps = pts.filter((p) => p.step);
-    const effs = pts.filter(scored).map((p) => p.soft_min_eff);
-    const best = steps.length ? steps[steps.length - 1].soft_min_eff : Math.max(...effs, 1e-9);
+    /* Lowest and highest score, found in a loop: a lane can hold more points than a call can take as arguments. */
+    let low = Infinity;
+    let high = 1e-9;
+    for (const p of pts) {
+      if (!scored(p)) continue;
+      if (p.soft_min_eff < low) low = p.soft_min_eff;
+      if (p.soft_min_eff > high) high = p.soft_min_eff;
+    }
+    const best = steps.length ? steps[steps.length - 1].soft_min_eff : high;
     const first = steps.length ? steps[0].soft_min_eff : best;
     /* The axis follows the line: a trial far below the start or far above the best sits at the edge. */
-    const lo = Math.max(Math.min(...effs, first), first / 8) / 1.2;
-    const hi = Math.min(Math.max(...effs, best), best * 3) * 1.25;
+    const lo = Math.max(Math.min(low, first), first / 8) / 1.2;
+    const hi = Math.min(Math.max(high, best), best * 3) * 1.25;
     const n = pts.length;
     const sx = (i) => pad.l + (n > 1 ? i / (n - 1) : 0.5) * (W - pad.l - pad.r);
     const sy = (v) => {

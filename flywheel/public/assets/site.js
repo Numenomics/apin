@@ -384,7 +384,11 @@
     notes: async ({ lane, q, offset = 0, limit = 50 } = {}) => {
       if (!q) return getJSON("/api/notes" + query({ lane, limit, offset }));
       const res = await getJSON("/api/search" + query({ q, lane, kind: "note", limit, offset }));
-      return { ...res, notes: (res.results || []).map((r) => ({ ...r, kind: r.note_kind })) };
+      /* A search hit carries a snippet around the match in place of the body. The server
+         puts the matched word in square brackets, which are removed here. */
+      const words = q.match(/[\p{L}\p{N}_.:-]+/gu) || [];
+      const plain = (text) => words.reduce((t, w) => t.split(`[${w}]`).join(w).split(`[${w.toLowerCase()}]`).join(w.toLowerCase()), String(text || ""));
+      return { ...res, notes: (res.results || []).map((r) => ({ ...r, kind: r.note_kind, body: r.snippet && r.snippet !== r.title ? plain(r.snippet) : "" })) };
     },
     node: async (id) => {
       const res = await getJSON("/api/nodes/" + encodeURIComponent(id));

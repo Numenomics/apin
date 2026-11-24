@@ -108,7 +108,7 @@
     { key: "label", label: "Model" },
     { key: "effort", label: "Effort" },
     { key: "tasks", label: "Tasks" },
-    { key: "speedup", label: "Speed-up", num: true, value: (r) => (r.complete ? 1e6 : 0) + (r.speedup || 0) },
+    { key: "speedup", label: "Speed-up", num: true, value: (r) => r.speedup || 0 },
     { key: "cost", label: "Cost", num: true, value: (r) => r.total_cost_usd },
     { key: "tokens", label: "Tokens", num: true, value: (r) => r.total_tokens },
     { key: "time", label: "Agent time", num: true, value: (r) => r.total_wall_s },
@@ -123,7 +123,8 @@
       return;
     }
     const col = COLUMNS.find((c) => c.key === state.sort.key);
-    if (col && col.value) list.sort((a, b) => (col.value(a) - col.value(b)) * state.sort.dir);
+    /* Rows with an unfinished task stay last whichever way a column is sorted. */
+    if (col && col.value) list.sort((a, b) => Number(b.complete) - Number(a.complete) || (col.value(a) - col.value(b)) * state.sort.dir);
 
     const head = COLUMNS.map((c) => {
       const sorted = state.sort.key === c.key ? ` aria-sort="${state.sort.dir < 0 ? "descending" : "ascending"}"` : "";
