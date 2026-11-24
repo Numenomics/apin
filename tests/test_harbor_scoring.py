@@ -168,6 +168,7 @@ def test_the_verifier_requires_both_confinement_layers(verify, tmp_path, monkeyp
     that cannot be installed must fail the run, not be skipped."""
     from harness import sandbox
     monkeypatch.setenv(sandbox.ENV_SANDBOX, "auto")
+    monkeypatch.setattr(verify, "_CONFINEMENT_PROBE", "pass")  # the mode is under test here, not this machine
     seen = {}
     monkeypatch.setattr(verify, "verify_optimize", lambda *a, **k: seen.setdefault("mode", sandbox.sandbox_mode()) and 0)
     assert verify.main(["optimize", "--lane", "A2", "--submission", str(tmp_path / "s.py"), "--out-dir", str(tmp_path)]) == 0

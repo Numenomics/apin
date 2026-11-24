@@ -73,7 +73,7 @@
       for (let page = 0; page === 0 || after; page += 1) {
         const res = await api.chart(state.lane, after);
         if (seq !== c.seq) return; // the reader has moved to another lane
-        if (page > 0 && res.yardstick !== yardstick) return loadChart(); // the grading setup changed between pages
+        if (page > 0 && res.yardstick !== yardstick) throw new Error("the lane's grading setup changed during the load");
         yardstick = res.yardstick;
         for (const p of res.points || []) c.points.push(p);
         if (res.next_after === after) throw new Error("the chart cursor did not advance");
