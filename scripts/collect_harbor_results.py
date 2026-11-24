@@ -440,9 +440,9 @@ OUTCOMES = ("solved", "improved", "no_gain", "invalid")
 # result because one of its own denominators failed. Both are left out of every count.
 NOT_SCORED = ("interrupted", "unscorable")
 SCORING_NOTES = {
-    "reference": "Speed-ups are relative to a Stan-style reference sampler on the same seeds. "
-                 "A speed-up task is solved when the result is valid, beats the starting code by 5% and matches the reference.",
-    "start": "Earlier release. Speed-ups are relative to the starting code, containers were not sealed and agents had a one-hour limit. "
+    "reference": "A speed-up is a sampler's efficiency relative to the starting code, on hidden seeds, "
+                 "in a sealed container with a 24-hour limit.",
+    "start": "Earlier release. Containers were not sealed and agents had a one-hour limit. "
              "Not comparable with later releases.",
 }
 
@@ -517,41 +517,33 @@ def _geomean(values: list[float]) -> float | None:
     return round(math.exp(sum(math.log(v) for v in values) / len(values)), 4) if values else None
 
 
-def _summarise_task(rows: list[dict[str, Any]], scoring: str) -> dict[str, Any]:
+def _summarise_task(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """All attempts of one setting on one task."""
     scored = [r for r in rows if r["outcome"] not in NOT_SCORED]
-    key = "ref_speedup" if scoring == "reference" else "start_speedup"
-    success = ("solved",) if scoring == "reference" or rows[0]["category"] == "rewind" else ("solved", "improved")
+    valid = [r for r in scored if r["outcome"] != "invalid"]
     # An invalid attempt earned no speed-up: it counts as zero in the task mean.
-    ratios = [(_num(r.get(key)) or 0.0) if r["outcome"] != "invalid" else 0.0 for r in scored]
-    # Share of the distance from the starting code to the lane's frozen frontier that was closed
-    # (0 for an invalid attempt, as for unchanged code); only where the verifier reported it.
-    gaps = [0.0 if r["outcome"] == "invalid" else _num(r.get("gap_closed")) for r in scored]
-    gaps = [g for g in gaps if g is not None]
+    ratios = [(_num(r.get("start_speedup")) or 0.0) if r["outcome"] != "invalid" else 0.0 for r in scored]
+    refs = [v for v in (_num(r.get("ref_speedup")) for r in valid) if v is not None]
     counts = {o: sum(1 for r in scored if r["outcome"] == o) for o in OUTCOMES}
-    n_ok = sum(counts[o] for o in success)
-    best = max(scored, key=lambda r: (r["outcome"] in success, _num(r.get(key)) or 0.0), default=None)
+    best = max(scored, key=lambda r: (r["outcome"] != "invalid", _num(r.get("start_speedup")) or 0.0), default=None)
     return {
-        "category": rows[0]["category"],
         "attempts": len(scored),
         "interrupted": len(rows) - len(scored),
+        "valid": len(valid),
         "outcomes": {o: n for o, n in counts.items() if n},
-        "solve_rate": round(n_ok / len(scored), 4) if scored else None,
-        "ratio_mean": round(sum(ratios) / len(ratios), 4) if ratios else None,
-        "ratio_min": round(min(ratios), 4) if ratios else None,
-        "ratio_max": round(max(ratios), 4) if ratios else None,
-        "gap_closed_mean": round(sum(gaps) / len(gaps), 4) if gaps else None,
+        "speedup": round(sum(ratios) / len(ratios), 4) if ratios else None,
+        "speedup_min": round(min(ratios), 4) if ratios else None,
+        "speedup_max": round(max(ratios), 4) if ratios else None,
+        "ref_speedup": round(sum(refs) / len(refs), 4) if refs else None,
         "best_trial": best["trial_id"] if best else None,
         "trial_ids": [r["trial_id"] for r in rows],
     }
 
 
-def summarise_setting(rows: list[dict[str, Any]], tasks: list[str], scoring: str, label: str) -> dict[str, Any]:
+def summarise_setting(rows: list[dict[str, Any]], tasks: list[str], label: str) -> dict[str, Any]:
     """One leaderboard row: every attempt one model and effort setting made in one release."""
-    per_task = {tid: _summarise_task([r for r in rows if r["task_id"] == tid], scoring) for tid in tasks if any(r["task_id"] == tid for r in rows)}
-    done = {tid: s for tid, s in per_task.items() if s["attempts"]}
-    fixes = [s for s in done.values() if s["category"] == "rewind"]
-    opts = [s for s in done.values() if s["category"] == "optimize"]
+    per_task = {tid: _summarise_task([r for r in rows if r["task_id"] == tid]) for tid in tasks if any(r["task_id"] == tid for r in rows)}
+    done = [s for s in per_task.values() if s["attempts"]]
     scored = [r for r in rows if r["outcome"] not in NOT_SCORED]
 
     def total(field: str) -> float:
@@ -574,16 +566,11 @@ def summarise_setting(rows: list[dict[str, Any]], tasks: list[str], scoring: str
         "complete": len(done) == len(tasks),
         "attempts": len(scored),
         "interrupted": len(rows) - len(scored),
-        "attempts_per_task": max((s["attempts"] for s in done.values()), default=0),
-        # Expected number of tasks solved by one attempt at each: the ranking key.
-        "solved": round(sum(s["solve_rate"] for s in done.values()), 3),
-        "fix_solved": round(sum(s["solve_rate"] for s in fixes), 3),
-        "fix_total": sum(1 for t in tasks if t.startswith("s3-")),
-        "opt_solved": round(sum(s["solve_rate"] for s in opts), 3),
-        "opt_total": sum(1 for t in tasks if not t.startswith("s3-")),
-        "opt_valid": round(sum(1 - s["outcomes"].get("invalid", 0) / s["attempts"] for s in opts), 3),
-        "opt_geomean": _geomean([max(s["ratio_mean"], INVALID_FLOOR) for s in opts]),
-        "opt_gap_closed": (lambda g: round(sum(g) / len(g), 4) if g else None)([s["gap_closed_mean"] for s in opts if s["gap_closed_mean"] is not None]),
+        "attempts_per_task": max((s["attempts"] for s in done), default=0),
+        # The ranking key: geometric mean, over the tasks with a scored attempt, of efficiency
+        # relative to the starting code. A task with no valid attempt enters at INVALID_FLOOR.
+        "speedup": _geomean([max(s["speedup"], INVALID_FLOOR) for s in done]),
+        "valid": round(sum(s["valid"] / s["attempts"] for s in done), 3),
         "tasks": per_task,
         "total_cost_usd": round(total("cost_usd"), 5),
         "total_tokens": int(total("total_tokens")),
@@ -604,18 +591,23 @@ def summarise_setting(rows: list[dict[str, Any]], tasks: list[str], scoring: str
 
 
 def summarise_release(release: str, trials: list[dict[str, Any]], pricing: dict[str, Any]) -> dict[str, Any]:
-    """Leaderboard and attempts for one benchmark release."""
-    # A release is scored against the reference once any of its attempts carries a reference ratio.
+    """Leaderboard and attempts for one benchmark release.
+
+    The benchmark is the speed-up tasks. Attempts at the bug-fix tasks of lane S3 stay in
+    `trials` as a record, but no leaderboard row, count or cost includes them.
+    """
+    # A release has a Stan-style reference once any of its attempts carries a reference ratio.
     scoring = "reference" if any(_num(t.get("ref_speedup")) is not None for t in trials) else "start"
-    tasks = sorted({t["task_id"] for t in trials})
+    speed = [t for t in trials if t["category"] == "optimize"]
+    tasks = sorted({t["task_id"] for t in speed})
     by_cfg: dict[str, list[dict[str, Any]]] = {}
-    for t in trials:
+    for t in speed:
         by_cfg.setdefault(t["config_key"], []).append(t)
     labels = pricing.get("models") or {}
-    board = [summarise_setting(rows, tasks, scoring, labels.get(rows[0]["model"], {}).get("label") or rows[0]["model"]) for _, rows in sorted(by_cfg.items())]
-    # Settings with a result on every task come first; among them more tasks solved, then the larger
-    # typical speed-up, then the cheaper sweep.
-    board.sort(key=lambda r: (not r["complete"], -r["solved"], -(r["opt_geomean"] or 0.0), r["total_cost_usd"]))
+    board = [summarise_setting(rows, tasks, labels.get(rows[0]["model"], {}).get("label") or rows[0]["model"]) for _, rows in sorted(by_cfg.items())]
+    # Settings with a result on every task come first; among them the larger speed-up, then the
+    # cheaper sweep.
+    board.sort(key=lambda r: (not r["complete"], -(r["speedup"] or 0.0), r["total_cost_usd"]))
     for idx, row in enumerate(board, start=1):
         row["rank"] = idx
     return {
@@ -640,7 +632,7 @@ def aggregate_results(trials: list[dict[str, Any]], pricing: dict[str, Any], *, 
         by_release.setdefault(str(t.get("release") or release_tag), []).append(t)
     releases = [summarise_release(tag, rows, pricing) for tag, rows in sorted(by_release.items(), key=lambda kv: _release_order(kv[0]), reverse=True)]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "current_release": releases[0]["release"] if releases else release_tag,
         "invalid_floor": INVALID_FLOOR,

@@ -446,7 +446,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ac = ar_sub.add_parser("claim", help="reserve a task on the Flywheel so nobody else runs the same idea (needs a token: `apin autoresearch register`)")
     ac.add_argument("--task", required=True, help="task id from scripts/choose_research_task.py --list, or a short slug of your own")
-    ac.add_argument("--lane", required=True, help="lane the task belongs to (A0..A4, S1..S3)")
+    ac.add_argument("--lane", required=True, help="lane the task belongs to (A0..A4, S2, S3)")
     ac.add_argument("--agent", required=True, help="your handle, or the model doing the work")
     ac.add_argument("--summary", default="", help="one sentence on what you plan to try")
     ac.add_argument("--ttl-minutes", type=int, default=60, help="how long the claim holds before it expires on its own")
@@ -511,15 +511,6 @@ def main(argv: list[str] | None = None) -> int:
     avn.add_argument("--run-id", default="verify", help="run directory for candidates and work files")
     avn.add_argument("--no-queue", action="store_true", help="bypass the host FIFO evaluation lock")
 
-    as1 = ar_sub.add_parser("eval-s1", help="evaluate Lane S1 upstream sampler patch")
-    as1.add_argument("--upstream", required=True, help="upstream submodule name (e.g. walnutpie, stan, nuts-rs)")
-    as1.add_argument("--hypothesis", required=True)
-    as1.add_argument("--allowed-path", action="append", default=[], dest="allowed_paths")
-    as1.add_argument("--build-cmd")
-    as1.add_argument("--test-cmd")
-    as1.add_argument("--bench-cmd")
-    as1.add_argument("--run-id", default="default")
-    as1.add_argument("--dry-run", action="store_true")
 
     as2 = ar_sub.add_parser("eval-s2", help="evaluate Lane S2 gradient/compiler speed patch")
     as2.add_argument("--upstream", required=True, help="upstream submodule name (e.g. math, stan, stanc3, bridgestan)")
@@ -659,14 +650,6 @@ def main(argv: list[str] | None = None) -> int:
         }
         if a.ar_cmd in handlers:
             return handlers[a.ar_cmd](a)
-        if a.ar_cmd == "eval-s1":
-            row = systems_lanes.evaluate_s1_trial(
-                a.upstream, a.hypothesis, allowed_paths=a.allowed_paths,
-                build_cmd=a.build_cmd, test_cmd=a.test_cmd, bench_cmd=a.bench_cmd,
-                run_id=a.run_id, dry_run=a.dry_run,
-            )
-            print(f"{row['trial_id']} [S1:{a.upstream}] decision={row['decision']} paths_ok={row.get('paths_ok')} wall={row['wall_s']}s")
-            return 0 if row["decision"] in ("dry_run_ok", "keep", "keep_tests_only") else 1
         if a.ar_cmd == "eval-s2":
             row = systems_lanes.evaluate_s2_trial(
                 a.upstream, a.hypothesis, allowed_paths=a.allowed_paths,

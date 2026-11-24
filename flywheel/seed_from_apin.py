@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Seed apin Flywheel D1 SQL (`flywheel/seed.sql`) and static dashboard snapshot
-(`flywheel/public/snapshot.json`) from local autoresearch ledgers and real-Stan score CSVs.
+"""Seed apin Flywheel D1 SQL (`flywheel/seed.sql`) from local autoresearch ledgers and
+real-Stan score CSVs.
 """
 
 from __future__ import annotations
@@ -13,6 +13,21 @@ from pathlib import Path
 from typing import Any
 
 KEPT_DECISIONS = {"keep", "keep_baseline", "keep_simpler"}
+
+# Migration 0004 holds the statements that set nodes.standard and nodes.frontier_step from
+# the rows. The Worker sets both on every write, but seed.sql writes rows directly, so it ends
+# with the same statements, read from the migration so they are kept in one place.
+FLAG_MIGRATION = Path(__file__).resolve().parent / "migrations" / "0004_frontier_steps.sql"
+
+
+def flag_backfill_sql(migration: Path = FLAG_MIGRATION) -> str:
+    """The statements between BACKFILL BEGIN and BACKFILL END in migration 0004."""
+    text = migration.read_text(encoding="utf-8")
+    _, _, rest = text.partition("-- BACKFILL BEGIN")
+    block, found, _ = rest.partition("-- BACKFILL END")
+    if not found:
+        raise ValueError(f"no BACKFILL block in {migration}")
+    return block.strip()
 
 # Explicit mapping from real-Stan score CSV labels to (lane, run_id, target_selector)
 # target_selector is either "final_kept" or "baseline".
@@ -132,17 +147,6 @@ def load_real_stan_scores(repo_root: Path) -> dict[str, dict[str, Any]]:
             }
 
     return aggregated
-
-
-def _finite(value: Any) -> Any:
-    """Copy of `value` with NaN and infinities replaced by None."""
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, dict):
-        return {k: _finite(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_finite(v) for v in value]
-    return value
 
 
 def collect_nodes(repo_root: Path) -> list[dict[str, Any]]:
@@ -334,86 +338,6 @@ def collect_nodes(repo_root: Path) -> list[dict[str, Any]]:
     return nodes
 
 
-def compute_frontier(nodes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    by_lane: dict[str, list[dict[str, Any]]] = {}
-    for node in nodes:
-        by_lane.setdefault(node["lane"], []).append(node)
-
-    frontier: dict[str, dict[str, Any]] = {}
-    for lane in sorted(by_lane):
-        lane_nodes = by_lane[lane]
-        eligible = [n for n in lane_nodes if n["verified"] == 1 or n["decision"] in KEPT_DECISIONS]
-        pool = eligible if eligible else lane_nodes
-        if pool:
-            pool.sort(
-                key=lambda n: (
-                    n["soft_min_eff"] if n["soft_min_eff"] is not None else float("-inf"),
-                    n["verified"],
-                    n["real_stan_passed"] if n["real_stan_passed"] is not None else -1,
-                    n["created_at"],
-                    n["id"],
-                ),
-                reverse=True,
-            )
-            frontier[lane] = pool[0]
-    return frontier
-
-
-def compute_alignment(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    alignment: list[dict[str, Any]] = []
-    for n in nodes:
-        if (
-            n["soft_min_eff"] is not None
-            and n["real_stan_passed"] is not None
-            and n["real_stan_total"] is not None
-            and n["real_stan_total"] > 0
-        ):
-            alignment.append(
-                {
-                    "id": n["id"],
-                    "lane": n["lane"],
-                    "run_id": n["run_id"],
-                    "trial_id": n["trial_id"],
-                    "agent_model": n["agent_model"],
-                    "title": n["title"],
-                    "decision": n["decision"],
-                    "soft_min_eff": n["soft_min_eff"],
-                    "ratio_vs_incumbent": n["ratio_vs_incumbent"],
-                    "real_stan_passed": n["real_stan_passed"],
-                    "real_stan_total": n["real_stan_total"],
-                    "real_stan_pass_rate": n["real_stan_passed"] / n["real_stan_total"],
-                    "real_ess_per_cost": n["real_ess_per_cost"],
-                    "overhead_ratio": n["overhead_ratio"],
-                    "verified": n["verified"],
-                }
-            )
-    return alignment
-
-
-def build_snapshot(
-    nodes: list[dict[str, Any]], claims: list[dict[str, Any]] | None = None
-) -> dict[str, Any]:
-    node_ids = {n["id"] for n in nodes}
-    edges = [
-        {
-            "source": n["parent_id"],
-            "target": n["id"],
-            "lane": n["lane"],
-            "decision": n["decision"],
-            "relation": "incumbent",
-        }
-        for n in nodes
-        if n["parent_id"] is not None and n["parent_id"] in node_ids
-    ]
-    return {
-        "nodes": nodes,
-        "edges": edges,
-        "frontier": compute_frontier(nodes),
-        "claims": list(claims) if claims else [],
-        "alignment": compute_alignment(nodes),
-    }
-
-
 def _sql_literal(val: Any) -> str:
     if val is None:
         return "NULL"
@@ -507,32 +431,26 @@ def render_seed_sql(nodes: list[dict[str, Any]]) -> str:
                 "INSERT OR IGNORE INTO node_parents (child, parent, relation, created_at) VALUES "
                 f"({_sql_literal(n['id'])}, {_sql_literal(n['parent_id'])}, 'incumbent', {_sql_literal(n['created_at'])});"
             )
+    lines.append("-- Standard setup and frontier steps (the BACKFILL block of migrations/0004_frontier_steps.sql).")
+    lines.append(flag_backfill_sql())
     lines.append("")
     return "\n".join(lines)
 
 
 def generate_seed_artifacts(repo_root: Path, flywheel_dir: Path | None = None) -> dict[str, Any]:
     target_dir = flywheel_dir if flywheel_dir is not None else repo_root / "flywheel"
-    public_dir = target_dir / "public"
-    public_dir.mkdir(parents=True, exist_ok=True)
+    target_dir.mkdir(parents=True, exist_ok=True)
 
     nodes = collect_nodes(repo_root)
-    snapshot = build_snapshot(nodes)
-    seed_sql = render_seed_sql(nodes)
-
+    node_ids = {n["id"] for n in nodes}
     sql_path = target_dir / "seed.sql"
-    snapshot_path = public_dir / "snapshot.json"
-    sql_path.write_text(seed_sql, encoding="utf-8")
-    # Browsers reject the bare NaN / Infinity that json.dumps writes for non-finite floats.
-    snapshot_path.write_text(json.dumps(_finite(snapshot), indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    sql_path.write_text(render_seed_sql(nodes), encoding="utf-8")
 
     return {
         "nodes": len(nodes),
-        "edges": len(snapshot["edges"]),
-        "lanes": sorted(snapshot["frontier"].keys()),
-        "alignment": len(snapshot["alignment"]),
+        "edges": sum(1 for n in nodes if n["parent_id"] is not None and n["parent_id"] in node_ids),
+        "lanes": sorted({n["lane"] for n in nodes}),
         "sql_path": str(sql_path),
-        "snapshot_path": str(snapshot_path),
     }
 
 
@@ -542,9 +460,8 @@ def main() -> None:
     summary = generate_seed_artifacts(repo_root, flywheel_dir)
     print(
         f"Seeded apin Flywheel: {summary['nodes']} nodes, {summary['edges']} edges, "
-        f"lanes={summary['lanes']}, alignment={summary['alignment']}\n"
-        f"  SQL:      {summary['sql_path']}\n"
-        f"  Snapshot: {summary['snapshot_path']}"
+        f"lanes={summary['lanes']}\n"
+        f"  SQL: {summary['sql_path']}"
     )
 
 

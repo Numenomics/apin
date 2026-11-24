@@ -1,22 +1,19 @@
 {
-  "schema_version": 2,
-  "generated_at": "2026-11-23T10:03:22Z",
+  "schema_version": 3,
+  "generated_at": "2026-11-23T23:54:27Z",
   "current_release": "bench-v0.2.0",
   "invalid_floor": 0.1,
   "releases": [
     {
       "release": "bench-v0.2.0",
       "scoring": "reference",
-      "note": "Speed-ups are relative to a Stan-style reference sampler on the same seeds. A speed-up task is solved when the result is valid, beats the starting code by 5% and matches the reference.",
+      "note": "A speed-up is a sampler's efficiency relative to the starting code, on hidden seeds, in a sealed container with a 24-hour limit.",
       "tasks": [
         "a0-ground-up",
         "a1-preconditioning",
         "a2-funnel-dynamics",
         "a3-integrator-trajectory",
-        "a4-nonlinear-transport",
-        "s3-missing-jacobian-a4",
-        "s3-position-gated-mh",
-        "s3-unadjusted-ula"
+        "a4-nonlinear-transport"
       ],
       "task_meta": {
         "a0-ground-up": {
@@ -78,204 +75,9 @@
             "reference": 0.00031748545686222026,
             "frontier": null
           }
-        },
-        "s3-missing-jacobian-a4": {
-          "category": "rewind",
-          "title": "Fix missing log-det-Jacobian & pullback gradient in Lane A4 sinh-arcsinh transport",
-          "lane": null,
-          "difficulty": "easy",
-          "agent_timeout_s": 86400.0
-        },
-        "s3-position-gated-mh": {
-          "category": "rewind",
-          "title": "Fix position-dependent kernel gating MH detailed-balance bias",
-          "lane": null,
-          "difficulty": "easy",
-          "agent_timeout_s": 86400.0
-        },
-        "s3-unadjusted-ula": {
-          "category": "rewind",
-          "title": "Add Metropolis-Hastings adjustment to biased unadjusted Langevin (ULA) kernel",
-          "lane": null,
-          "difficulty": "easy",
-          "agent_timeout_s": 86400.0
         }
       },
       "leaderboard": [
-        {
-          "config_key": "zai-coding-plan/glm-5.3-flash#low",
-          "model": "zai-coding-plan/glm-5.3-flash",
-          "label": "GLM-5.3-Flash",
-          "effort": "low",
-          "agents": [
-            "opencode-v2"
-          ],
-          "n_tasks": 8,
-          "tasks_run": 6,
-          "complete": false,
-          "attempts": 6,
-          "interrupted": 3,
-          "attempts_per_task": 1,
-          "solved": 5.0,
-          "fix_solved": 3.0,
-          "fix_total": 3,
-          "opt_solved": 2.0,
-          "opt_total": 5,
-          "opt_valid": 3.0,
-          "opt_geomean": 1.8277,
-          "opt_gap_closed": 1.203,
-          "tasks": {
-            "a0-ground-up": {
-              "category": "optimize",
-              "attempts": 0,
-              "interrupted": 2,
-              "outcomes": {},
-              "solve_rate": null,
-              "ratio_mean": null,
-              "ratio_min": null,
-              "ratio_max": null,
-              "gap_closed_mean": null,
-              "best_trial": null,
-              "trial_ids": [
-                "a0-ground-up__4b5CFNd",
-                "a0-ground-up__ePoPLPp"
-              ]
-            },
-            "a1-preconditioning": {
-              "category": "optimize",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "no_gain": 1
-              },
-              "solve_rate": 0.0,
-              "ratio_mean": 1.2154,
-              "ratio_min": 1.2154,
-              "ratio_max": 1.2154,
-              "gap_closed_mean": null,
-              "best_trial": "a1-preconditioning__PRjattp",
-              "trial_ids": [
-                "a1-preconditioning__PRjattp"
-              ]
-            },
-            "a2-funnel-dynamics": {
-              "category": "optimize",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 1.2969,
-              "ratio_min": 1.2969,
-              "ratio_max": 1.2969,
-              "gap_closed_mean": null,
-              "best_trial": "a2-funnel-dynamics__QZwncKm",
-              "trial_ids": [
-                "a2-funnel-dynamics__QZwncKm"
-              ]
-            },
-            "a3-integrator-trajectory": {
-              "category": "optimize",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 3.8735,
-              "ratio_min": 3.8735,
-              "ratio_max": 3.8735,
-              "gap_closed_mean": 1.203,
-              "best_trial": "a3-integrator-trajectory__E4umxGL",
-              "trial_ids": [
-                "a3-integrator-trajectory__E4umxGL"
-              ]
-            },
-            "a4-nonlinear-transport": {
-              "category": "optimize",
-              "attempts": 0,
-              "interrupted": 1,
-              "outcomes": {},
-              "solve_rate": null,
-              "ratio_mean": null,
-              "ratio_min": null,
-              "ratio_max": null,
-              "gap_closed_mean": null,
-              "best_trial": null,
-              "trial_ids": [
-                "a4-nonlinear-transport__a5WwcN8"
-              ]
-            },
-            "s3-missing-jacobian-a4": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-missing-jacobian-a4__grNs2i9",
-              "trial_ids": [
-                "s3-missing-jacobian-a4__grNs2i9"
-              ]
-            },
-            "s3-position-gated-mh": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-position-gated-mh__o8YnNjn",
-              "trial_ids": [
-                "s3-position-gated-mh__o8YnNjn"
-              ]
-            },
-            "s3-unadjusted-ula": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-unadjusted-ula__vwoufC5",
-              "trial_ids": [
-                "s3-unadjusted-ula__vwoufC5"
-              ]
-            }
-          },
-          "total_cost_usd": 2.03801,
-          "total_tokens": 87266102,
-          "input_tokens": 1067894,
-          "cached_tokens": 85652800,
-          "output_tokens": 240885,
-          "reasoning_tokens": 304523,
-          "cache_hit_rate": 0.9877,
-          "total_wall_s": 23261.6,
-          "max_wall_s": 5813.9,
-          "time_limit_hits": 0,
-          "mean_turns": 53.2,
-          "mean_tool_calls": 53.0,
-          "mean_test_runs": 9.8,
-          "mean_loc": 123.5,
-          "mean_cyclomatic": 22.2,
-          "rank": 1
-        },
         {
           "config_key": "zai-coding-plan/glm-5.3-flash#high",
           "model": "zai-coding-plan/glm-5.3-flash",
@@ -284,157 +86,229 @@
           "agents": [
             "opencode-v2"
           ],
-          "n_tasks": 8,
-          "tasks_run": 0,
+          "n_tasks": 5,
+          "tasks_run": 4,
           "complete": false,
-          "attempts": 0,
-          "interrupted": 8,
-          "attempts_per_task": 0,
-          "solved": 0,
-          "fix_solved": 0,
-          "fix_total": 3,
-          "opt_solved": 0,
-          "opt_total": 5,
-          "opt_valid": 0,
-          "opt_geomean": null,
-          "opt_gap_closed": null,
+          "attempts": 4,
+          "interrupted": 5,
+          "attempts_per_task": 1,
+          "speedup": 1.7879,
+          "valid": 3.0,
           "tasks": {
             "a0-ground-up": {
-              "category": "optimize",
-              "attempts": 0,
+              "attempts": 1,
               "interrupted": 1,
-              "outcomes": {},
-              "solve_rate": null,
-              "ratio_mean": null,
-              "ratio_min": null,
-              "ratio_max": null,
-              "gap_closed_mean": null,
-              "best_trial": null,
+              "valid": 1,
+              "outcomes": {
+                "solved": 1
+              },
+              "speedup": 4.6689,
+              "speedup_min": 4.6689,
+              "speedup_max": 4.6689,
+              "ref_speedup": 4.2591,
+              "best_trial": "a0-ground-up__isHJ5pF",
               "trial_ids": [
-                "a0-ground-up__mWo4twK"
+                "a0-ground-up__mWo4twK",
+                "a0-ground-up__isHJ5pF"
               ]
             },
             "a1-preconditioning": {
-              "category": "optimize",
-              "attempts": 0,
+              "attempts": 1,
               "interrupted": 1,
-              "outcomes": {},
-              "solve_rate": null,
-              "ratio_mean": null,
-              "ratio_min": null,
-              "ratio_max": null,
-              "gap_closed_mean": null,
-              "best_trial": null,
+              "valid": 0,
+              "outcomes": {
+                "invalid": 1
+              },
+              "speedup": 0.0,
+              "speedup_min": 0.0,
+              "speedup_max": 0.0,
+              "ref_speedup": null,
+              "best_trial": "a1-preconditioning__3D9BNRR",
               "trial_ids": [
-                "a1-preconditioning__AnsAUBi"
+                "a1-preconditioning__AnsAUBi",
+                "a1-preconditioning__3D9BNRR"
               ]
             },
             "a2-funnel-dynamics": {
-              "category": "optimize",
-              "attempts": 0,
+              "attempts": 1,
               "interrupted": 1,
-              "outcomes": {},
-              "solve_rate": null,
-              "ratio_mean": null,
-              "ratio_min": null,
-              "ratio_max": null,
-              "gap_closed_mean": null,
-              "best_trial": null,
+              "valid": 1,
+              "outcomes": {
+                "solved": 1
+              },
+              "speedup": 3.1071,
+              "speedup_min": 3.1071,
+              "speedup_max": 3.1071,
+              "ref_speedup": 2.3566,
+              "best_trial": "a2-funnel-dynamics__qK8LtiC",
               "trial_ids": [
-                "a2-funnel-dynamics__eiLBv8h"
+                "a2-funnel-dynamics__eiLBv8h",
+                "a2-funnel-dynamics__qK8LtiC"
               ]
             },
             "a3-integrator-trajectory": {
-              "category": "optimize",
-              "attempts": 0,
+              "attempts": 1,
               "interrupted": 1,
-              "outcomes": {},
-              "solve_rate": null,
-              "ratio_mean": null,
-              "ratio_min": null,
-              "ratio_max": null,
-              "gap_closed_mean": null,
-              "best_trial": null,
+              "valid": 1,
+              "outcomes": {
+                "solved": 1
+              },
+              "speedup": 7.0434,
+              "speedup_min": 7.0434,
+              "speedup_max": 7.0434,
+              "ref_speedup": 5.3421,
+              "best_trial": "a3-integrator-trajectory__yn3GjPv",
               "trial_ids": [
-                "a3-integrator-trajectory__M2uADL5"
+                "a3-integrator-trajectory__M2uADL5",
+                "a3-integrator-trajectory__yn3GjPv"
               ]
             },
             "a4-nonlinear-transport": {
-              "category": "optimize",
               "attempts": 0,
               "interrupted": 1,
+              "valid": 0,
               "outcomes": {},
-              "solve_rate": null,
-              "ratio_mean": null,
-              "ratio_min": null,
-              "ratio_max": null,
-              "gap_closed_mean": null,
+              "speedup": null,
+              "speedup_min": null,
+              "speedup_max": null,
+              "ref_speedup": null,
               "best_trial": null,
               "trial_ids": [
                 "a4-nonlinear-transport__CFqS39Y"
               ]
-            },
-            "s3-missing-jacobian-a4": {
-              "category": "rewind",
+            }
+          },
+          "total_cost_usd": 3.48174,
+          "total_tokens": 147053137,
+          "input_tokens": 1915331,
+          "cached_tokens": 144118208,
+          "output_tokens": 270943,
+          "reasoning_tokens": 748655,
+          "cache_hit_rate": 0.9869,
+          "total_wall_s": 34110.5,
+          "max_wall_s": 7799.1,
+          "time_limit_hits": 0,
+          "mean_turns": 163.2,
+          "mean_tool_calls": 168.2,
+          "mean_test_runs": 13.8,
+          "mean_loc": 206.2,
+          "mean_cyclomatic": 40.0,
+          "rank": 1
+        },
+        {
+          "config_key": "zai-coding-plan/glm-5.3-flash#low",
+          "model": "zai-coding-plan/glm-5.3-flash",
+          "label": "GLM-5.3-Flash",
+          "effort": "low",
+          "agents": [
+            "opencode-v2"
+          ],
+          "n_tasks": 5,
+          "tasks_run": 4,
+          "complete": false,
+          "attempts": 4,
+          "interrupted": 4,
+          "attempts_per_task": 1,
+          "speedup": 1.5943,
+          "valid": 4.0,
+          "tasks": {
+            "a0-ground-up": {
               "attempts": 0,
-              "interrupted": 1,
+              "interrupted": 3,
+              "valid": 0,
               "outcomes": {},
-              "solve_rate": null,
-              "ratio_mean": null,
-              "ratio_min": null,
-              "ratio_max": null,
-              "gap_closed_mean": null,
+              "speedup": null,
+              "speedup_min": null,
+              "speedup_max": null,
+              "ref_speedup": null,
               "best_trial": null,
               "trial_ids": [
-                "s3-missing-jacobian-a4__WLAtTX7"
+                "a0-ground-up__4b5CFNd",
+                "a0-ground-up__ePoPLPp",
+                "a0-ground-up__DkonjAX"
               ]
             },
-            "s3-position-gated-mh": {
-              "category": "rewind",
-              "attempts": 0,
-              "interrupted": 1,
-              "outcomes": {},
-              "solve_rate": null,
-              "ratio_mean": null,
-              "ratio_min": null,
-              "ratio_max": null,
-              "gap_closed_mean": null,
-              "best_trial": null,
+            "a1-preconditioning": {
+              "attempts": 1,
+              "interrupted": 0,
+              "valid": 1,
+              "outcomes": {
+                "no_gain": 1
+              },
+              "speedup": 0.8348,
+              "speedup_min": 0.8348,
+              "speedup_max": 0.8348,
+              "ref_speedup": 1.2154,
+              "best_trial": "a1-preconditioning__PRjattp",
               "trial_ids": [
-                "s3-position-gated-mh__snv9qkx"
+                "a1-preconditioning__PRjattp"
               ]
             },
-            "s3-unadjusted-ula": {
-              "category": "rewind",
-              "attempts": 0,
-              "interrupted": 1,
-              "outcomes": {},
-              "solve_rate": null,
-              "ratio_mean": null,
-              "ratio_min": null,
-              "ratio_max": null,
-              "gap_closed_mean": null,
-              "best_trial": null,
+            "a2-funnel-dynamics": {
+              "attempts": 1,
+              "interrupted": 0,
+              "valid": 1,
+              "outcomes": {
+                "solved": 1
+              },
+              "speedup": 1.71,
+              "speedup_min": 1.71,
+              "speedup_max": 1.71,
+              "ref_speedup": 1.2969,
+              "best_trial": "a2-funnel-dynamics__QZwncKm",
               "trial_ids": [
-                "s3-unadjusted-ula__iPoE7js"
+                "a2-funnel-dynamics__QZwncKm"
+              ]
+            },
+            "a3-integrator-trajectory": {
+              "attempts": 1,
+              "interrupted": 0,
+              "valid": 1,
+              "outcomes": {
+                "solved": 1
+              },
+              "speedup": 5.1071,
+              "speedup_min": 5.1071,
+              "speedup_max": 5.1071,
+              "ref_speedup": 3.8735,
+              "best_trial": "a3-integrator-trajectory__E4umxGL",
+              "trial_ids": [
+                "a3-integrator-trajectory__E4umxGL"
+              ]
+            },
+            "a4-nonlinear-transport": {
+              "attempts": 1,
+              "interrupted": 1,
+              "valid": 1,
+              "outcomes": {
+                "no_gain": 1
+              },
+              "speedup": 0.8861,
+              "speedup_min": 0.8861,
+              "speedup_max": 0.8861,
+              "ref_speedup": 1.3022,
+              "best_trial": "a4-nonlinear-transport__yJKKHtP",
+              "trial_ids": [
+                "a4-nonlinear-transport__a5WwcN8",
+                "a4-nonlinear-transport__yJKKHtP"
               ]
             }
           },
-          "total_cost_usd": 0.29639,
-          "total_tokens": 8418188,
-          "input_tokens": 612867,
-          "cached_tokens": 7597440,
-          "output_tokens": 27283,
-          "reasoning_tokens": 180598,
-          "cache_hit_rate": 0.9254,
-          "total_wall_s": 6049.8,
-          "max_wall_s": 2331.94,
+          "total_cost_usd": 2.87537,
+          "total_tokens": 123169883,
+          "input_tokens": 1416445,
+          "cached_tokens": 120967488,
+          "output_tokens": 351257,
+          "reasoning_tokens": 434693,
+          "cache_hit_rate": 0.9884,
+          "total_wall_s": 31527.2,
+          "max_wall_s": 6345.24,
           "time_limit_hits": 0,
-          "mean_turns": null,
-          "mean_tool_calls": null,
-          "mean_test_runs": null,
-          "mean_loc": null,
-          "mean_cyclomatic": null,
+          "mean_turns": 105.5,
+          "mean_tool_calls": 106.5,
+          "mean_test_runs": 15.8,
+          "mean_loc": 219.2,
+          "mean_cyclomatic": 47.5,
           "rank": 2
         }
       ],
@@ -1546,22 +1420,618 @@
           "started_at": "2026-11-23T07:38:13.628593Z",
           "finished_at": "2026-11-23T08:17:44.151622Z",
           "outcome": "interrupted"
+        },
+        {
+          "trial_id": "a0-ground-up__isHJ5pF",
+          "release": "bench-v0.2.0",
+          "model": "zai-coding-plan/glm-5.3-flash",
+          "effort": "high",
+          "config_key": "zai-coding-plan/glm-5.3-flash#high",
+          "agent": "opencode-v2",
+          "task_id": "a0-ground-up",
+          "category": "optimize",
+          "passed": true,
+          "termination": "finished",
+          "rate_limited": false,
+          "reward": 4.259083,
+          "verifier_outcome": "solved",
+          "ref_speedup": 4.25908,
+          "start_speedup": 4.66892,
+          "reference": {
+            "name": "stan-nuts-diag-2.37",
+            "file": "reference.py",
+            "source": "frozen",
+            "valid": true
+          },
+          "reference_soft_min": 0.000384036,
+          "frontier_speedup": 1.49455,
+          "frontier_soft_min": 0.0010944,
+          "gap_closed": 1.353,
+          "start_soft_min": 0.000350326,
+          "soft_min_eff": 0.00163564,
+          "short_horizon_soft_min": 0.00138899,
+          "long_horizon_soft_min": 0.00192228,
+          "b2_max": 0.28159,
+          "overhead_ratio": 7.36528,
+          "by_class": {
+            "banana": 0.0014531,
+            "funnel": 0.00451785,
+            "gaussian_illcond": 0.00389716,
+            "hybrid_rosenbrock": 0.00121034,
+            "mixture_crossable": 0.0194014,
+            "student_t": 0.0073563
+          },
+          "failed_targets": [],
+          "agent_wall_s": 6402.54,
+          "verifier_wall_s": 138.13,
+          "total_wall_s": 6592.95,
+          "input_tokens": 352809,
+          "cached_tokens": 47661568,
+          "cache_write_tokens": 0,
+          "output_tokens": 66089,
+          "reasoning_tokens": 151429,
+          "total_tokens": 48231895,
+          "cache_hit_rate": 0.9927,
+          "cost_usd": 1.075519,
+          "cost_source": "estimated_list",
+          "turns": 198,
+          "tool_calls": 202,
+          "test_runs": 8,
+          "solution": {
+            "loc": 201,
+            "bytes": 9018,
+            "magic_constants": 45,
+            "ast_nodes": 2375,
+            "cyclomatic_complexity": 36,
+            "sha256": "a583ad6b6c03ce27"
+          },
+          "approach_summary": "Final state confirmed. The submission is the T0007-kept configuration, byte-identical to the incumbent.\n\n## Summary\n\n**Final artifact**: `/app/autoresearch/lanes/A0/submission.py` (201 LOC) \u2014 an adjusted, gradient-capable preconditioned HMC built from scratch, kept through the ratchet at paired ratios **1.059 \u2192 1.271** (T0003, T0007).\n\n### Sampler design\n- **Frozen kernel**: full-refresh whitened momentum `z = C\u1d40p ~ N(0,I)`, leapfrog (`x += \u03b5Cz`, `z += \u03b5C\u1d40\u2207`) with multiplicative \u03b5-jitter, exact MH on `H = log \u03c0(x) \u2212 |z|\u00b2/2` \u2014 exactly \u03c0-invariant, `aux_spec \"none\"`, single walker.\n- **Two-scale mixture**: 80% short trajectories (\u03c4=1.0) + 20% long antithetic ones (\u03c4x=2.4, length capped at 2L+1 so od-fragile small-\u03b5 targets stay safe) \u2014 decorrelates slow whitened modes (banana z0, gaussian d20) cheaply.\n- **Warmup** (per NM-A0-001): Robbins\u2013Monro \u03b5 on a *fixed trajectory-time* shape (so the acceptance signal matches the frozen kernel), FD diagonal-curvature initial metric, two robust normal-scores\u00d7MAD covariance windows, **all-mode FD-curvature calibration** (clamped geometric blend, regime-gated against curved-valley misreads), then an acceptance ring-sweep of \u03b5 with a mean-|\u0394H| leapfrog-stability guard.\n\n### Results\n| | probe (5 seeds \u00d7 96 chains, honest costs) | official ledger |\n|---|---|---|\n| Final sampler | soft_min \u2248 **0.0018** | 0.001493 (T0007 seeds), kept |\n| Frozen RWM baseline | soft_min \u2248 **0.000262** | \u2014 |\n\nExpected reward on hidden seeds \u2248 **7\u00d7** baseline, with the win concentrated where it matters for the p=\u22124 mean: my weakest class (gaussian_illcond, whitenin",
+          "error": null,
+          "started_at": "2026-11-23T15:20:42.595528Z",
+          "finished_at": "2026-11-23T17:10:35.541201Z",
+          "outcome": "solved"
+        },
+        {
+          "trial_id": "a1-preconditioning__3D9BNRR",
+          "release": "bench-v0.2.0",
+          "model": "zai-coding-plan/glm-5.3-flash",
+          "effort": "high",
+          "config_key": "zai-coding-plan/glm-5.3-flash#high",
+          "agent": "opencode-v2",
+          "task_id": "a1-preconditioning",
+          "category": "optimize",
+          "passed": false,
+          "termination": "finished",
+          "rate_limited": true,
+          "reward": 0.0,
+          "verifier_outcome": "invalid",
+          "ref_speedup": 0.0,
+          "start_speedup": 0.0,
+          "reference": {
+            "name": "stan-windowed-diag-metric-2.37",
+            "file": "reference.py",
+            "source": "frozen",
+            "valid": true
+          },
+          "reference_soft_min": 0.000317486,
+          "frontier_speedup": 0.0,
+          "frontier_soft_min": 0.000873921,
+          "gap_closed": null,
+          "start_soft_min": 0.000462261,
+          "soft_min_eff": 0.0,
+          "short_horizon_soft_min": 0.0,
+          "long_horizon_soft_min": 0.0,
+          "b2_max": 0.39803,
+          "overhead_ratio": 4.30211,
+          "by_class": {
+            "banana": 0.000669565,
+            "funnel": 0.00142502,
+            "gaussian_illcond": 0.0100032,
+            "hybrid_rosenbrock": 0.00027866,
+            "mixture_crossable": 0.015783,
+            "student_t": 0.00559049
+          },
+          "failed_targets": [
+            "hybrid_rosenbrock(d=20, rot=False): stuck/identity kernel: late mean latent step 0 < 0.001"
+          ],
+          "agent_wall_s": 6565.07,
+          "verifier_wall_s": 392.84,
+          "total_wall_s": 6992.42,
+          "input_tokens": 358551,
+          "cached_tokens": 41477376,
+          "cache_write_tokens": 0,
+          "output_tokens": 76668,
+          "reasoning_tokens": 161917,
+          "total_tokens": 42074512,
+          "cache_hit_rate": 0.9914,
+          "cost_usd": 0.960837,
+          "cost_source": "estimated_list",
+          "turns": 182,
+          "tool_calls": 188,
+          "test_runs": 19,
+          "solution": {
+            "loc": 301,
+            "bytes": 16305,
+            "magic_constants": 80,
+            "ast_nodes": 3559,
+            "cyclomatic_complexity": 62,
+            "sha256": "7d05d824d1cceedd"
+          },
+          "approach_summary": "The submission is locked \u2014 byte-identical to the twice-passed T0010 snapshot, lint-clean. Final summary:\n\n## What was delivered\n\n**`/app/autoresearch/lanes/A1/submission.py`** \u2014 a dense shrinkage-whitened metric with layered stability control, replacing the incumbent's diagonal+low-rank Fisher geometric-mean pipeline.\n\n### Mechanism (all model-blind, `grad`-only)\n1. **Dense whitened metric** (`inv_m_chol` schema): warmup draws and gradients winsorized at \u00b13.5\u00b7MAD, Ledoit-Wolf-shrunk, combined via log-Euclidean blend `log M = \u03b2\u00b7log Sx \u2212 w\u00b7log Sg` (\u03b2=1, w=1.25) \u2014 exact whitening on Gaussians, conditional-stiffness balancing on curved targets. Full dense spectrum (not rank-10) fixes rotated Gaussians/bananas at d=20.\n2. **Leapfrog stability cap**: `eps \u2264 0.7\u00b72/\u03c9`, `\u03c9\u00b2 = eig(L\u1d40\u00b7Sg\u00b7L)` \u2014 without it, dual averaging on near-exact targets (good metric \u21d2 acceptance \u2248 1) runs eps to the ceiling and teleports chains.\n3. **Far-start FD-Hessian cap** *(the key discovery)*: forward-difference Hessians (gradient differencing \u2014 allowlisted) at overdispersed probe starts bound eps where evaluation chains actually begin, gated to fire only when dispersed-region stiffness exceeds the pooled estimate by >4x. This fixed the root cause of identity-kernel stalls: on-patch-calibrated eps is ~4x too large for the dispersed-start region.\n4. **Safety floors**: terminal-acceptance collapse \u2192 bounded halving (max 2, was an unbounded-1e-4 landmine); far-start movement verification at 1\u00d7eps (the exact gate criterion) \u2192 halve \u2192 diagonal fallback. The kernel structurally cannot return frozen.\n\n### Evidence",
+          "error": null,
+          "started_at": "2026-11-23T16:02:53.853739Z",
+          "finished_at": "2026-11-23T17:59:26.270185Z",
+          "outcome": "invalid"
+        },
+        {
+          "trial_id": "a2-funnel-dynamics__qK8LtiC",
+          "release": "bench-v0.2.0",
+          "model": "zai-coding-plan/glm-5.3-flash",
+          "effort": "high",
+          "config_key": "zai-coding-plan/glm-5.3-flash#high",
+          "agent": "opencode-v2",
+          "task_id": "a2-funnel-dynamics",
+          "category": "optimize",
+          "passed": true,
+          "termination": "finished",
+          "rate_limited": true,
+          "reward": 2.356623,
+          "verifier_outcome": "solved",
+          "ref_speedup": 2.35662,
+          "start_speedup": 3.10713,
+          "reference": {
+            "name": "stan-nuts-diag-2.37",
+            "file": "reference.py",
+            "source": "frozen",
+            "valid": true
+          },
+          "reference_soft_min": 0.000384036,
+          "frontier_speedup": 3.29364,
+          "frontier_soft_min": 0.00027478,
+          "gap_closed": null,
+          "start_soft_min": 0.000291275,
+          "soft_min_eff": 0.000905028,
+          "short_horizon_soft_min": 0.000713927,
+          "long_horizon_soft_min": 0.0011455,
+          "b2_max": 0.28159,
+          "overhead_ratio": 5.254,
+          "by_class": {
+            "banana": 0.00120241,
+            "funnel": 0.00318945,
+            "gaussian_illcond": 0.00191298,
+            "hybrid_rosenbrock": 0.000603217,
+            "mixture_crossable": 0.0149612,
+            "student_t": 0.00756877
+          },
+          "failed_targets": [],
+          "agent_wall_s": 7695.98,
+          "verifier_wall_s": 151.03,
+          "total_wall_s": 7885.9,
+          "input_tokens": 296512,
+          "cached_tokens": 18149696,
+          "cache_write_tokens": 0,
+          "output_tokens": 40087,
+          "reasoning_tokens": 110854,
+          "total_tokens": 18597149,
+          "cache_hit_rate": 0.9839,
+          "cost_usd": 0.453022,
+          "cost_source": "estimated_list",
+          "turns": 107,
+          "tool_calls": 114,
+          "test_runs": 7,
+          "solution": {
+            "loc": 167,
+            "bytes": 7507,
+            "magic_constants": 40,
+            "ast_nodes": 2027,
+            "cyclomatic_complexity": 32,
+            "sha256": "b10d4942688d9e45"
+          },
+          "approach_summary": "Everything is in place. Final summary of the work:\n\n## What was done\n\n**Final kernel** (`/app/autoresearch/lanes/A2/submission.py`): two-stage **delayed-rejection HMC** (exact Tierney\u2013Mira) with multiscale-safe warmup:\n\n- **Exact DR kernel** (`aux=\"none\"`, reversible): stage 1 = leapfrog `(\u03b5, n\u2081)`; on rejection only, stage 2 = leapfrog `(\u03b5/4, n\u2081)` from the **same momentum**, accepted with `\u03b1\u2082 = min(1, r\u2082\u00b7(1\u2212\u03b1\u2081\u1d63\u2091\u1d65)/(1\u2212\u03b1\u2081))` where `\u03b1\u2081\u1d63\u1d49\u1d65` re-runs stage-1 dynamics from `(y\u2082, \u2212p\u2082)` \u2014 detailed balance holds exactly (`\u03c0(x)\u03c6(p)\u00b7min(1\u2212\u03b1\u2081, r\u2082(1\u2212\u03b1\u2081\u1d63\u2091\u1d65)) = \u03c0(y\u2082)\u03c6(q\u2082)\u00b7min(1\u2212\u03b1\u2081\u1d63\u2091\u1d65, (1\u2212\u03b1\u2081)/r\u2082)`), which the Tier-0/1 suite confirms across ~20 local runs + 4 harness trials.\n- **Stage-1-acceptance dual averaging** (not the DR move rate \u2014 that provably drifts \u03b5 past the stability bound and freezes chains), Stan-style find-reasonable-\u03b5 + expanding windows, shrink-0.25 diagonal metric, `PATH_LENGTH=1.2` two-point jitter, warmup-only step cap.\n\n**Measured vs the frozen baseline, paired on 7 seeds (dims 6,20, repeats 2)**: soft-min ratios **2.5\u00d7\u20133.9\u00d7, geomean \u2248 3.3\u00d7**, with the tightest distribution of all variants (worst seed 7.5e-4 vs baseline's ~2.0\u20132.4e-4). Funnel class eff ~2.5\u20134\u00d7, rosenbrock ~1.5\u20133\u00d7, and the Gaussian \u03b5-stability collapse is eliminated.\n\n**Key findings recorded in `NEGATIVE_MEMORY.md`** (NM-A2-004\u2026007): GHMC momentum persistence hurts on this suite (rejection-negation kills it exactly where needed); rank-1 ridge-aligned metric boosts can't lift the rosenbrock z0 floor \u2014 an oracle-assisted ceiling test with the *true* ridge direction at 9\u00d7 boost moved min-ess by exactly zero,",
+          "error": null,
+          "started_at": "2026-11-23T17:10:35.556390Z",
+          "finished_at": "2026-11-23T19:22:01.458089Z",
+          "outcome": "solved"
+        },
+        {
+          "trial_id": "a3-integrator-trajectory__yn3GjPv",
+          "release": "bench-v0.2.0",
+          "model": "zai-coding-plan/glm-5.3-flash",
+          "effort": "high",
+          "config_key": "zai-coding-plan/glm-5.3-flash#high",
+          "agent": "opencode-v2",
+          "task_id": "a3-integrator-trajectory",
+          "category": "optimize",
+          "passed": true,
+          "termination": "finished",
+          "rate_limited": true,
+          "reward": 5.342117,
+          "verifier_outcome": "solved",
+          "ref_speedup": 5.34212,
+          "start_speedup": 7.0434,
+          "reference": {
+            "name": "stan-nuts-diag-2.37",
+            "file": "reference.py",
+            "source": "frozen",
+            "valid": true
+          },
+          "reference_soft_min": 0.000384036,
+          "frontier_speedup": 1.81576,
+          "frontier_soft_min": 0.00112986,
+          "gap_closed": 1.44,
+          "start_soft_min": 0.000291275,
+          "soft_min_eff": 0.00205156,
+          "short_horizon_soft_min": 0.00173513,
+          "long_horizon_soft_min": 0.00242565,
+          "b2_max": 0.28159,
+          "overhead_ratio": 9.42303,
+          "by_class": {
+            "banana": 0.00193176,
+            "funnel": 0.00688872,
+            "gaussian_illcond": 0.0027762,
+            "hybrid_rosenbrock": 0.00152977,
+            "mixture_crossable": 0.0128453,
+            "student_t": 0.00357957
+          },
+          "failed_targets": [],
+          "agent_wall_s": 7799.1,
+          "verifier_wall_s": 123.02,
+          "total_wall_s": 7958.65,
+          "input_tokens": 332935,
+          "cached_tokens": 29280960,
+          "cache_write_tokens": 0,
+          "output_tokens": 61203,
+          "reasoning_tokens": 144350,
+          "total_tokens": 29819448,
+          "cache_hit_rate": 0.9888,
+          "cost_usd": 0.701134,
+          "cost_source": "estimated_list",
+          "turns": 166,
+          "tool_calls": 169,
+          "test_runs": 21,
+          "solution": {
+            "loc": 156,
+            "bytes": 7151,
+            "magic_constants": 40,
+            "ast_nodes": 1827,
+            "cyclomatic_complexity": 30,
+            "sha256": "835ad433c1828394"
+          },
+          "approach_summary": "All banked. Final state verified: `submission.py` is byte-identical to the ledger incumbent, lint-clean, and on two completely fresh seeds (201/202) it scores **soft_min = 1.83e-3** \u2014 consistent with the ledger measurements.\n\n## Summary\n\n**Final kernel** (`/app/autoresearch/lanes/A3/submission.py`): persistent-momentum GHMC with a warmup FD-Hessian preconditioner \u2014\n- **State/exactness**: whitened momentum `z ~ N(0,I)` in `chain.aux` (`aux_spec = {\"kind\":\"normal\"}`); partial refresh `z' = \u03b1z + \u221a(1-\u03b1\u00b2)\u03be` (Gibbs) \u2192 one preconditioned leapfrog step \u2192 MH on the joint with momentum **flip on rejection**. Product law \u03c0\u2297N is exact by construction; every Phase-A/smoke gate passed with \u22652\u00d7 z-margin, including a 96-chain \u00d7 30-step, \u03b1=5e-4 stress run.\n- **Tuning** (`requires=[\"grad\"]` only): windowed diagonal metric at 35% of warmup, then a **central finite-difference Hessian** at two warmup points (priced gradient calls only \u2014 no hvp/hess) blended into a dense Cholesky metric with a *consistency-adaptive* trust `\u03b3 = 0.8\u00b7exp(-0.5\u00b7rel)`; dual averaging at **TA=0.995, \u03b1=0.9**.\n\n**Ledger ladder** (17 trials, 7 kept \u2014 all paired on identical fresh suites):\n\n| step | change | paired ratio |\n|---|---|---|\n| T0001 | GHMC + FD-Hessian metric (base) | 7.3\u00d7 baseline (1.72e-3) |\n| T0002\u2013T0006 | target acceptance 0.8 \u2192 0.995 | \u00d71.68 cumulative |\n| T0009 | \u03b1 0.8 \u2192 0.9 | +3.3% |\n\n**Expected reward \u2248 8\u20139\u00d7 the frozen baseline** (per-class, final config: hr 1.4e-3, banana 1.9e-3, student 2.5\u20134e-3, funnel 7e-3, gauss 4\u20137e-3, mixture 1.4e-2 \u2014 all invariance-clean, b2_max \u2264 0.23).\n\n**Key negative results*",
+          "error": null,
+          "started_at": "2026-11-23T17:59:26.290767Z",
+          "finished_at": "2026-11-23T20:12:04.936120Z",
+          "outcome": "solved"
+        },
+        {
+          "trial_id": "s3-missing-jacobian-a4__nvzA7QQ",
+          "release": "bench-v0.2.0",
+          "model": "zai-coding-plan/glm-5.3-flash",
+          "effort": "high",
+          "config_key": "zai-coding-plan/glm-5.3-flash#high",
+          "agent": "opencode-v2",
+          "task_id": "s3-missing-jacobian-a4",
+          "category": "rewind",
+          "passed": true,
+          "termination": "finished",
+          "rate_limited": false,
+          "reward": 1.0,
+          "verifier_outcome": "solved",
+          "ref_speedup": null,
+          "start_speedup": null,
+          "reference": null,
+          "reference_soft_min": null,
+          "frontier_speedup": null,
+          "frontier_soft_min": null,
+          "gap_closed": null,
+          "start_soft_min": null,
+          "soft_min_eff": null,
+          "short_horizon_soft_min": null,
+          "long_horizon_soft_min": null,
+          "b2_max": 0.0625,
+          "overhead_ratio": null,
+          "by_class": {},
+          "failed_targets": [],
+          "agent_wall_s": 889.77,
+          "verifier_wall_s": 20.57,
+          "total_wall_s": 947.82,
+          "input_tokens": 93186,
+          "cached_tokens": 1860608,
+          "cache_write_tokens": 0,
+          "output_tokens": 12565,
+          "reasoning_tokens": 29501,
+          "total_tokens": 1995860,
+          "cache_hit_rate": 0.9523,
+          "cost_usd": 0.063357,
+          "cost_source": "estimated_list",
+          "turns": 38,
+          "tool_calls": 43,
+          "test_runs": 2,
+          "solution": {
+            "loc": 137,
+            "bytes": 6158,
+            "magic_constants": 23,
+            "ast_nodes": 1555,
+            "cyclomatic_complexity": 22,
+            "sha256": "2b6de59f35e70e75"
+          },
+          "approach_summary": "All robust: 8/8 targets pass at three independent seeds. The work is complete.\n\n## Summary\n\n**The core fix** (`harness/judge.py`'s finite-difference verifier now accepts the transport):\n\n- **`forward()`** \u2014 returns the exact log-det-Jacobian of the diagonal map `\u03b8\u1d62 = loc\u1d62 + scale\u1d62\u00b7sinh(\u03b4\u1d62\u00b7arcsinh(z\u1d62))`:\n  `ldj = \u03a3\u1d62 [log scale\u1d62 + log \u03b4\u1d62 + log cosh(\u03b4\u1d62a\u1d62) \u2212 \u00bd\u00b7log(1+z\u1d62\u00b2)]` with `a\u1d62 = arcsinh(z\u1d62)`, using the overflow-safe identity `log cosh(x) = |x| + log1p(e^(\u22122|x|)) \u2212 log 2`.\n- **`pullback_grad()`** \u2014 adds the missing `\u2207_z log|det J_T| = \u03b4\u1d62\u00b7tanh(\u03b4\u1d62a\u1d62)/\u221a(1+z\u1d62\u00b2) \u2212 z\u1d62/(1+z\u1d62\u00b2)` to the existing chain-rule term `scale\u00b7dy/dz\u00b7grad_\u03b8`.\n- **`inverse()`** \u2014 was already exact; unchanged.\n\n**A second latent issue surfaced by the eval** (`decision=discard_tier1` after the Jacobian fix): the hardcoded `eps=0.35` in `adapt_transport` froze 100% of dispersed-start chains on `HybridRosenbrock` \u2014 with \u03b4=1.35 the warp expands tails (`dy/dz ~ e^(0.35a)`), amplifying Rosenbrock's quadratic off-ridge gradients until trajectories diverged to |z|~1e44 and every proposal was rejected. Since `adapt_transport` is exactly the lane's design seam, I upgraded it within the same file:\n\n- **Dual-averaged step size** (Hoffman & Gelman, mirroring the proven A2 recipe and the judge kernel's jittered path-length schedule) \u2014 warmup on the pullback density using the now-exact `forward`/`pullback_grad`.\n- **Generic tail-stiffness selection**: a 8-oracle-call probe measures the log-log gradient-growth exponent \u03b2 along rays from the origin; \u03b4=1.35 (tail-expanding warp) only when tail gradients decay (\u03b2 \u2264 0.3, e.g. Stud",
+          "error": null,
+          "started_at": "2026-11-23T20:12:04.950738Z",
+          "finished_at": "2026-11-23T20:27:52.768877Z",
+          "outcome": "solved"
+        },
+        {
+          "trial_id": "s3-position-gated-mh__E94fwdt",
+          "release": "bench-v0.2.0",
+          "model": "zai-coding-plan/glm-5.3-flash",
+          "effort": "high",
+          "config_key": "zai-coding-plan/glm-5.3-flash#high",
+          "agent": "opencode-v2",
+          "task_id": "s3-position-gated-mh",
+          "category": "rewind",
+          "passed": true,
+          "termination": "finished",
+          "rate_limited": true,
+          "reward": 1.0,
+          "verifier_outcome": "solved",
+          "ref_speedup": null,
+          "start_speedup": null,
+          "reference": null,
+          "reference_soft_min": null,
+          "frontier_speedup": null,
+          "frontier_soft_min": null,
+          "gap_closed": null,
+          "start_soft_min": null,
+          "soft_min_eff": null,
+          "short_horizon_soft_min": null,
+          "long_horizon_soft_min": null,
+          "b2_max": 0.040657,
+          "overhead_ratio": null,
+          "by_class": {},
+          "failed_targets": [],
+          "agent_wall_s": 2644.06,
+          "verifier_wall_s": 20.95,
+          "total_wall_s": 2703.17,
+          "input_tokens": 154346,
+          "cached_tokens": 5419264,
+          "cache_write_tokens": 0,
+          "output_tokens": 13630,
+          "reasoning_tokens": 46242,
+          "total_tokens": 5633482,
+          "cache_hit_rate": 0.9723,
+          "cost_usd": 0.147769,
+          "cost_source": "estimated_list",
+          "turns": 52,
+          "tool_calls": 59,
+          "test_runs": 13,
+          "solution": {
+            "loc": 174,
+            "bytes": 8443,
+            "magic_constants": 36,
+            "ast_nodes": 1763,
+            "cyclomatic_complexity": 32,
+            "sha256": "115993671ceb6358"
+          },
+          "approach_summary": "Done. All 12 targets pass (exit code 0). Here's the complete picture:\n\n## Diagnosis\n\nThe old `transition()` gated kernels on position: fast HMC outside `r2_gate`, tiny \u03c3=0.08 RWM inside. Since **kernel selection depended on the current state**, the kernel wasn't \u03c0-reversible: an HMC move crossing the gate inward is accepted on the Hamiltonian ratio alone, but the reverse move (from inside) is never selected as HMC, and the inner RWM essentially never re-crosses outward. The reverse selection probability `s(y)` never enters the acceptance ratio \u2192 net inward flux \u2192 mass piles up inside the gate. Measured on a rotated \u03ba=100 Gaussian (64 exact-draw chains \u00d7 25 steps):\n\n- chains inside the gate: **6.2% \u2192 35.9%** in 25 steps\n- `rad_sq` = 0.73 vs exact 1.0 (**z = \u22123.1**), `lp` biased high (**z = +3.1**) \u2014 exactly the \"trapped in the core\" signature\n\nThis can't be patched with a corrected ratio: a state-dependent HMC mixture has no tractable reverse proposal density. The fix has to remove position-dependent selection.\n\n## Fix (`/app/submission.py`)\n\nOne \u03c0-reversible kernel: **preconditioned HMC** \u2014 momentum freshly drawn from N(0, M) each call, leapfrog step count jittered from the RNG (state-independent), standard MH on total energy. This is an involution with unit Jacobian, so it's exact for *any* fixed metric M. Mixing on rotated ill-conditioned Gaussians is recovered in `adapt()`, which estimates a **dense regularized covariance metric** M\u207b\u00b9 = AA\u1d40 from warmup draws (shrinkage toward the diagonal, eigenvalue clamps, diagonal/identity fallbacks) over three Stan-style refresh wind",
+          "error": null,
+          "started_at": "2026-11-23T20:27:52.781148Z",
+          "finished_at": "2026-11-23T21:12:55.947145Z",
+          "outcome": "solved"
+        },
+        {
+          "trial_id": "s3-unadjusted-ula__ZS9sNcY",
+          "release": "bench-v0.2.0",
+          "model": "zai-coding-plan/glm-5.3-flash",
+          "effort": "high",
+          "config_key": "zai-coding-plan/glm-5.3-flash#high",
+          "agent": "opencode-v2",
+          "task_id": "s3-unadjusted-ula",
+          "category": "rewind",
+          "passed": true,
+          "termination": "finished",
+          "rate_limited": false,
+          "reward": 1.0,
+          "verifier_outcome": "solved",
+          "ref_speedup": null,
+          "start_speedup": null,
+          "reference": null,
+          "reference_soft_min": null,
+          "frontier_speedup": null,
+          "frontier_soft_min": null,
+          "gap_closed": null,
+          "start_soft_min": null,
+          "soft_min_eff": null,
+          "short_horizon_soft_min": null,
+          "long_horizon_soft_min": null,
+          "b2_max": 0.036661,
+          "overhead_ratio": null,
+          "by_class": {},
+          "failed_targets": [],
+          "agent_wall_s": 752.24,
+          "verifier_wall_s": 20.19,
+          "total_wall_s": 807.29,
+          "input_tokens": 98415,
+          "cached_tokens": 1328512,
+          "cache_write_tokens": 0,
+          "output_tokens": 5373,
+          "reasoning_tokens": 28885,
+          "total_tokens": 1461185,
+          "cache_hit_rate": 0.931,
+          "cost_usd": 0.050115,
+          "cost_source": "estimated_list",
+          "turns": 21,
+          "tool_calls": 25,
+          "test_runs": 3,
+          "solution": {
+            "loc": 174,
+            "bytes": 8720,
+            "magic_constants": 33,
+            "ast_nodes": 1785,
+            "cyclomatic_complexity": 34,
+            "sha256": "0b9cf1c8ea43b790"
+          },
+          "approach_summary": "Done. `/app/submission.py` now implements a **Metropolis-adjusted preconditioned Langevin (MALA) kernel**, and the required verification passes on all 12 targets:\n\n```\nuv run apin invariance --sampler /app/submission.py --dim 4   \u2192  12/12 PASS\n```\n\n## What was wrong and what changed\n\nThe original kernel did raw ULA updates and **accepted every proposal**, so its stationary law was \u03c0_\u03b5 \u2260 \u03c0 with O(\u03b5\u00b2) bias in the variances, and it failed global balance. The replacement keeps the Langevin-drift proposal\n\n- y = x + (\u03b5\u00b2/2)\u00b7P\u00b7\u2207log \u03c0(x) + \u03b5\u00b7L\u00b7z,  z ~ N(0,I), P = LL\u1d40\n\nbut now applies the **exact asymmetric Hastings correction**:\n\n- log a = [lp(y) \u2212 lp(x)] + log q(x|y) \u2212 log q(y|x), with both proposal densities computed in the whitened L\u207b\u00b9 metric (the forward residual is exactly \u03b5\u00b7z, so only the reverse term needs a triangular solve).\n\nThis makes \u03c0 exactly stationary for any \u03b5. To mix well on **rotated ill-conditioned** Gaussians (where a diagonal/identity preconditioner is misaligned), `adapt()` runs a 3-stage warmup \u2014 identity-MALA exploration \u2192 full-covariance preconditioner + Robbins\u2013Monro step tuning (~65% acceptance) \u2192 refinement \u2014 then freezes `{eps, chol, chol_inv}` in the tuning tree (SHA-verified immutable, as the harness requires). `transition()` is a stateless, bit-replayable single MH update with `aux_spec=\"none\"`.\n\n## Verification results\n\n| Run | Result |\n|---|---|\n| `--dim 4` (required command) | 12/12 PASS, max_z \u2264 2.3 vs thresholds 3.6\u20134.2 |\n| `--dim 6 --seed 2` | 12/12 PASS |\n| `--dim 4 --strict` (256 chains \u00d7 40 steps, \u03b1=1e-4) | 12/12 PASS |\n\nSquared bias b2 is \u2264",
+          "error": null,
+          "started_at": "2026-11-23T21:12:55.959940Z",
+          "finished_at": "2026-11-23T21:26:23.247597Z",
+          "outcome": "solved"
+        },
+        {
+          "trial_id": "a0-ground-up__DkonjAX",
+          "release": "bench-v0.2.0",
+          "model": "zai-coding-plan/glm-5.3-flash",
+          "effort": "low",
+          "config_key": "zai-coding-plan/glm-5.3-flash#low",
+          "agent": "opencode-v2",
+          "task_id": "a0-ground-up",
+          "category": "optimize",
+          "passed": false,
+          "termination": "provider_limit",
+          "rate_limited": true,
+          "reward": 0.0,
+          "verifier_outcome": "invalid",
+          "ref_speedup": null,
+          "start_speedup": null,
+          "reference": {
+            "name": "stan-nuts-diag-2.37",
+            "file": "reference.py",
+            "source": "frozen",
+            "valid": true
+          },
+          "reference_soft_min": 0.000384036,
+          "frontier_speedup": null,
+          "frontier_soft_min": 0.0010944,
+          "gap_closed": null,
+          "start_soft_min": 0.000350326,
+          "soft_min_eff": 0.0,
+          "short_horizon_soft_min": 0.0,
+          "long_horizon_soft_min": 0.0,
+          "b2_max": 0.31307,
+          "overhead_ratio": 7.33466,
+          "by_class": {
+            "banana": 0.00115092,
+            "funnel": 0.0055905,
+            "gaussian_illcond": 0.00397687,
+            "hybrid_rosenbrock": 0.000857658,
+            "mixture_crossable": 0.0198129,
+            "student_t": 0.00578685
+          },
+          "failed_targets": [
+            "hybrid_rosenbrock(d=20, rot=False): stuck/identity kernel: late mean latent step 0 < 0.001",
+            "hybrid_rosenbrock(d=6, rot=False): invariance rejected on r0: |z|=3.88 > 3.77 (b2_max=0.3131)"
+          ],
+          "agent_wall_s": 3517.06,
+          "verifier_wall_s": 130.46,
+          "total_wall_s": 3684.47,
+          "input_tokens": 212157,
+          "cached_tokens": 15138432,
+          "cache_write_tokens": 0,
+          "output_tokens": 47254,
+          "reasoning_tokens": 66572,
+          "total_tokens": 15464415,
+          "cache_hit_rate": 0.9862,
+          "cost_usd": 0.369515,
+          "cost_source": "estimated_list",
+          "turns": 110,
+          "tool_calls": 111,
+          "test_runs": 2,
+          "solution": {
+            "loc": 121,
+            "bytes": 6137,
+            "magic_constants": 25,
+            "ast_nodes": 1208,
+            "cyclomatic_complexity": 27,
+            "sha256": "c5af535e1eefe1cb"
+          },
+          "approach_summary": "Trial passed and is now the incumbent (soft_min 0.00118). Let me measure the frozen RWM baseline through the identical Tier-1 protocol for the true ratio:",
+          "error": "ApiRateLimitError: Command failed (exit 1): set -o pipefail; /root/.harbor/agents/opencode-v2/node_modules/.bin/opencode run --standalone --model='zai-coding-plan/glm-5.3-flash#low' --format=json --thinking --auto -- '# Build an adjusted posterior sampler from a 43-LOC isotropic RWM stub\n\nStarting from the 43-line isotropic Random-Walk Metropolis stub in `/app/autoresearch/lanes/A0/submission.py`, design and evolve a gradient-capable adjusted MCMC/PDMP sampler from scratch that maximizes dual-horizon (`H=150/1000`) empirical efficiency across `dims=(6,20)` while passing all exact-draw invariance, declared `aux_spec`, dispersed-start mixing, and bit-exact replay checks.\n\n> **Scoring note:** `soft_min_eff` is a **$p = -4$ power mean** over per-class geometric means, so the **weakest target class dominates**. Check `CLASS_METRIC` after each trial and lift the worst class without regressing it.\n\n## Rules\n- Read `/app/autoresearch/lanes/A0/program.md`, `/app/autoresearch/RULINGS.md`, and `/app/codex/INDEX.yaml`.\n- Edit **ONLY** `/app/autoresearch/lanes/A0/submission.py`. Never modify `harness/`, `models/`, or `data/`.\n- Iterate locally using:\n  ```bash\n  uv run apin autoresearch eval --lane A0 --run-id harbor_dev --dims 6,20 --repeats 2 --no-queue --hypothesis \"<one falsifiable sentence>\"\n  ```\n- Final grading runs your `/app/autoresearch/lanes/A0/submission.py` against the frozen baseline on **hidden held-out seeds**; reward = `cand_soft_min / baseline_soft_min` (or `0.0` on any invariance/replay failure).\n' 2>&1 </dev/null | stdbuf -oL tee /logs/agent/opencode-v2.txt\nstdout: {\"type\":\"step_start\",\"timestamp\":1795434053009,\"sessionID\":\"ses_df7ca8503ffeFYsF6dTg9TUi69\",\"part\":{\"id\":\"prt_208357d91001HHqZmf83XXpwdm\",\"sessionID\":\"ses_df7ca8503ffeFYsF6dTg9TUi69\",\"messageID\":\"msg_208357c7e001Xz3PP76BzkLDxT\",\"type\":\"step-start\"}}\n ... [1277828 chars truncated] ... \"body\":\"{\\\"error\\\":{\\\"code\\\":\\\"1302\\\",\\\"message\\\":\\\"Rate limit reached for requests\\\"}}\"}}}\n{\"type\":\"retry\",\"timestamp\":1795437556526,\"sessionID\":\"ses_df7ca8503ffeFYsF6dTg9TUi69\",\"messageID\":\"msg_20869d2f9001dJw14cZC7oFByF\",\"attempt\":11,\"nextRetryAt\":1795437565339,\"error\":{\"type\":\"provider.rate-limit\",\"message\":\"Rate limit reached for requests\",\"status\":429,\"response\":{\"body\":\"{\\\"error\\\":{\\\"code\\\":\\\"1302\\\",\\\"message\\\":\\\"Rate limit reached for requests\\\"}}\"}}}\n{\"type\":\"error\",\"timestamp\":1795437565675,\"sessionID\":\"ses_df7ca8503ffeFYsF6dTg9TUi69\",\"error\":{\"type\":\"provider.rate-limit\",\"message\":\"Rate limit reached for requests\",\"status\":429,\"response\":{\"body\":\"{\\\"error\\\":{\\\"code\\\":\\\"1302\\\",\\\"message\\\":\\\"Rate limit reached for requests\\\"}}\"}}}\n\nstderr: None",
+          "started_at": "2026-11-23T11:40:24.157363Z",
+          "finished_at": "2026-11-23T12:41:48.627069Z",
+          "outcome": "interrupted"
+        },
+        {
+          "trial_id": "a4-nonlinear-transport__yJKKHtP",
+          "release": "bench-v0.2.0",
+          "model": "zai-coding-plan/glm-5.3-flash",
+          "effort": "low",
+          "config_key": "zai-coding-plan/glm-5.3-flash#low",
+          "agent": "opencode-v2",
+          "task_id": "a4-nonlinear-transport",
+          "category": "optimize",
+          "passed": true,
+          "termination": "finished",
+          "rate_limited": true,
+          "reward": 1.302158,
+          "verifier_outcome": "no_gain",
+          "ref_speedup": 1.30216,
+          "start_speedup": 0.886065,
+          "reference": {
+            "name": "stan-windowed-diag-affine-2.37",
+            "file": "reference.py",
+            "source": "frozen",
+            "valid": true
+          },
+          "reference_soft_min": 0.000317485,
+          "frontier_speedup": null,
+          "frontier_soft_min": null,
+          "gap_closed": null,
+          "start_soft_min": 0.000466575,
+          "soft_min_eff": 0.000413416,
+          "short_horizon_soft_min": 0.00037132,
+          "long_horizon_soft_min": 0.000460066,
+          "b2_max": 0.43367,
+          "overhead_ratio": 4.44921,
+          "by_class": {
+            "banana": 0.00116707,
+            "funnel": 0.0015705,
+            "gaussian_illcond": 0.00384407,
+            "hybrid_rosenbrock": 0.000268897,
+            "mixture_crossable": 0.0230572,
+            "student_t": 0.00616713
+          },
+          "failed_targets": [],
+          "agent_wall_s": 6345.24,
+          "verifier_wall_s": 459.68,
+          "total_wall_s": 6849.1,
+          "input_tokens": 226886,
+          "cached_tokens": 22400128,
+          "cache_write_tokens": 0,
+          "output_tokens": 83521,
+          "reasoning_tokens": 78174,
+          "total_tokens": 22788709,
+          "cache_hit_rate": 0.99,
+          "cost_usd": 0.535369,
+          "cost_source": "estimated_list",
+          "turns": 178,
+          "tool_calls": 183,
+          "test_runs": 16,
+          "solution": {
+            "loc": 461,
+            "bytes": 21387,
+            "magic_constants": 124,
+            "ast_nodes": 6054,
+            "cyclomatic_complexity": 125,
+            "sha256": "14e57355323e53c1"
+          },
+          "approach_summary": "The final version was already recorded as T0015 (`soft_min_eff=0.000474`, tier0 \u2713, tier1 \u2713 \u2014 the harness dedupes identical submissions). Final state verified. Summary:\n\n## What was done\n\n**Final submission** (`/app/autoresearch/lanes/A4/submission.py`): a composed diffeomorphic transport `T = Affine \u2218 ChainCoupling` with exact closed-form log-det, pullback gradient, and inverse (verified against the judge's FD checks at ~1e-10 relative error, including extreme `|z|`):\n\n1. **Affine stage** \u2014 dense-Cholesky whitening **or** diagonal scaling, chosen by held-out Gaussian log-likelihood (dense only when it demonstrably helps, i.e. rotated ill-conditioned targets; otherwise the diagonal model's lower estimation noise wins \u2014 this protects banana/mixture/student-t from miswhitening regressions).\n2. **Chained triangular coupling** \u2014 ordering-free parent selection fits each coordinate's best conditional mean (linear/quadratic) and log-scale (`exp(a\u00b7w\u2032)`) dependence, with a tanh-bounded conditioner (`3\u00b7tanh(u/3)`, `|a|\u22641`) so the map can never overflow; entries are topologically ordered so the map stays a valid diffeomorphism. Structure fires on funnel (`a\u22481` vs v), rosenbrock (`b2\u22480.62` vs z0 for all 19 children), and banana (`b2\u22480.98` via a split-half sign-consistency rescue for single-pair structure); clean Gaussians/mixtures/Student-t get **zero** couplings (5\u03c3 + effect-size + correlation-support + out-of-sample R\u00b2 gates).\n3. **Adapt** \u2014 two-stage metric-adapted theta-space warmup, then a dispersed latent probe ensemble relaxed onto the typical set by normalized gradient ascent (o",
+          "error": null,
+          "started_at": "2026-11-23T13:26:29.482315Z",
+          "finished_at": "2026-11-23T15:20:38.586527Z",
+          "outcome": "no_gain"
         }
       ]
     },
     {
       "release": "bench-v0.1.1",
       "scoring": "start",
-      "note": "Earlier release. Speed-ups are relative to the starting code, containers were not sealed and agents had a one-hour limit. Not comparable with later releases.",
+      "note": "Earlier release. Containers were not sealed and agents had a one-hour limit. Not comparable with later releases.",
       "tasks": [
         "a0-ground-up",
         "a1-preconditioning",
         "a2-funnel-dynamics",
         "a3-integrator-trajectory",
-        "a4-nonlinear-transport",
-        "s3-missing-jacobian-a4",
-        "s3-position-gated-mh",
-        "s3-unadjusted-ula"
+        "a4-nonlinear-transport"
       ],
       "task_meta": {
         "a0-ground-up": {
@@ -1623,30 +2093,124 @@
             "reference": 0.00031748545686222026,
             "frontier": null
           }
-        },
-        "s3-missing-jacobian-a4": {
-          "category": "rewind",
-          "title": "Fix missing log-det-Jacobian & pullback gradient in Lane A4 sinh-arcsinh transport",
-          "lane": null,
-          "difficulty": "easy",
-          "agent_timeout_s": 86400.0
-        },
-        "s3-position-gated-mh": {
-          "category": "rewind",
-          "title": "Fix position-dependent kernel gating MH detailed-balance bias",
-          "lane": null,
-          "difficulty": "easy",
-          "agent_timeout_s": 86400.0
-        },
-        "s3-unadjusted-ula": {
-          "category": "rewind",
-          "title": "Add Metropolis-Hastings adjustment to biased unadjusted Langevin (ULA) kernel",
-          "lane": null,
-          "difficulty": "easy",
-          "agent_timeout_s": 86400.0
         }
       },
       "leaderboard": [
+        {
+          "config_key": "zai-coding-plan/glm-5.3-flash#low",
+          "model": "zai-coding-plan/glm-5.3-flash",
+          "label": "GLM-5.3-Flash",
+          "effort": "low",
+          "agents": [
+            "opencode-v2"
+          ],
+          "n_tasks": 5,
+          "tasks_run": 5,
+          "complete": true,
+          "attempts": 5,
+          "interrupted": 0,
+          "attempts_per_task": 1,
+          "speedup": 1.7249,
+          "valid": 5.0,
+          "tasks": {
+            "a0-ground-up": {
+              "attempts": 1,
+              "interrupted": 0,
+              "valid": 1,
+              "outcomes": {
+                "improved": 1
+              },
+              "speedup": 4.0201,
+              "speedup_min": 4.0201,
+              "speedup_max": 4.0201,
+              "ref_speedup": null,
+              "best_trial": "a0-ground-up__k5Q6bLM",
+              "trial_ids": [
+                "a0-ground-up__k5Q6bLM"
+              ]
+            },
+            "a1-preconditioning": {
+              "attempts": 1,
+              "interrupted": 0,
+              "valid": 1,
+              "outcomes": {
+                "no_gain": 1
+              },
+              "speedup": 1.0,
+              "speedup_min": 1.0,
+              "speedup_max": 1.0,
+              "ref_speedup": null,
+              "best_trial": "a1-preconditioning__DW4DkUW",
+              "trial_ids": [
+                "a1-preconditioning__DW4DkUW"
+              ]
+            },
+            "a2-funnel-dynamics": {
+              "attempts": 1,
+              "interrupted": 0,
+              "valid": 1,
+              "outcomes": {
+                "no_gain": 1
+              },
+              "speedup": 0.9501,
+              "speedup_min": 0.9501,
+              "speedup_max": 0.9501,
+              "ref_speedup": null,
+              "best_trial": "a2-funnel-dynamics__UcHmrQP",
+              "trial_ids": [
+                "a2-funnel-dynamics__UcHmrQP"
+              ]
+            },
+            "a3-integrator-trajectory": {
+              "attempts": 1,
+              "interrupted": 0,
+              "valid": 1,
+              "outcomes": {
+                "improved": 1
+              },
+              "speedup": 6.2188,
+              "speedup_min": 6.2188,
+              "speedup_max": 6.2188,
+              "ref_speedup": null,
+              "best_trial": "a3-integrator-trajectory__6ZuPkwm",
+              "trial_ids": [
+                "a3-integrator-trajectory__6ZuPkwm"
+              ]
+            },
+            "a4-nonlinear-transport": {
+              "attempts": 1,
+              "interrupted": 0,
+              "valid": 1,
+              "outcomes": {
+                "no_gain": 1
+              },
+              "speedup": 0.6428,
+              "speedup_min": 0.6428,
+              "speedup_max": 0.6428,
+              "ref_speedup": null,
+              "best_trial": "a4-nonlinear-transport__Z5CqBP3",
+              "trial_ids": [
+                "a4-nonlinear-transport__Z5CqBP3"
+              ]
+            }
+          },
+          "total_cost_usd": 0.7048,
+          "total_tokens": 27853482,
+          "input_tokens": 531996,
+          "cached_tokens": 27044736,
+          "output_tokens": 124576,
+          "reasoning_tokens": 152174,
+          "cache_hit_rate": 0.9807,
+          "total_wall_s": 14822.3,
+          "max_wall_s": 3600.07,
+          "time_limit_hits": 4,
+          "mean_turns": 81.2,
+          "mean_tool_calls": 83.2,
+          "mean_test_runs": 5.8,
+          "mean_loc": 179.4,
+          "mean_cyclomatic": 30.8,
+          "rank": 1
+        },
         {
           "config_key": "zai-coding-plan/glm-5.3-flash#max",
           "model": "zai-coding-plan/glm-5.3-flash",
@@ -1655,174 +2219,112 @@
           "agents": [
             "opencode-v2"
           ],
-          "n_tasks": 8,
-          "tasks_run": 8,
+          "n_tasks": 5,
+          "tasks_run": 5,
           "complete": true,
-          "attempts": 8,
+          "attempts": 5,
           "interrupted": 0,
           "attempts_per_task": 1,
-          "solved": 6.0,
-          "fix_solved": 3.0,
-          "fix_total": 3,
-          "opt_solved": 3.0,
-          "opt_total": 5,
-          "opt_valid": 4.0,
-          "opt_geomean": 1.452,
-          "opt_gap_closed": 0.0,
+          "speedup": 1.452,
+          "valid": 4.0,
           "tasks": {
             "a0-ground-up": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "improved": 1
               },
-              "solve_rate": 1.0,
-              "ratio_mean": 4.3186,
-              "ratio_min": 4.3186,
-              "ratio_max": 4.3186,
-              "gap_closed_mean": null,
+              "speedup": 4.3186,
+              "speedup_min": 4.3186,
+              "speedup_max": 4.3186,
+              "ref_speedup": null,
               "best_trial": "a0-ground-up__s3gJwya",
               "trial_ids": [
                 "a0-ground-up__s3gJwya"
               ]
             },
             "a1-preconditioning": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "no_gain": 1
               },
-              "solve_rate": 0.0,
-              "ratio_mean": 1.0,
-              "ratio_min": 1.0,
-              "ratio_max": 1.0,
-              "gap_closed_mean": null,
+              "speedup": 1.0,
+              "speedup_min": 1.0,
+              "speedup_max": 1.0,
+              "ref_speedup": null,
               "best_trial": "a1-preconditioning__PAboEbn",
               "trial_ids": [
                 "a1-preconditioning__PAboEbn"
               ]
             },
             "a2-funnel-dynamics": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "improved": 1
               },
-              "solve_rate": 1.0,
-              "ratio_mean": 3.4401,
-              "ratio_min": 3.4401,
-              "ratio_max": 3.4401,
-              "gap_closed_mean": null,
+              "speedup": 3.4401,
+              "speedup_min": 3.4401,
+              "speedup_max": 3.4401,
+              "ref_speedup": null,
               "best_trial": "a2-funnel-dynamics__6uyu2jc",
               "trial_ids": [
                 "a2-funnel-dynamics__6uyu2jc"
               ]
             },
             "a3-integrator-trajectory": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "improved": 1
               },
-              "solve_rate": 1.0,
-              "ratio_mean": 4.3436,
-              "ratio_min": 4.3436,
-              "ratio_max": 4.3436,
-              "gap_closed_mean": null,
+              "speedup": 4.3436,
+              "speedup_min": 4.3436,
+              "speedup_max": 4.3436,
+              "ref_speedup": null,
               "best_trial": "a3-integrator-trajectory__WwcbzsX",
               "trial_ids": [
                 "a3-integrator-trajectory__WwcbzsX"
               ]
             },
             "a4-nonlinear-transport": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 0,
               "outcomes": {
                 "invalid": 1
               },
-              "solve_rate": 0.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": 0.0,
+              "speedup": 0.0,
+              "speedup_min": 0.0,
+              "speedup_max": 0.0,
+              "ref_speedup": null,
               "best_trial": "a4-nonlinear-transport__bo6FsQc",
               "trial_ids": [
                 "a4-nonlinear-transport__bo6FsQc"
               ]
-            },
-            "s3-missing-jacobian-a4": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-missing-jacobian-a4__9zhYYuK",
-              "trial_ids": [
-                "s3-missing-jacobian-a4__9zhYYuK"
-              ]
-            },
-            "s3-position-gated-mh": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-position-gated-mh__dCi4Waf",
-              "trial_ids": [
-                "s3-position-gated-mh__dCi4Waf"
-              ]
-            },
-            "s3-unadjusted-ula": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-unadjusted-ula__YcTUrTm",
-              "trial_ids": [
-                "s3-unadjusted-ula__YcTUrTm"
-              ]
             }
           },
-          "total_cost_usd": 2.35051,
-          "total_tokens": 94184985,
-          "input_tokens": 1613711,
-          "cached_tokens": 91682560,
-          "output_tokens": 237217,
-          "reasoning_tokens": 651497,
-          "cache_hit_rate": 0.9827,
-          "total_wall_s": 19660.8,
+          "total_cost_usd": 2.21572,
+          "total_tokens": 90658210,
+          "input_tokens": 1352041,
+          "cached_tokens": 88531456,
+          "output_tokens": 215553,
+          "reasoning_tokens": 559160,
+          "cache_hit_rate": 0.985,
+          "total_wall_s": 17100.0,
           "max_wall_s": 3600.0,
-          "time_limit_hits": 6,
-          "mean_turns": 73.2,
-          "mean_tool_calls": 79.6,
-          "mean_test_runs": 2.5,
-          "mean_loc": 272.1,
-          "mean_cyclomatic": 55.9,
-          "rank": 1
+          "time_limit_hits": 5,
+          "mean_turns": 101.2,
+          "mean_tool_calls": 107.6,
+          "mean_test_runs": 2.8,
+          "mean_loc": 328.6,
+          "mean_cyclomatic": 70.8,
+          "rank": 2
         },
         {
           "config_key": "zai-coding-plan/glm-5.3#low",
@@ -1832,174 +2334,112 @@
           "agents": [
             "opencode-v2"
           ],
-          "n_tasks": 8,
-          "tasks_run": 8,
+          "n_tasks": 5,
+          "tasks_run": 5,
           "complete": true,
-          "attempts": 8,
+          "attempts": 5,
           "interrupted": 0,
           "attempts_per_task": 1,
-          "solved": 6.0,
-          "fix_solved": 3.0,
-          "fix_total": 3,
-          "opt_solved": 3.0,
-          "opt_total": 5,
-          "opt_valid": 4.0,
-          "opt_geomean": 1.3201,
-          "opt_gap_closed": 0.0,
+          "speedup": 1.3201,
+          "valid": 4.0,
           "tasks": {
             "a0-ground-up": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "improved": 1
               },
-              "solve_rate": 1.0,
-              "ratio_mean": 2.3103,
-              "ratio_min": 2.3103,
-              "ratio_max": 2.3103,
-              "gap_closed_mean": null,
+              "speedup": 2.3103,
+              "speedup_min": 2.3103,
+              "speedup_max": 2.3103,
+              "ref_speedup": null,
               "best_trial": "a0-ground-up__xuBynsW",
               "trial_ids": [
                 "a0-ground-up__xuBynsW"
               ]
             },
             "a1-preconditioning": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "improved": 1
               },
-              "solve_rate": 1.0,
-              "ratio_mean": 3.1964,
-              "ratio_min": 3.1964,
-              "ratio_max": 3.1964,
-              "gap_closed_mean": null,
+              "speedup": 3.1964,
+              "speedup_min": 3.1964,
+              "speedup_max": 3.1964,
+              "ref_speedup": null,
               "best_trial": "a1-preconditioning__XQgeRDh",
               "trial_ids": [
                 "a1-preconditioning__XQgeRDh"
               ]
             },
             "a2-funnel-dynamics": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "no_gain": 1
               },
-              "solve_rate": 0.0,
-              "ratio_mean": 1.0,
-              "ratio_min": 1.0,
-              "ratio_max": 1.0,
-              "gap_closed_mean": null,
+              "speedup": 1.0,
+              "speedup_min": 1.0,
+              "speedup_max": 1.0,
+              "ref_speedup": null,
               "best_trial": "a2-funnel-dynamics__aecyQ2i",
               "trial_ids": [
                 "a2-funnel-dynamics__aecyQ2i"
               ]
             },
             "a3-integrator-trajectory": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "improved": 1
               },
-              "solve_rate": 1.0,
-              "ratio_mean": 5.4296,
-              "ratio_min": 5.4296,
-              "ratio_max": 5.4296,
-              "gap_closed_mean": null,
+              "speedup": 5.4296,
+              "speedup_min": 5.4296,
+              "speedup_max": 5.4296,
+              "ref_speedup": null,
               "best_trial": "a3-integrator-trajectory__t8UMxmi",
               "trial_ids": [
                 "a3-integrator-trajectory__t8UMxmi"
               ]
             },
             "a4-nonlinear-transport": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 0,
               "outcomes": {
                 "invalid": 1
               },
-              "solve_rate": 0.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": 0.0,
+              "speedup": 0.0,
+              "speedup_min": 0.0,
+              "speedup_max": 0.0,
+              "ref_speedup": null,
               "best_trial": "a4-nonlinear-transport__hp49cTh",
               "trial_ids": [
                 "a4-nonlinear-transport__hp49cTh"
               ]
-            },
-            "s3-missing-jacobian-a4": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-missing-jacobian-a4__YUeEkyT",
-              "trial_ids": [
-                "s3-missing-jacobian-a4__YUeEkyT"
-              ]
-            },
-            "s3-position-gated-mh": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-position-gated-mh__bdUtz5F",
-              "trial_ids": [
-                "s3-position-gated-mh__bdUtz5F"
-              ]
-            },
-            "s3-unadjusted-ula": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-unadjusted-ula__wHx2oL2",
-              "trial_ids": [
-                "s3-unadjusted-ula__wHx2oL2"
-              ]
             }
           },
-          "total_cost_usd": 5.77452,
-          "total_tokens": 41125865,
-          "input_tokens": 875920,
-          "cached_tokens": 39856896,
-          "output_tokens": 141414,
-          "reasoning_tokens": 251635,
-          "cache_hit_rate": 0.9785,
-          "total_wall_s": 18180.1,
+          "total_cost_usd": 5.59037,
+          "total_tokens": 40156603,
+          "input_tokens": 794904,
+          "cached_tokens": 38986752,
+          "output_tokens": 132905,
+          "reasoning_tokens": 242042,
+          "cache_hit_rate": 0.98,
+          "total_wall_s": 17086.9,
           "max_wall_s": 3600.0,
-          "time_limit_hits": 5,
-          "mean_turns": 59.4,
-          "mean_tool_calls": 66.0,
-          "mean_test_runs": 6.5,
-          "mean_loc": 185.9,
-          "mean_cyclomatic": 36.8,
-          "rank": 2
+          "time_limit_hits": 4,
+          "mean_turns": 85.2,
+          "mean_tool_calls": 95.4,
+          "mean_test_runs": 8.2,
+          "mean_loc": 246.0,
+          "mean_cyclomatic": 50.0,
+          "rank": 3
         },
         {
           "config_key": "zai-coding-plan/glm-5.3-flash#high",
@@ -2009,350 +2449,111 @@
           "agents": [
             "opencode-v2"
           ],
-          "n_tasks": 8,
-          "tasks_run": 8,
+          "n_tasks": 5,
+          "tasks_run": 5,
           "complete": true,
-          "attempts": 8,
+          "attempts": 5,
           "interrupted": 0,
           "attempts_per_task": 1,
-          "solved": 6.0,
-          "fix_solved": 3.0,
-          "fix_total": 3,
-          "opt_solved": 3.0,
-          "opt_total": 5,
-          "opt_valid": 4.0,
-          "opt_geomean": 0.9209,
-          "opt_gap_closed": 0.0,
+          "speedup": 0.9209,
+          "valid": 4.0,
           "tasks": {
             "a0-ground-up": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "no_gain": 1
               },
-              "solve_rate": 0.0,
-              "ratio_mean": 1.0,
-              "ratio_min": 1.0,
-              "ratio_max": 1.0,
-              "gap_closed_mean": null,
+              "speedup": 1.0,
+              "speedup_min": 1.0,
+              "speedup_max": 1.0,
+              "ref_speedup": null,
               "best_trial": "a0-ground-up__nzeYjEu",
               "trial_ids": [
                 "a0-ground-up__nzeYjEu"
               ]
             },
             "a1-preconditioning": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 0,
               "outcomes": {
                 "invalid": 1
               },
-              "solve_rate": 0.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": 0.0,
+              "speedup": 0.0,
+              "speedup_min": 0.0,
+              "speedup_max": 0.0,
+              "ref_speedup": null,
               "best_trial": "a1-preconditioning__fE934G4",
               "trial_ids": [
                 "a1-preconditioning__fE934G4"
               ]
             },
             "a2-funnel-dynamics": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "improved": 1
               },
-              "solve_rate": 1.0,
-              "ratio_mean": 4.0039,
-              "ratio_min": 4.0039,
-              "ratio_max": 4.0039,
-              "gap_closed_mean": null,
+              "speedup": 4.0039,
+              "speedup_min": 4.0039,
+              "speedup_max": 4.0039,
+              "ref_speedup": null,
               "best_trial": "a2-funnel-dynamics__iYCmX4Y",
               "trial_ids": [
                 "a2-funnel-dynamics__iYCmX4Y"
               ]
             },
             "a3-integrator-trajectory": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "improved": 1
               },
-              "solve_rate": 1.0,
-              "ratio_mean": 1.1474,
-              "ratio_min": 1.1474,
-              "ratio_max": 1.1474,
-              "gap_closed_mean": null,
+              "speedup": 1.1474,
+              "speedup_min": 1.1474,
+              "speedup_max": 1.1474,
+              "ref_speedup": null,
               "best_trial": "a3-integrator-trajectory__cdCiNmq",
               "trial_ids": [
                 "a3-integrator-trajectory__cdCiNmq"
               ]
             },
             "a4-nonlinear-transport": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "improved": 1
               },
-              "solve_rate": 1.0,
-              "ratio_mean": 1.4418,
-              "ratio_min": 1.4418,
-              "ratio_max": 1.4418,
-              "gap_closed_mean": null,
+              "speedup": 1.4418,
+              "speedup_min": 1.4418,
+              "speedup_max": 1.4418,
+              "ref_speedup": null,
               "best_trial": "a4-nonlinear-transport__VEh32Du",
               "trial_ids": [
                 "a4-nonlinear-transport__VEh32Du"
               ]
-            },
-            "s3-missing-jacobian-a4": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-missing-jacobian-a4__ZGoaQdr",
-              "trial_ids": [
-                "s3-missing-jacobian-a4__ZGoaQdr"
-              ]
-            },
-            "s3-position-gated-mh": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-position-gated-mh__P59CVpo",
-              "trial_ids": [
-                "s3-position-gated-mh__P59CVpo"
-              ]
-            },
-            "s3-unadjusted-ula": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-unadjusted-ula__6TMvqKG",
-              "trial_ids": [
-                "s3-unadjusted-ula__6TMvqKG"
-              ]
             }
           },
-          "total_cost_usd": 2.07421,
-          "total_tokens": 79761147,
-          "input_tokens": 1640607,
-          "cached_tokens": 77205440,
-          "output_tokens": 220277,
-          "reasoning_tokens": 694823,
-          "cache_hit_rate": 0.9792,
-          "total_wall_s": 19198.3,
+          "total_cost_usd": 1.92846,
+          "total_tokens": 75561260,
+          "input_tokens": 1357505,
+          "cached_tokens": 73391552,
+          "output_tokens": 196465,
+          "reasoning_tokens": 615738,
+          "cache_hit_rate": 0.9818,
+          "total_wall_s": 17100.0,
           "max_wall_s": 3600.01,
-          "time_limit_hits": 7,
-          "mean_turns": 66.4,
-          "mean_tool_calls": 75.2,
-          "mean_test_runs": 1.8,
-          "mean_loc": 207.8,
-          "mean_cyclomatic": 34.5,
-          "rank": 3
-        },
-        {
-          "config_key": "zai-coding-plan/glm-5.3-flash#low",
-          "model": "zai-coding-plan/glm-5.3-flash",
-          "label": "GLM-5.3-Flash",
-          "effort": "low",
-          "agents": [
-            "opencode-v2"
-          ],
-          "n_tasks": 8,
-          "tasks_run": 8,
-          "complete": true,
-          "attempts": 8,
-          "interrupted": 0,
-          "attempts_per_task": 1,
-          "solved": 5.0,
-          "fix_solved": 3.0,
-          "fix_total": 3,
-          "opt_solved": 2.0,
-          "opt_total": 5,
-          "opt_valid": 5.0,
-          "opt_geomean": 1.7249,
-          "opt_gap_closed": null,
-          "tasks": {
-            "a0-ground-up": {
-              "category": "optimize",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "improved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 4.0201,
-              "ratio_min": 4.0201,
-              "ratio_max": 4.0201,
-              "gap_closed_mean": null,
-              "best_trial": "a0-ground-up__k5Q6bLM",
-              "trial_ids": [
-                "a0-ground-up__k5Q6bLM"
-              ]
-            },
-            "a1-preconditioning": {
-              "category": "optimize",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "no_gain": 1
-              },
-              "solve_rate": 0.0,
-              "ratio_mean": 1.0,
-              "ratio_min": 1.0,
-              "ratio_max": 1.0,
-              "gap_closed_mean": null,
-              "best_trial": "a1-preconditioning__DW4DkUW",
-              "trial_ids": [
-                "a1-preconditioning__DW4DkUW"
-              ]
-            },
-            "a2-funnel-dynamics": {
-              "category": "optimize",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "no_gain": 1
-              },
-              "solve_rate": 0.0,
-              "ratio_mean": 0.9501,
-              "ratio_min": 0.9501,
-              "ratio_max": 0.9501,
-              "gap_closed_mean": null,
-              "best_trial": "a2-funnel-dynamics__UcHmrQP",
-              "trial_ids": [
-                "a2-funnel-dynamics__UcHmrQP"
-              ]
-            },
-            "a3-integrator-trajectory": {
-              "category": "optimize",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "improved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 6.2188,
-              "ratio_min": 6.2188,
-              "ratio_max": 6.2188,
-              "gap_closed_mean": null,
-              "best_trial": "a3-integrator-trajectory__6ZuPkwm",
-              "trial_ids": [
-                "a3-integrator-trajectory__6ZuPkwm"
-              ]
-            },
-            "a4-nonlinear-transport": {
-              "category": "optimize",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "no_gain": 1
-              },
-              "solve_rate": 0.0,
-              "ratio_mean": 0.6428,
-              "ratio_min": 0.6428,
-              "ratio_max": 0.6428,
-              "gap_closed_mean": null,
-              "best_trial": "a4-nonlinear-transport__Z5CqBP3",
-              "trial_ids": [
-                "a4-nonlinear-transport__Z5CqBP3"
-              ]
-            },
-            "s3-missing-jacobian-a4": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-missing-jacobian-a4__fBeSCho",
-              "trial_ids": [
-                "s3-missing-jacobian-a4__fBeSCho"
-              ]
-            },
-            "s3-position-gated-mh": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-position-gated-mh__5JZTbTJ",
-              "trial_ids": [
-                "s3-position-gated-mh__5JZTbTJ"
-              ]
-            },
-            "s3-unadjusted-ula": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-unadjusted-ula__7apYEZc",
-              "trial_ids": [
-                "s3-unadjusted-ula__7apYEZc"
-              ]
-            }
-          },
-          "total_cost_usd": 0.7259,
-          "total_tokens": 28378416,
-          "input_tokens": 603015,
-          "cached_tokens": 27485696,
-          "output_tokens": 130774,
-          "reasoning_tokens": 158931,
-          "cache_hit_rate": 0.9785,
-          "total_wall_s": 15467.9,
-          "max_wall_s": 3600.07,
-          "time_limit_hits": 4,
-          "mean_turns": 55.9,
-          "mean_tool_calls": 57.2,
-          "mean_test_runs": 4.5,
-          "mean_loc": 139.5,
-          "mean_cyclomatic": 23.8,
+          "time_limit_hits": 5,
+          "mean_turns": 90.8,
+          "mean_tool_calls": 102.0,
+          "mean_test_runs": 1.6,
+          "mean_loc": 231.4,
+          "mean_cyclomatic": 40.4,
           "rank": 4
         },
         {
@@ -2363,169 +2564,107 @@
           "agents": [
             "opencode-v2"
           ],
-          "n_tasks": 8,
-          "tasks_run": 6,
+          "n_tasks": 5,
+          "tasks_run": 3,
           "complete": false,
-          "attempts": 6,
+          "attempts": 3,
           "interrupted": 2,
           "attempts_per_task": 1,
-          "solved": 5.0,
-          "fix_solved": 3.0,
-          "fix_total": 3,
-          "opt_solved": 2.0,
-          "opt_total": 5,
-          "opt_valid": 2.0,
-          "opt_geomean": 0.7869,
-          "opt_gap_closed": 0.0,
+          "speedup": 0.7869,
+          "valid": 2.0,
           "tasks": {
             "a0-ground-up": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "improved": 1
               },
-              "solve_rate": 1.0,
-              "ratio_mean": 1.7347,
-              "ratio_min": 1.7347,
-              "ratio_max": 1.7347,
-              "gap_closed_mean": null,
+              "speedup": 1.7347,
+              "speedup_min": 1.7347,
+              "speedup_max": 1.7347,
+              "ref_speedup": null,
               "best_trial": "a0-ground-up__sNj4BkM",
               "trial_ids": [
                 "a0-ground-up__sNj4BkM"
               ]
             },
             "a1-preconditioning": {
-              "category": "optimize",
               "attempts": 0,
               "interrupted": 1,
+              "valid": 0,
               "outcomes": {},
-              "solve_rate": null,
-              "ratio_mean": null,
-              "ratio_min": null,
-              "ratio_max": null,
-              "gap_closed_mean": null,
+              "speedup": null,
+              "speedup_min": null,
+              "speedup_max": null,
+              "ref_speedup": null,
               "best_trial": null,
               "trial_ids": [
                 "a1-preconditioning__mMA4WaV"
               ]
             },
             "a2-funnel-dynamics": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "improved": 1
               },
-              "solve_rate": 1.0,
-              "ratio_mean": 2.8084,
-              "ratio_min": 2.8084,
-              "ratio_max": 2.8084,
-              "gap_closed_mean": null,
+              "speedup": 2.8084,
+              "speedup_min": 2.8084,
+              "speedup_max": 2.8084,
+              "ref_speedup": null,
               "best_trial": "a2-funnel-dynamics__jyAcVBp",
               "trial_ids": [
                 "a2-funnel-dynamics__jyAcVBp"
               ]
             },
             "a3-integrator-trajectory": {
-              "category": "optimize",
               "attempts": 0,
               "interrupted": 1,
+              "valid": 0,
               "outcomes": {},
-              "solve_rate": null,
-              "ratio_mean": null,
-              "ratio_min": null,
-              "ratio_max": null,
-              "gap_closed_mean": null,
+              "speedup": null,
+              "speedup_min": null,
+              "speedup_max": null,
+              "ref_speedup": null,
               "best_trial": null,
               "trial_ids": [
                 "a3-integrator-trajectory__v655u7i"
               ]
             },
             "a4-nonlinear-transport": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 0,
               "outcomes": {
                 "invalid": 1
               },
-              "solve_rate": 0.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": 0.0,
+              "speedup": 0.0,
+              "speedup_min": 0.0,
+              "speedup_max": 0.0,
+              "ref_speedup": null,
               "best_trial": "a4-nonlinear-transport__if2iho8",
               "trial_ids": [
                 "a4-nonlinear-transport__if2iho8"
               ]
-            },
-            "s3-missing-jacobian-a4": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-missing-jacobian-a4__N6MHbtC",
-              "trial_ids": [
-                "s3-missing-jacobian-a4__N6MHbtC"
-              ]
-            },
-            "s3-position-gated-mh": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-position-gated-mh__oX4X7Td",
-              "trial_ids": [
-                "s3-position-gated-mh__oX4X7Td"
-              ]
-            },
-            "s3-unadjusted-ula": {
-              "category": "rewind",
-              "attempts": 1,
-              "interrupted": 0,
-              "outcomes": {
-                "solved": 1
-              },
-              "solve_rate": 1.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": null,
-              "best_trial": "s3-unadjusted-ula__Lmye9rj",
-              "trial_ids": [
-                "s3-unadjusted-ula__Lmye9rj"
-              ]
             }
           },
-          "total_cost_usd": 13.68244,
-          "total_tokens": 101169691,
-          "input_tokens": 1603885,
-          "cached_tokens": 98719936,
-          "output_tokens": 232267,
-          "reasoning_tokens": 613603,
-          "cache_hit_rate": 0.984,
-          "total_wall_s": 18202.8,
+          "total_cost_usd": 13.02404,
+          "total_tokens": 97758648,
+          "input_tokens": 1364420,
+          "cached_tokens": 95627712,
+          "output_tokens": 215368,
+          "reasoning_tokens": 551148,
+          "cache_hit_rate": 0.9859,
+          "total_wall_s": 16351.8,
           "max_wall_s": 3600.0,
-          "time_limit_hits": 4,
-          "mean_turns": 76.8,
-          "mean_tool_calls": 85.7,
-          "mean_test_runs": 1.8,
-          "mean_loc": 278.5,
-          "mean_cyclomatic": 50.2,
+          "time_limit_hits": 3,
+          "mean_turns": 130.7,
+          "mean_tool_calls": 142.3,
+          "mean_test_runs": 1.7,
+          "mean_loc": 419.7,
+          "mean_cyclomatic": 83.7,
           "rank": 5
         }
       ],
@@ -4786,16 +4925,13 @@
     {
       "release": "bench-v0.1.0",
       "scoring": "start",
-      "note": "Earlier release. Speed-ups are relative to the starting code, containers were not sealed and agents had a one-hour limit. Not comparable with later releases.",
+      "note": "Earlier release. Containers were not sealed and agents had a one-hour limit. Not comparable with later releases.",
       "tasks": [
         "a0-ground-up",
         "a1-preconditioning",
         "a2-funnel-dynamics",
         "a3-integrator-trajectory",
-        "a4-nonlinear-transport",
-        "s3-missing-jacobian-a4",
-        "s3-position-gated-mh",
-        "s3-unadjusted-ula"
+        "a4-nonlinear-transport"
       ],
       "task_meta": {
         "a0-ground-up": {
@@ -4857,27 +4993,6 @@
             "reference": 0.00031748545686222026,
             "frontier": null
           }
-        },
-        "s3-missing-jacobian-a4": {
-          "category": "rewind",
-          "title": "Fix missing log-det-Jacobian & pullback gradient in Lane A4 sinh-arcsinh transport",
-          "lane": null,
-          "difficulty": "easy",
-          "agent_timeout_s": 86400.0
-        },
-        "s3-position-gated-mh": {
-          "category": "rewind",
-          "title": "Fix position-dependent kernel gating MH detailed-balance bias",
-          "lane": null,
-          "difficulty": "easy",
-          "agent_timeout_s": 86400.0
-        },
-        "s3-unadjusted-ula": {
-          "category": "rewind",
-          "title": "Add Metropolis-Hastings adjustment to biased unadjusted Langevin (ULA) kernel",
-          "lane": null,
-          "difficulty": "easy",
-          "agent_timeout_s": 86400.0
         }
       },
       "leaderboard": [
@@ -4889,158 +5004,102 @@
           "agents": [
             "opencode-v2"
           ],
-          "n_tasks": 8,
+          "n_tasks": 5,
           "tasks_run": 4,
           "complete": false,
           "attempts": 4,
-          "interrupted": 4,
+          "interrupted": 1,
           "attempts_per_task": 1,
-          "solved": 3.0,
-          "fix_solved": 0,
-          "fix_total": 3,
-          "opt_solved": 3.0,
-          "opt_total": 5,
-          "opt_valid": 3.0,
-          "opt_geomean": 0.8651,
-          "opt_gap_closed": 0.0,
+          "speedup": 0.8651,
+          "valid": 3.0,
           "tasks": {
             "a0-ground-up": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "improved": 1
               },
-              "solve_rate": 1.0,
-              "ratio_mean": 2.6888,
-              "ratio_min": 2.6888,
-              "ratio_max": 2.6888,
-              "gap_closed_mean": null,
+              "speedup": 2.6888,
+              "speedup_min": 2.6888,
+              "speedup_max": 2.6888,
+              "ref_speedup": null,
               "best_trial": "a0-ground-up__iNUeXo3",
               "trial_ids": [
                 "a0-ground-up__iNUeXo3"
               ]
             },
             "a1-preconditioning": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "improved": 1
               },
-              "solve_rate": 1.0,
-              "ratio_mean": 1.3897,
-              "ratio_min": 1.3897,
-              "ratio_max": 1.3897,
-              "gap_closed_mean": null,
+              "speedup": 1.3897,
+              "speedup_min": 1.3897,
+              "speedup_max": 1.3897,
+              "ref_speedup": null,
               "best_trial": "a1-preconditioning__vSdDnvZ",
               "trial_ids": [
                 "a1-preconditioning__vSdDnvZ"
               ]
             },
             "a2-funnel-dynamics": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 1,
               "outcomes": {
                 "improved": 1
               },
-              "solve_rate": 1.0,
-              "ratio_mean": 1.4989,
-              "ratio_min": 1.4989,
-              "ratio_max": 1.4989,
-              "gap_closed_mean": null,
+              "speedup": 1.4989,
+              "speedup_min": 1.4989,
+              "speedup_max": 1.4989,
+              "ref_speedup": null,
               "best_trial": "a2-funnel-dynamics__i5AP8Jd",
               "trial_ids": [
                 "a2-funnel-dynamics__i5AP8Jd"
               ]
             },
             "a3-integrator-trajectory": {
-              "category": "optimize",
               "attempts": 1,
               "interrupted": 0,
+              "valid": 0,
               "outcomes": {
                 "invalid": 1
               },
-              "solve_rate": 0.0,
-              "ratio_mean": 0.0,
-              "ratio_min": 0.0,
-              "ratio_max": 0.0,
-              "gap_closed_mean": 0.0,
+              "speedup": 0.0,
+              "speedup_min": 0.0,
+              "speedup_max": 0.0,
+              "ref_speedup": null,
               "best_trial": "a3-integrator-trajectory__CqtN8TS",
               "trial_ids": [
                 "a3-integrator-trajectory__CqtN8TS"
               ]
             },
             "a4-nonlinear-transport": {
-              "category": "optimize",
               "attempts": 0,
               "interrupted": 1,
+              "valid": 0,
               "outcomes": {},
-              "solve_rate": null,
-              "ratio_mean": null,
-              "ratio_min": null,
-              "ratio_max": null,
-              "gap_closed_mean": null,
+              "speedup": null,
+              "speedup_min": null,
+              "speedup_max": null,
+              "ref_speedup": null,
               "best_trial": null,
               "trial_ids": [
                 "a4-nonlinear-transport__marQ657"
               ]
-            },
-            "s3-missing-jacobian-a4": {
-              "category": "rewind",
-              "attempts": 0,
-              "interrupted": 1,
-              "outcomes": {},
-              "solve_rate": null,
-              "ratio_mean": null,
-              "ratio_min": null,
-              "ratio_max": null,
-              "gap_closed_mean": null,
-              "best_trial": null,
-              "trial_ids": [
-                "s3-missing-jacobian-a4__oZZzCUb"
-              ]
-            },
-            "s3-position-gated-mh": {
-              "category": "rewind",
-              "attempts": 0,
-              "interrupted": 1,
-              "outcomes": {},
-              "solve_rate": null,
-              "ratio_mean": null,
-              "ratio_min": null,
-              "ratio_max": null,
-              "gap_closed_mean": null,
-              "best_trial": null,
-              "trial_ids": [
-                "s3-position-gated-mh__28BLxfX"
-              ]
-            },
-            "s3-unadjusted-ula": {
-              "category": "rewind",
-              "attempts": 0,
-              "interrupted": 1,
-              "outcomes": {},
-              "solve_rate": null,
-              "ratio_mean": null,
-              "ratio_min": null,
-              "ratio_max": null,
-              "gap_closed_mean": null,
-              "best_trial": null,
-              "trial_ids": [
-                "s3-unadjusted-ula__AoxNo2r"
-              ]
             }
           },
           "total_cost_usd": 0.0,
-          "total_tokens": 64366413,
-          "input_tokens": 2754697,
-          "cached_tokens": 60989576,
-          "output_tokens": 139217,
-          "reasoning_tokens": 482923,
-          "cache_hit_rate": 0.9568,
-          "total_wall_s": 15077.5,
+          "total_tokens": 63968032,
+          "input_tokens": 2679832,
+          "cached_tokens": 60722368,
+          "output_tokens": 135785,
+          "reasoning_tokens": 430047,
+          "cache_hit_rate": 0.9577,
+          "total_wall_s": 14544.1,
           "max_wall_s": 3600.0,
           "time_limit_hits": 4,
           "mean_turns": 82.5,

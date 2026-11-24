@@ -115,7 +115,23 @@ export const LIMITS = {
   searchOffsetMax: 500,
   provisionalTrialsPerDay: 100,
   provisionalTrialsPerDayGlobal: 1000,
+  chartPoints: 1000,
+  chartTitleChars: 140,
 } as const;
+
+/**
+ * The setup each lane's scores are comparable on. A trial is "standard" when its lane has
+ * no entry here or its dims equal the entry exactly; only standard trials can move a
+ * lane's frontier. Migration 0004 holds the same map in SQL (its BACKFILL block): change both.
+ */
+export const STANDARD_DIMS: ReadonlyMap<string, readonly number[]> = new Map([
+  ["A0", [6, 20]],
+  ["A1", [6, 20]],
+  ["A2", [6, 20]],
+  ["A3", [6, 20]],
+  ["A4", [6, 20]],
+]);
+
 
 type Role = "admin" | "contributor" | "provisional";
 
@@ -171,6 +187,8 @@ export interface NodeRow {
   source_sha?: string | null;
   author_tier?: string | null;
   updated_at?: string | null;
+  standard?: number | null;
+  frontier_step?: number | null;
 }
 
 export interface NodeRecord {
@@ -205,6 +223,10 @@ export interface NodeRecord {
   state_by: string | null;
   state_at: string | null;
   has_source: boolean;
+  /** Scored on its lane's standard dims (STANDARD_DIMS). */
+  standard: boolean;
+  /** Moved its lane's frontier (see "Frontier steps"). */
+  frontier_step: boolean;
   created_at: string;
   updated_at: string | null;
 }
@@ -430,9 +452,10 @@ function canonicalPublicCacheKey(url: URL, query: Record<string, string>): Reque
   if (pathname === "/api/runs") return key(canonicalQuery(query, ["lane", "limit", "offset"]));
   if (pathname === "/api/nodes") {
     return key(canonicalQuery(query, [
-      "lane", "run_id", "decision", "verified", "state", "model", "outcome", "stan", "q", "limit", "offset",
+      "lane", "run_id", "decision", "verified", "state", "model", "outcome", "stan", "step", "q", "limit", "offset",
     ]));
   }
+  if (/^\/api\/lanes\/[^/]+\/chart$/.test(pathname)) return key(canonicalQuery(query, ["after", "limit"]));
   if (pathname.startsWith("/api/nodes/") && pathname.length > "/api/nodes/".length) return key("");
   if (pathname === "/api/search") {
     return key(canonicalQuery(query, ["q", "lane", "kind", "limit", "offset"]));
@@ -750,6 +773,8 @@ function deserializeNode(row: NodeRow): NodeRecord {
     state_by: row.state_by ?? null,
     state_at: row.state_at ?? null,
     has_source: Boolean(row.source_sha),
+    standard: Number(row.standard) === 1,
+    frontier_step: Number(row.frontier_step) === 1,
     created_at: row.created_at,
     updated_at: row.updated_at ?? null,
   };
@@ -770,8 +795,8 @@ const SQL_OUTCOME_KEPT = sqlList(OUTCOME_KEPT);
 /** Frontier eligibility: not retracted or disputed, and kept or verified. */
 const SQL_FRONTIER_OK = `state NOT IN (${sqlList(FRONTIER_EXCLUDED_STATES)})`;
 const SQL_FRONTIER_ELIGIBLE = `(verified = 1 OR decision IN (${sqlList([...KEPT_DECISIONS])}))`;
-const SQL_FRONTIER_ORDER =
-  "ORDER BY soft_min_eff DESC, verified DESC, coalesce(real_stan_passed, -1) DESC, created_at DESC, id DESC";
+/** A trial that takes part in the step walk. Must match the BACKFILL block of migration 0004. */
+const SQL_STEP_ELIGIBLE = `(standard = 1 AND soft_min_eff > 0 AND ${SQL_FRONTIER_OK} AND ${SQL_FRONTIER_ELIGIBLE})`;
 
 type NodeWithoutRaw = Omit<NodeRecord, "metrics_json">;
 
@@ -807,13 +832,15 @@ interface LaneStat {
   kept: number;
   runs: number;
   latest_at: string | null;
+  /** Frontier steps in the lane, the first one included (lane_stats.steps, migration 0004). */
+  steps: number;
 }
 
 /** Lanes that have trials, from lane_stats (at most LIMITS.overviewLanes, busiest first, then sorted by name). */
 async function laneStats(db: D1DatabaseLike, lane?: string | null): Promise<LaneStat[]> {
   const res = await db
     .prepare(
-      `SELECT lane, trials, kept, runs, latest_at FROM lane_stats
+      `SELECT lane, trials, kept, runs, latest_at, steps FROM lane_stats
        WHERE trials > 0${lane ? " AND lane = ?" : ""} ORDER BY trials DESC, lane LIMIT ?`
     )
     .bind(...(lane ? [lane] : []), LIMITS.overviewLanes)
@@ -825,29 +852,121 @@ async function laneStats(db: D1DatabaseLike, lane?: string | null): Promise<Lane
       kept: Number(r.kept),
       runs: Number(r.runs),
       latest_at: r.latest_at ?? null,
+      steps: Number(r.steps ?? 0),
     }))
     .sort((a, b) => a.lane.localeCompare(b.lane));
 }
 
-/** Best kept-or-verified trial per lane (falling back to any non-excluded trial), one indexed LIMIT 1 query per lane. */
+/** Each lane's frontier, its latest step: one row of idx_nodes_steps per lane. No step, no frontier. */
 async function laneFrontiers(db: D1DatabaseLike, lanes: string[]): Promise<Record<string, NodeRecord>> {
-  const pick = (eligible: boolean) =>
-    `SELECT * FROM nodes INDEXED BY ${eligible ? "idx_nodes_frontier_pick" : "idx_nodes_frontier_any"}
-     WHERE lane = ? AND ${SQL_FRONTIER_OK}${eligible ? ` AND ${SQL_FRONTIER_ELIGIBLE}` : ""} ${SQL_FRONTIER_ORDER} LIMIT 1`;
+  const rows = await batchAll<NodeRow>(
+    db,
+    lanes.map((l) =>
+      db
+        .prepare(
+          `SELECT * FROM nodes INDEXED BY idx_nodes_steps WHERE lane = ? AND frontier_step = 1
+           ORDER BY created_at DESC, id DESC LIMIT 1`
+        )
+        .bind(l)
+    )
+  );
   const frontier: Record<string, NodeRecord> = {};
-  const first = await batchAll<NodeRow>(db, lanes.map((l) => db.prepare(pick(true)).bind(l)));
-  const missing: string[] = [];
   lanes.forEach((l, i) => {
-    if (first[i]?.[0]) frontier[l] = deserializeNode(first[i][0]);
-    else missing.push(l);
-  });
-  const second = await batchAll<NodeRow>(db, missing.map((l) => db.prepare(pick(false)).bind(l)));
-  missing.forEach((l, i) => {
-    if (second[i]?.[0]) frontier[l] = deserializeNode(second[i][0]);
+    if (rows[i]?.[0]) frontier[l] = deserializeNode(rows[i][0]);
   });
   const sorted: Record<string, NodeRecord> = {};
   for (const l of Object.keys(frontier).sort()) sorted[l] = frontier[l];
   return sorted;
+}
+
+// ---------------------------------------------------------------------------
+// Frontier steps
+//
+// Per lane, walk the eligible trials (SQL_STEP_ELIGIBLE) in (created_at, id) order. The first
+// is a step. Each later one is a step when its score is above the latest step's (a tie is
+// not a step). nodes.frontier_step stores the result, and the lane frontier is the latest step.
+//
+// A trial that is not a step never changes `best`, so adding, changing or removing one
+// changes no other flag. Every write therefore (1) sets the written trial's own flag from the
+// latest step before it, in the write's own batch (stepSelfStmt), and (2) only when the trial
+// was or became a step, rewalks its lane from its position (settleSteps). A new trial at the
+// end of its lane rewalks just itself. A changed or removed step in the middle of a lane
+// rewalks the rest of the lane: rare (disputes, retractions, maintainer edits).
+// ---------------------------------------------------------------------------
+
+/** Standard when the lane has no standard dims, or the dims are a JSON array of numbers equal to them. */
+function isStandard(lane: string, dims: string | null): boolean {
+  const want = STANDARD_DIMS.get(lane);
+  if (!want) return true;
+  const got = parseJsonSafe<unknown>(dims, null);
+  return Array.isArray(got) && got.length === want.length && got.every((x, i) => typeof x === "number" && x === want[i]);
+}
+
+/** The latest step strictly before a position. Earlier flags never depend on later trials. */
+const SQL_STEP_BEFORE = (alias: string, lane: string, createdAt: string, id: string) =>
+  `SELECT ${alias}.soft_min_eff FROM nodes AS ${alias} INDEXED BY idx_nodes_steps
+   WHERE ${alias}.lane = ${lane} AND ${alias}.frontier_step = 1 AND (${alias}.created_at, ${alias}.id) < (${createdAt}, ${id})
+   ORDER BY ${alias}.created_at DESC, ${alias}.id DESC LIMIT 1`;
+
+/** Sets one trial's own flag from the latest step before it (for the write's batch). */
+function stepSelfStmt(db: D1DatabaseLike, id: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE nodes SET frontier_step = CASE WHEN ${SQL_STEP_ELIGIBLE}
+         AND coalesce(soft_min_eff > (${SQL_STEP_BEFORE("p", "nodes.lane", "nodes.created_at", "nodes.id")}), 1)
+         THEN 1 ELSE 0 END
+       WHERE id = ?`
+    )
+    .bind(id);
+}
+
+/**
+ * Rewalks a lane's flags from a trial's position on (the whole lane when `from` is null) and
+ * writes only the flags that change. Reads the latest step before the position plus the
+ * lane's standard trials from it, oldest first, as (id, score, flag, eligible).
+ */
+async function rewalkSteps(db: D1DatabaseLike, lane: string, from: { created_at: string; id: string } | null): Promise<void> {
+  type WalkRow = { id: string; soft_min_eff: number | null; frontier_step: number; ok: number | null };
+  const [rows, start] = await batchAll<Record<string, unknown>>(db, [
+    db
+      .prepare(
+        `SELECT id, soft_min_eff, frontier_step, ${SQL_STEP_ELIGIBLE} AS ok FROM nodes INDEXED BY idx_nodes_lane_standard
+         WHERE lane = ? AND standard = 1${from ? " AND (created_at, id) >= (?, ?)" : ""} ORDER BY created_at, id`
+      )
+      .bind(lane, ...(from ? [from.created_at, from.id] : [])),
+    from
+      ? db.prepare(SQL_STEP_BEFORE("p", "?", "?", "?")).bind(lane, from.created_at, from.id)
+      // A whole-lane walk also clears flags left on trials that are no longer standard.
+      : db.prepare("SELECT id FROM nodes INDEXED BY idx_nodes_steps WHERE lane = ? AND frontier_step = 1 AND standard = 0").bind(lane),
+  ]);
+  let best = from ? toFiniteNumber(start[0]?.soft_min_eff) : null;
+  const on: string[] = [];
+  const off: string[] = from ? [] : start.map((r) => String(r.id));
+  for (const r of rows as unknown as WalkRow[]) {
+    const eff = Number(r.soft_min_eff);
+    const step = Boolean(r.ok) && (best === null || eff > best);
+    if (step) best = eff;
+    if (step !== (Number(r.frontier_step) === 1)) (step ? on : off).push(r.id);
+  }
+  const set = (flag: number, ids: string[]) =>
+    db.prepare("UPDATE nodes SET frontier_step = ? WHERE id IN (SELECT value FROM json_each(?))").bind(flag, JSON.stringify(ids));
+  const writes = [...(on.length ? [set(1, on)] : []), ...(off.length ? [set(0, off)] : [])];
+  if (writes.length > 0) await runBatch(db, writes);
+}
+
+/**
+ * Restores the step invariant after one trial changed from `before` to `after` (null when
+ * created or deleted). `after` must be read after the write, whose batch ran stepSelfStmt.
+ */
+async function settleSteps(db: D1DatabaseLike, before: NodeRow | null, after: NodeRow | null): Promise<void> {
+  const b = before && Number(before.frontier_step) === 1 ? before : null;
+  const a = after && Number(after.frontier_step) === 1 ? after : null;
+  if (b && a && b.lane === a.lane && b.created_at === a.created_at && b.soft_min_eff === a.soft_min_eff) return;
+  // Both positions when the trial moved: the later walk cannot fix flags before its start,
+  // and the earlier one covers everything after it.
+  const starts = [b, a].filter((r): r is NodeRow => r !== null);
+  if (starts.length === 2 && starts[0].lane === starts[1].lane && starts[0].created_at === starts[1].created_at) starts.pop();
+  for (const r of starts) await rewalkSteps(db, r.lane, { created_at: r.created_at, id: r.id });
 }
 
 /** The run's latest LIMITS.runStepsWindow trials, oldest first after reversal: decision and score only. */
@@ -1049,6 +1168,9 @@ const OUTCOME_SQL: Record<string, string> = {
  * are all present drives the read through its index; every other filter is "remaining".
  */
 const DRIVING_INDEXES: { keys: string[]; index: (outcome: string | null) => string }[] = [
+  // Steps are few, so any other filter (q included) runs over all of them, not over a window of trials.
+  { keys: ["lane", "step"], index: () => "idx_nodes_steps" },
+  { keys: ["step"], index: () => "idx_nodes_steps_created" },
   { keys: ["lane", "run_id"], index: () => "idx_nodes_run_created" },
   { keys: ["run_id"], index: () => "idx_nodes_runid_created" },
   { keys: ["lane", "outcome"], index: (o) => `idx_nodes_lane_${o}` },
@@ -1095,6 +1217,7 @@ function planNodeQuery(args: Args): NodeQueryPlan | Outcome {
     clauses.set("outcome", { sql: OUTCOME_SQL[outcome], params: [] });
   }
   if (toBool(args.stan)) clauses.set("stan", { sql: "real_stan_total > 0", params: [] });
+  if (toBool(args.step)) clauses.set("step", { sql: "frontier_step = 1", params: [] });
   const q = toNullableString(args.q);
   if (q) {
     if (q.length > LIMITS.queryChars) return out(400, { error: "field_too_long", field: "q", max: LIMITS.queryChars });
@@ -1119,7 +1242,9 @@ function planNodeQuery(args: Args): NodeQueryPlan | Outcome {
 
   let statCount: string | null = null;
   const used = [...clauses.keys()];
-  if (!windowed && used.every((k) => ["lane", "run_id", "outcome", "stan"].includes(k)) && !(clauses.has("outcome") && clauses.has("stan"))) {
+  if (!windowed && clauses.has("step")) {
+    statCount = "steps"; // only lane and step are in use: lane_stats.steps
+  } else if (!windowed && used.every((k) => ["lane", "run_id", "outcome", "stan"].includes(k)) && !(clauses.has("outcome") && clauses.has("stan"))) {
     statCount = outcome === "kept" ? "kept" : outcome === "archived" ? "archived" : outcome === "discarded"
       ? "trials - kept - archived" : clauses.has("stan") ? "stan" : "trials";
   }
@@ -1187,20 +1312,21 @@ function parseParents(payload: Args, childId: string): { edges: ParentEdge[]; gi
 const NODE_DATA_COLUMNS = [
   "parent_id", "lane", "run_id", "trial_id", "agent_model", "title", "hypothesis", "decision",
   "soft_min_eff", "ratio_vs_incumbent", "short_horizon_eff", "long_horizon_eff", "overhead_ratio",
-  "b2_max", "dims", "codex_refs", "code_sha", "metrics_json",
+  "b2_max", "dims", "codex_refs", "code_sha", "metrics_json", "standard",
 ] as const;
 const NODE_ADMIN_COLUMNS = ["real_stan_passed", "real_stan_total", "real_ess_per_cost"] as const;
 
 /**
- * The bar for the verification queue: the best replicated or verified trial with source in
- * the lane. Unreviewed or sourceless scores never set it, so nobody can block the queue by
- * posting an inflated claim. One row from a partial index.
+ * The bar for the verification queue: the best replicated or verified standard trial with
+ * source in the lane. Unreviewed or sourceless scores never set it, so nobody can block the
+ * queue by posting an inflated claim, and scores from another setup are not comparable.
+ * One row from a partial index.
  */
 async function reviewedBest(db: D1DatabaseLike, lane: string, excludeId: string): Promise<number | null> {
   const row = await db
     .prepare(
-      `SELECT soft_min_eff AS best FROM nodes INDEXED BY idx_nodes_reviewed_eff
-       WHERE lane = ? AND state IN ('replicated', 'verified') AND source_sha IS NOT NULL
+      `SELECT soft_min_eff AS best FROM nodes INDEXED BY idx_nodes_reviewed_std
+       WHERE lane = ? AND state IN ('replicated', 'verified') AND source_sha IS NOT NULL AND standard = 1
          AND soft_min_eff IS NOT NULL AND id <> ?
        ORDER BY soft_min_eff DESC LIMIT 1`
     )
@@ -1209,9 +1335,12 @@ async function reviewedBest(db: D1DatabaseLike, lane: string, excludeId: string)
   return toFiniteNumber(row?.best);
 }
 
-/** A kept trial with source that beats its lane's best reviewed trial (or the lane has none) is queued. */
+/**
+ * A kept standard trial with source that beats its lane's best reviewed standard trial (or the
+ * lane has none) is queued. A trial on another setup can never be the frontier, so it is not.
+ */
 async function maybeEnqueue(db: D1DatabaseLike, node: NodeRecord): Promise<boolean> {
-  if (!KEPT_DECISIONS.has(node.decision) || node.soft_min_eff === null || !node.has_source) return false;
+  if (!KEPT_DECISIONS.has(node.decision) || node.soft_min_eff === null || !node.has_source || !node.standard) return false;
   if (LOCKED_STATES.has(node.state) || FRONTIER_EXCLUDED_STATES.includes(node.state)) return false;
   const best = await reviewedBest(db, node.lane, node.id);
   if (best !== null && node.soft_min_eff <= best) return false;
@@ -1341,6 +1470,7 @@ const opPostNode: Op = async (ctx, payload) => {
     overhead_ratio: toFiniteNumber(payload.overhead_ratio),
     b2_max: toFiniteNumber(payload.b2_max),
     dims: serializeJsonField(payload.dims),
+    standard: isStandard(lane, serializeJsonField(payload.dims)) ? 1 : 0,
     codex_refs: serializeJsonField(payload.codex_refs ?? []),
     code_sha: toNullableString(payload.code_sha),
     metrics_json:
@@ -1428,8 +1558,9 @@ const opPostNode: Op = async (ctx, payload) => {
     )
     .bind(...columns.map((c) => values[c]), ...(isAdmin ? [] : lockParams));
   // One batch (one transaction in D1): the trial row and the source body it points to are
-  // stored together, and a maintainer's lane change moves the queue entry with it.
-  const writes: D1PreparedStatement[] = [upsert];
+  // stored together, a maintainer's lane change moves the queue entry with it, and the
+  // trial's own step flag is set from the row as stored.
+  const writes: D1PreparedStatement[] = [upsert, stepSelfStmt(db, id)];
   if (sourceSha && sourceBytes) {
     writes.push(
       db
@@ -1476,6 +1607,7 @@ const opPostNode: Op = async (ctx, payload) => {
   }
 
   const row = await getNodeRow(db, id);
+  await settleSteps(db, existing, row);
   const node = row ? deserializeNode(row) : null;
   const queued = node ? await maybeEnqueue(db, node) : false;
   return out(existing ? 200 : 201, { ok: true, created: !existing, node, verify_queued: queued });
@@ -1542,6 +1674,62 @@ const opFrontier: Op = async (ctx, args) => {
   const frontier = await laneFrontiers(ctx.env.DB, lanes);
   if (lane) return out(200, { frontier });
   return out(200, { frontier, count: Object.keys(frontier).length });
+};
+
+/**
+ * One lane's chart: its standard trials oldest first, slim, with their step flags. One range
+ * of idx_nodes_lane_standard plus the lane's counter row.
+ */
+const opLaneChart: Op = async (ctx, args) => {
+  const db = ctx.env.DB;
+  const bad = badIdentifier(args, [], ["lane"]);
+  if (bad) return bad;
+  const lane = toNullableString(args.lane);
+  if (!lane) return out(400, { error: "missing_required_fields", required: ["lane"] });
+  const limit = clampLimit(args.limit, LIMITS.chartPoints, LIMITS.chartPoints);
+  // `after` is the `next_after` of the previous page: "<created_at>|<id>" of its last point.
+  // A cursor, not an offset, so every page costs the same and no lane is too long to read.
+  const after = toNullableString(args.after);
+  const cut = after ? after.indexOf("|") : -1;
+  if (after && (cut <= 0 || cut === after.length - 1 || after.length > 300)) return out(400, { error: "invalid_after" });
+  const cursor = after ? [after.slice(0, cut), after.slice(cut + 1)] : [];
+  const [rows, stats] = await batchAll<Record<string, unknown>>(db, [
+    db
+      .prepare(
+        `SELECT id, trial_id, run_id, created_at, soft_min_eff, decision, state, verified, frontier_step,
+                author, author_tier, agent_model, substr(coalesce(hypothesis, title), 1, ?) AS title
+         FROM nodes INDEXED BY idx_nodes_lane_standard WHERE lane = ? AND standard = 1
+           ${after ? "AND (created_at, id) > (?, ?)" : ""}
+         ORDER BY created_at, id LIMIT ?`
+      )
+      .bind(LIMITS.chartTitleChars, lane, ...cursor, limit),
+    db.prepare("SELECT standard, steps FROM lane_stats WHERE lane = ?").bind(lane),
+  ]);
+  const total = Number(stats[0]?.standard ?? 0);
+  const dims = STANDARD_DIMS.get(lane);
+  const last = rows.length === limit ? rows[rows.length - 1] : null;
+  return out(200, {
+    lane,
+    standard_dims: dims ? [...dims] : null,
+    points: rows.map((r) => ({
+      id: r.id as string,
+      trial_id: (r.trial_id as string | null) ?? null,
+      run_id: r.run_id as string,
+      created_at: r.created_at as string,
+      soft_min_eff: toFiniteNumber(r.soft_min_eff),
+      decision: r.decision as string,
+      state: (r.state as string | null) ?? (r.verified ? "verified" : "unverified"),
+      step: Number(r.frontier_step) === 1,
+      author: (r.author as string | null) ?? null,
+      author_tier: (r.author_tier as string | null) ?? null,
+      agent_model: (r.agent_model as string | null) ?? null,
+      title: (r.title as string | null) ?? null,
+    })),
+    total,
+    steps: Number(stats[0]?.steps ?? 0),
+    limit,
+    next_after: last ? `${last.created_at as string}|${last.id as string}` : null,
+  });
 };
 
 const opGetNode: Op = async (ctx, args) => {
@@ -1617,7 +1805,7 @@ const opOverview: Op = async (ctx) => {
     // model, at most LIMITS.overviewModels).
     db.prepare(
       `SELECT COALESCE(SUM(trials), 0) AS trials, COALESCE(SUM(kept), 0) AS kept, COALESCE(SUM(runs), 0) AS runs,
-              MAX(latest_at) AS latest_at,
+              MAX(latest_at) AS latest_at, COALESCE(SUM(MAX(steps - 1, 0)), 0) AS improvements,
               (SELECT value FROM flywheel_counters WHERE name = 'contributors') AS contributors
        FROM lane_stats`
     ),
@@ -1649,6 +1837,7 @@ const opOverview: Op = async (ctx) => {
       kept: Number(t.kept ?? 0),
       runs: Number(t.runs ?? 0),
       contributors: Number(t.contributors ?? 0),
+      improvements: Number(t.improvements ?? 0),
       claims: await countActiveClaims(db),
       latest_at: (t.latest_at as string | null) ?? null,
     },
@@ -1805,10 +1994,12 @@ const opSetNodeState: Op = async (ctx, args) => {
   }
 
   const now = nowIso();
-  await db
-    .prepare("UPDATE nodes SET state = ?, verified = ?, state_reason = ?, state_by = ?, state_at = ? WHERE id = ?")
-    .bind(state, state === "verified" ? 1 : 0, reason, principal.handle, now, id)
-    .run();
+  await runBatch(db, [
+    db
+      .prepare("UPDATE nodes SET state = ?, verified = ?, state_reason = ?, state_by = ?, state_at = ? WHERE id = ?")
+      .bind(state, state === "verified" ? 1 : 0, reason, principal.handle, now, id),
+    stepSelfStmt(db, id),
+  ]);
 
   if (state === "needs-replication" && node.has_source) {
     await db
@@ -1831,6 +2022,7 @@ const opSetNodeState: Op = async (ctx, args) => {
   }
 
   const updated = await getNodeRow(db, id);
+  await settleSteps(db, row, updated);
   return out(200, { ok: true, node: updated ? deserializeNode(updated) : null });
 };
 
@@ -2444,6 +2636,7 @@ const opVerifyResult: Op = async (ctx, args) => {
          RETURNING node_id`
       )
       .bind(passed ? "pass" : "fail", metricsJson, principal.handle, now, ...leaseParams),
+    stepSelfStmt(db, nodeId),
   ]);
 
   if ((done?.results ?? []).length === 0) {
@@ -2455,6 +2648,7 @@ const opVerifyResult: Op = async (ctx, args) => {
   }
 
   const updated = await getNodeRow(db, nodeId);
+  await settleSteps(db, nodeRow, updated);
   return out(200, { ok: true, node_id: nodeId, result: passed ? "pass" : "fail", node: updated ? deserializeNode(updated) : null });
 };
 
@@ -2588,6 +2782,14 @@ const opAdminHandle: Op = async (ctx, args) => {
       .prepare("UPDATE api_keys SET revoked_at = ? WHERE lower(handle) = lower(?) AND revoked_at IS NULL")
       .bind(now, handle)
       .run();
+    // Lanes whose trials are deleted or reopened below: their steps are rewalked at the end.
+    const touched = await db
+      .prepare(
+        `SELECT DISTINCT lane FROM nodes WHERE lower(author) = lower(?)
+           OR (state IN ('replicated', 'disputed', 'needs-replication') AND lower(state_by) = lower(?))`
+      )
+      .bind(handle, handle)
+      .all<{ lane: string }>();
     const owned = "SELECT id FROM nodes WHERE lower(author) = lower(?)";
     await db.prepare(`DELETE FROM node_parents WHERE child IN (${owned}) OR parent IN (${owned})`).bind(handle, handle).run();
     await db.prepare(`DELETE FROM verify_queue WHERE node_id IN (${owned})`).bind(handle).run();
@@ -2619,6 +2821,7 @@ const opAdminHandle: Op = async (ctx, args) => {
       )
       .bind(now, handle, handle)
       .run();
+    for (const { lane } of touched.results ?? []) await rewalkSteps(db, lane, null);
     return out(200, {
       ok: true,
       handle,
@@ -2665,13 +2868,15 @@ const opAdminVerifyNode: Op = async (ctx, payload) => {
   const stanEss = pick("real_ess_per_cost", toFiniteNumber, existing.real_ess_per_cost);
   const state = verified ? "verified" : (existing.state === "verified" ? "unverified" : existing.state ?? "unverified");
   const now = nowIso();
-  await db
-    .prepare(
-      `UPDATE nodes SET verified = ?, state = ?, state_by = ?, state_at = ?,
-         real_stan_passed = ?, real_stan_total = ?, real_ess_per_cost = ? WHERE id = ?`
-    )
-    .bind(verified, state, (ctx.principal as AuthPrincipal).handle, now, stanPassed, stanTotal, stanEss, nodeId)
-    .run();
+  await runBatch(db, [
+    db
+      .prepare(
+        `UPDATE nodes SET verified = ?, state = ?, state_by = ?, state_at = ?,
+           real_stan_passed = ?, real_stan_total = ?, real_ess_per_cost = ? WHERE id = ?`
+      )
+      .bind(verified, state, (ctx.principal as AuthPrincipal).handle, now, stanPassed, stanTotal, stanEss, nodeId),
+    stepSelfStmt(db, nodeId),
+  ]);
   if (verified) {
     await db
       .prepare("UPDATE verify_queue SET status = 'done', result = 'verified', lease_token_hash = NULL, updated_at = ? WHERE node_id = ? AND status <> 'done'")
@@ -2679,17 +2884,19 @@ const opAdminVerifyNode: Op = async (ctx, payload) => {
       .run();
   }
   const updated = await getNodeRow(db, nodeId);
+  await settleSteps(db, existing, updated);
   return out(200, { ok: true, node: updated ? deserializeNode(updated) : null });
 };
 
 const opAdminDeleteNode: Op = async (ctx, args) => {
   const db = ctx.env.DB;
   const nodeId = toNullableString(args.id) ?? "";
-  const existing = await db.prepare("SELECT id FROM nodes WHERE id = ?").bind(nodeId).first<{ id: string }>();
+  const existing = await getNodeRow(db, nodeId);
   if (!existing) return out(404, { error: "not_found" });
   await db.prepare("DELETE FROM nodes WHERE id = ?").bind(nodeId).run();
   await db.prepare("DELETE FROM node_parents WHERE child = ? OR parent = ?").bind(nodeId, nodeId).run();
   await db.prepare("DELETE FROM verify_queue WHERE node_id = ?").bind(nodeId).run();
+  await settleSteps(db, existing, null);
   return out(200, { ok: true, deleted: nodeId });
 };
 
@@ -2753,7 +2960,8 @@ const LANE_PROP = { type: "string", description: "Lane id, e.g. A0, A1, A2, A3, 
 const MCP_TOOLS: McpTool[] = [
   {
     name: "flywheel_frontier",
-    description: "Return the current best kept/verified apin research frontier node per lane.",
+    description:
+      "Return each lane's frontier: the latest trial that moved it, among kept or verified trials on the lane's standard dims.",
     inputSchema: {
       type: "object",
       properties: { lane: { type: "string", description: "Optional lane filter (e.g. A0, A1, A2, A3)." } },
@@ -2765,7 +2973,7 @@ const MCP_TOOLS: McpTool[] = [
   {
     name: "flywheel_list_nodes",
     description:
-      "List trials, newest first, with filters (lane, run_id, decision, state, verified, model, outcome kept|archived|discarded, stan, q) and paging (limit, offset).",
+      "List trials, newest first, with filters (lane, run_id, decision, state, verified, model, outcome kept|archived|discarded, stan, step: only trials that moved their lane's frontier, q) and paging (limit, offset).",
     inputSchema: {
       type: "object",
       properties: {
@@ -2777,6 +2985,7 @@ const MCP_TOOLS: McpTool[] = [
         model: str,
         outcome: { type: "string", enum: ["kept", "archived", "discarded"] },
         stan: { type: "boolean" },
+        step: { type: "boolean" },
         q: str,
         limit: { type: "integer", minimum: 1, maximum: LIMITS.nodesLimitMax },
         offset: { type: "integer", minimum: 0 },
@@ -3087,6 +3296,7 @@ const ROUTES: Route[] = [
   { method: "GET", pattern: /^\/api\/frontier$/, access: "public", op: opFrontier },
   { method: "GET", pattern: /^\/api\/overview$/, access: "public", op: opOverview },
   { method: "GET", pattern: /^\/api\/runs$/, access: "public", op: opRuns },
+  { method: "GET", pattern: /^\/api\/lanes\/([^/]+)\/chart$/, params: ["lane"], access: "public", op: opLaneChart },
   { method: "GET", pattern: /^\/api\/nodes$/, access: "public", op: opListNodes },
   { method: "GET", pattern: /^\/api\/nodes\/([^/]+)\/source$/, params: ["node_id"], access: "public", op: opGetSource },
   { method: "GET", pattern: /^\/api\/nodes\/([^/]+)$/, params: ["id"], access: "public", op: opGetNode },

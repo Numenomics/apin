@@ -1,8 +1,6 @@
-"""Systems Autoresearch Lanes S1 (Upstream Sampler Patches) and S2 (Gradient & Compiler Speed).
+"""Systems autoresearch lane S2 (gradient and compiler speed).
 
 Implements `autoresearch/RULINGS.md` R-008:
-  - Lane S1: scoped upstream sampler patches (`upstream/walnutpie`, `upstream/stan`, `upstream/nuts-rs`),
-    enforcing `allowed_paths`, build + upstream unit tests + `apin` statistical gate.
   - Lane S2: scoped gradient/compiler patches (`upstream/math`, `upstream/stan`, `upstream/stanc3`,
     `upstream/bridgestan`), enforcing:
       1. `allowed_paths` diff guard,
@@ -193,98 +191,6 @@ def _patch_digest(repo_dir: Path, base_ref: str = "HEAD") -> str:
         capture_output=True, text=True, check=False,
     )
     return hashlib.sha256(r.stdout.encode("utf-8", errors="ignore")).hexdigest()[:16]
-
-
-def evaluate_s1_trial(
-    upstream: str,
-    hypothesis: str,
-    *,
-    allowed_paths: list[str] | None = None,
-    build_cmd: str | None = None,
-    test_cmd: str | None = None,
-    bench_cmd: str | None = None,
-    base_ref: str = "HEAD",
-    run_id: str = "default",
-    autoresearch_dir: Path = ROOT / "autoresearch",
-    upstream_dir: Path | None = None,
-    dry_run: bool = False,
-) -> dict[str, Any]:
-    """Evaluate one Lane S1 (Upstream Sampler Patch) trial."""
-    t0 = time.perf_counter()
-    repo_dir = Path(upstream_dir) if upstream_dir is not None else (ROOT / "upstream" / upstream)
-    run_dir = autoresearch_dir / "lanes" / "S1" / "runs" / run_id
-    prior = (
-        [json.loads(ln) for ln in (run_dir / "ledger.jsonl").read_text().splitlines() if ln.strip()]
-        if (run_dir / "ledger.jsonl").is_file() else []
-    )
-    trial_id = f"T{len(prior) + 1:04d}"
-
-    if not repo_dir.is_dir():
-        return {
-            "trial_id": trial_id, "lane": "S1", "upstream": upstream,
-            "decision": "error_missing_upstream", "error": f"upstream directory not found: {repo_dir}",
-            "wall_s": round(time.perf_counter() - t0, 3),
-        }
-
-    changed = _git_changed_files(repo_dir, base_ref=base_ref)
-    paths_ok, violations = check_allowed_paths(changed, list(allowed_paths or []))
-    cand_sha = _patch_digest(repo_dir, base_ref=base_ref)
-
-    if dry_run:
-        return {
-            "trial_id": trial_id, "lane": "S1", "upstream": upstream, "candidate_sha": cand_sha,
-            "changed_files": changed, "paths_ok": paths_ok, "path_violations": violations,
-            "decision": "dry_run_ok" if paths_ok else "dry_run_path_violation",
-            "wall_s": round(time.perf_counter() - t0, 3),
-        }
-
-    row: dict[str, Any] = {
-        "trial_id": trial_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "lane": "S1",
-        "upstream": upstream,
-        "candidate_sha": cand_sha,
-        "changed_files": changed,
-        "paths_ok": paths_ok,
-        "path_violations": violations,
-        "build_ok": False,
-        "tests_ok": False,
-        "hypothesis": hypothesis,
-        "machine": tracks.machine_fingerprint(),
-    }
-    if not paths_ok:
-        row.update(decision="discard_path_violation", wall_s=round(time.perf_counter() - t0, 3))
-        return _append_systems_ledger(run_dir, row)
-
-    if build_cmd:
-        ok, tail = _run_shell(build_cmd, repo_dir)
-        row["build_ok"] = ok
-        row["build_tail"] = tail
-        if not ok:
-            row.update(decision="discard_build_fail", wall_s=round(time.perf_counter() - t0, 3))
-            return _append_systems_ledger(run_dir, row)
-    else:
-        row["build_ok"] = True
-
-    if test_cmd:
-        ok, tail = _run_shell(test_cmd, repo_dir)
-        row["tests_ok"] = ok
-        row["tests_tail"] = tail
-        if not ok:
-            row.update(decision="discard_test_fail", wall_s=round(time.perf_counter() - t0, 3))
-            return _append_systems_ledger(run_dir, row)
-    else:
-        row["tests_ok"] = True
-
-    if bench_cmd:
-        ok, tail = _run_shell(bench_cmd, ROOT)
-        row["bench_ok"] = ok
-        row["bench_tail"] = tail
-        row["decision"] = "keep" if ok else "discard_bench_fail"
-    else:
-        row["decision"] = "keep_tests_only"
-    row["wall_s"] = round(time.perf_counter() - t0, 3)
-    return _append_systems_ledger(run_dir, row)
 
 
 def evaluate_s2_trial(

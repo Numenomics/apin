@@ -3,13 +3,13 @@
 This is a standardised, containerised benchmark for LLMs and coding agents, built on the [Harbor](https://harborframework.com) task format (`laude-institute/harbor`). Every model or agent gets the same frozen starting code, sealed container, network policy and hidden verifier seeds, so results are comparable across releases.
 
 > Agent benchmark vs. open-ended autoresearch:
-> - Agent benchmark (here, `harbor/`): evaluates LLMs and agent harnesses under fixed conditions (one model or agent, frozen starting code, a sealed container that can reach only the model provider; graded by tasks solved and by speed-up over a Stan-style reference).
+> - Agent benchmark (here, `harbor/`): evaluates LLMs and agent harnesses under fixed conditions (one model or agent, frozen starting code, a sealed container that can reach only the model provider). It is ranked by speed-up over the starting code.
 > - Open-ended autoresearch (`autoresearch/` and [apin Flywheel](https://apin-flywheel.m0hawk.workers.dev)): evaluates the best posterior approximator produced by any process (multi-LLM councils, custom harnesses, human-in-the-loop), with strict rules only on the final artefact.
 
 ## Task categories
 
 ### Category 1: diagnostic and invariance rewinds (binary pass/fail)
-These tasks come from real MCMC and transport bugs found in `apin` campaigns. The starting code fails a hidden invariance or Jacobian check, and the agent must diagnose and fix it without cheating.
+These tasks come from real MCMC and transport bugs found in `apin` campaigns. The starting code fails a hidden invariance or Jacobian check, and the agent must diagnose and fix it without cheating. They belong to lane S3 and are not part of the leaderboard. Leave them out of a benchmark sweep with `-x 's3-*'`.
 
 | Task | Difficulty | Description | Metric |
 |---|---|---|---|
@@ -18,7 +18,7 @@ These tasks come from real MCMC and transport bugs found in `apin` campaigns. Th
 | `s3-unadjusted-ula` | easy | Convert biased unadjusted Langevin (ULA) into a Metropolis-adjusted kernel | `reward ∈ {0, 1}` |
 
 ### Category 2: open-ended optimisation (continuous speed-up)
-These are KernelBench-style optimisation tasks. The agent starts from frozen starting code and maximises dual-horizon (`H=150/1000`, `dims=6,20`) verified efficiency on hidden verifier seeds. A run that fails an invariance, mixing or replay check is `invalid` and scores `0.0`; a purely statistical rejection counts only after it fails again on a second seed. See [Scoring (optimize tasks)](#scoring-optimize-tasks) for the scoring rules.
+These five tasks are the benchmark. They are KernelBench-style optimisation tasks. The agent starts from frozen starting code and maximises dual-horizon (`H=150/1000`, `dims=6,20`) verified efficiency on hidden verifier seeds. A run that fails an invariance, mixing or replay check is `invalid` and scores `0.0`; a purely statistical rejection counts only after it fails again on a second seed. See [Scoring (optimize tasks)](#scoring-optimize-tasks) for the scoring rules.
 
 > How `soft_min_eff` works in A0 to A4: the judge combines per-class geometric means with a $p = -4$ power mean (`(mean_c eff_c^{-4})^{-1/4}`), so the worst target class dominates the score. For example, a small regression on `hybrid_rosenbrock` or `banana` can erase +50% gains on easier classes. Check `by_class` / `CLASS_METRIC` after every edit and improve the weakest class first.
 
@@ -180,4 +180,4 @@ uv run python scripts/collect_harbor_results.py --release bench-v0.2.0 --jobs jo
 cd flywheel && npx wrangler deploy
 ```
 
-The collector reads each task's title, lane, difficulty and time limit from its `task.toml`, so the page never restates them by hand. It records any run cut off by the model provider or infrastructure as `interrupted`, whatever the run produced, and any valid result the verifier could not score as `unscorable`. Neither counts as a pass or a fail. Preview the page locally with `python3 -m http.server 8788 --directory flywheel/public` and open `http://localhost:8788/benchmark/`.
+The collector reads each task's title, lane, difficulty and time limit from its `task.toml`, so the page never restates them by hand. It records any run cut off by the model provider or infrastructure as `interrupted`, whatever the run produced, and any valid result the verifier could not score as `unscorable`. Neither counts as a result. The leaderboard covers the five speed-up tasks. Each row is ranked by the geometric mean of its speed-ups over the starting code, and a task with no valid attempt enters that mean at 0.1×. Attempts at the `s3-*` tasks stay in the data file as a record and appear in no row. Preview the page locally with `python3 -m http.server 8788 --directory flywheel/public` and open `http://localhost:8788/benchmark/`.

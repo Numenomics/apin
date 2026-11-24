@@ -25,6 +25,11 @@ const MIGRATIONS = fs
   .filter((f) => f.endsWith(".sql"))
   .sort()
   .map((f) => fs.readFileSync(path.resolve(here, "../migrations", f), "utf8"));
+/** Trials below are inserted straight into SQLite, as seed.sql does, so they need 0004's flag backfill. */
+const BACKFILL = fs
+  .readFileSync(path.resolve(here, "../migrations/0004_frontier_steps.sql"), "utf8")
+  .split("-- BACKFILL BEGIN")[1]
+  .split("-- BACKFILL END")[0];
 
 const LANES = ["A0", "A1", "A2", "A3", "A4", "S1", "S2", "S3"];
 const MODELS = ["glm-5.3", "claude-opus-5-5", "deepseek-4.1", "muse-1.3", "codex-5", "qwen-4"];
@@ -46,6 +51,9 @@ const INSERT_NOTE =
   "INSERT INTO notes (id, kind, lane, title, body, state, author, node_ids, created_at, updated_at) VALUES (?, 'insight', 'A1', 'Note', 'body', 'open', 'x', ?, ?, ?)";
 
 const TIE_TRIALS = 3000;
+// A chart cursor two hours into the synthetic timeline: at both table sizes lane A1 still
+// holds more than a page of 100 trials after it.
+const CHART_CURSOR = "2026-01-01T02:00:00.000Z|0";
 
 /** N trials over 8 lanes (one run of N/10 trials in A1, the rest in runs of about 60), a tie block, 30 notes. */
 function synthesize(n) {
@@ -63,6 +71,7 @@ function synthesize(n) {
   const statements = [];
   const incumbent = new Map();
   const last = new Map();
+  let firstStepA1 = null; // every synthetic trial is standard, so A1's first kept scored trial
   slots.forEach(({ run, k }, i) => {
     const id = `${run.lane}:${run.run_id}:T${String(k + 1).padStart(4, "0")}`;
     const u = rand();
@@ -81,6 +90,7 @@ function synthesize(n) {
       statements.push([INSERT_EDGE, [id, [...last.values()][Math.floor(rand() * last.size)], "combines", created]]);
     }
     if (decision === "keep") incumbent.set(run.run_id, id);
+    if (decision === "keep" && run.lane === "A1" && !firstStepA1) firstStepA1 = id;
     last.set(run.run_id, id);
   });
   // A block of TIE_TRIALS trials sharing the newest timestamp (lane TIE, model tie-model):
@@ -98,11 +108,15 @@ function synthesize(n) {
     const at = `2026-02-01T00:00:${String(j).padStart(2, "0")}Z`;
     statements.push([INSERT_NOTE, [`note_${j}`, JSON.stringify([target]), at, at]]);
   }
-  return { statements, target };
+  return { statements, target, firstStepA1 };
 }
 
-/** The requests measured, in order. `site` marks the reads the website uses. */
-function requests(n, target) {
+/**
+ * The requests measured, in order. `site` marks the reads the website uses. `flat: false`
+ * skips the flat-JS check: for a page the 1,000-trial table cannot fill (its cost grows up to
+ * the page cap, then stops), and for the rare lane rewalk, whose cost grows with the lane.
+ */
+function requests(n, target, firstStepA1) {
   const get = (p) => () => new Request(`https://x${p}`);
   return [
     ["/api/overview", true, get("/api/overview")],
@@ -120,6 +134,11 @@ function requests(n, target) {
     ["/api/nodes?q=james", true, get("/api/nodes?q=james")],
     ["/api/nodes/:id", true, get(`/api/nodes/${encodeURIComponent(target)}`)],
     ["/api/frontier", true, get("/api/frontier")],
+    ["/api/lanes/A1/chart?limit=200", true, get("/api/lanes/A1/chart?limit=200")],
+    ["/api/lanes/A1/chart?after=<cursor>&limit=100", true, get(`/api/lanes/A1/chart?limit=100&after=${encodeURIComponent(CHART_CURSOR)}`)],
+    ["/api/lanes/A1/chart (full page, 1,000 points)", true, get("/api/lanes/A1/chart"), { flat: false }],
+    ["/api/nodes?step=1", true, get("/api/nodes?step=1")],
+    ["/api/nodes?lane=A1&step=1&q=james", true, get("/api/nodes?lane=A1&step=1&q=james")],
     ["/api/search?q=james", true, get("/api/search?q=james")],
     ["/api/dag", false, get("/api/dag")],
     ["POST /api/nodes", false, (k) =>
@@ -132,6 +151,13 @@ function requests(n, target) {
           parent_ids: [{ id: target, relation: "incumbent" }], source: `${SOURCE}# ${k}\n`,
         }),
       })],
+    // Disputing (and restoring) A1's first step rewalks the whole lane: the rare path.
+    ["POST /api/nodes/:id/state (first step, rewalk)", false, (k) =>
+      new Request(`https://x/api/nodes/${encodeURIComponent(firstStepA1)}/state`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state: k % 2 === 0 ? "disputed" : "unverified", reason: "rerun" }),
+      }), { flat: false }],
   ];
 }
 
@@ -150,10 +176,11 @@ function sqliteDb(n) {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec(SCHEMA);
   for (const m of MIGRATIONS) sqlite.exec(m);
-  const { statements, target } = synthesize(n);
+  const { statements, target, firstStepA1 } = synthesize(n);
   sqlite.exec("BEGIN");
   for (const [sql, params] of statements) sqlite.prepare(sql).run(...params);
   sqlite.exec("COMMIT");
+  sqlite.exec(BACKFILL);
   const clock = { sqlMs: 0 };
   const timed = (fn) => {
     const t = performance.now();
@@ -199,14 +226,14 @@ function sqliteDb(n) {
       });
     },
   };
-  return { db, clock, target };
+  return { db, clock, target, firstStepA1 };
 }
 
 async function jsTimes(n) {
-  const { db, clock, target } = sqliteDb(n);
+  const { db, clock, target, firstStepA1 } = sqliteDb(n);
   const env = envFor(db);
   const outMs = {};
-  for (const [name, , make] of requests(n, target)) {
+  for (const [name, , make] of requests(n, target, firstStepA1)) {
     const samples = [];
     for (let k = 0; k < 11; k += 1) {
       clock.sqlMs = 0;
@@ -280,15 +307,16 @@ async function rowsRead(getPlatformProxy, n) {
   try {
     const d1 = proxy.env.DB;
     for (const sql of [SCHEMA, ...MIGRATIONS]) for (const s of splitSql(sql)) await d1.prepare(s).run();
-    const { statements, target } = synthesize(n);
+    const { statements, target, firstStepA1 } = synthesize(n);
     // Batches of 100: the local runtime drops the connection on long single batches.
     for (let i = 0; i < statements.length; i += 100) {
       await d1.batch(statements.slice(i, i + 100).map(([sql, params]) => d1.prepare(sql).bind(...params)));
     }
+    for (const s of splitSql(BACKFILL)) await d1.prepare(s).run();
     const counter = { rows: 0 };
     const env = envFor(countingD1(d1, counter));
     const result = {};
-    for (const [name, , make] of requests(n, target)) {
+    for (const [name, , make] of requests(n, target, firstStepA1)) {
       counter.rows = 0;
       await call(env, make(0));
       result[name] = counter.rows;
@@ -324,6 +352,13 @@ const SITE_BOUNDS = {
   "/api/nodes?q=james": LIMITS.searchWindow * 3 + 50,
   "/api/nodes/:id": LIMITS.nodeChildren * 2 + LIMITS.nodeNotes * 2 + 100,
   "/api/frontier": LIMITS.overviewLanes * 40 + 50,
+  "/api/lanes/A1/chart?limit=200": 200 + 50,
+  // A cursor seeks to its place in the index: the rows before it are never read.
+  "/api/lanes/A1/chart?after=<cursor>&limit=100": 100 + 50,
+  "/api/lanes/A1/chart (full page, 1,000 points)": LIMITS.chartPoints + 50,
+  // Steps are few (each one beats every score before it), and the count comes from lane_stats.
+  "/api/nodes?step=1": LIMITS.nodesLimitDefault * 2 + 50,
+  "/api/nodes?lane=A1&step=1&q=james": LIMITS.nodesLimitDefault * 2 + 200,
   "/api/search?q=james": LIMITS.searchWindow * 4 + 50,
 };
 
@@ -355,15 +390,19 @@ it("keeps Worker CPU flat and D1 rows read bounded from 1,000 to 20,000 trials",
     ].join("\n")
   );
 
+  const notFlat = new Set(requests(1, "x", "x").filter((r) => r[3]?.flat === false).map((r) => r[0]));
   for (const k of names) {
+    if (notFlat.has(k)) continue;
     // JavaScript time: flat within timer noise (never more than double plus 1.5 ms).
     assert.ok(largeMs[k] <= 2 * smallMs[k] + 1.5, `${k}: JS grew from ${smallMs[k].toFixed(2)} to ${largeMs[k].toFixed(2)} ms`);
   }
   if (largeRows) {
-    for (const [k, site] of requests(1, "x").map(([name, s]) => [name, s])) {
+    for (const [k, site] of requests(1, "x", "x").map(([name, s]) => [name, s])) {
       if (!site) continue;
       assert.ok(largeRows[k] <= SITE_BOUNDS[k], `${k}: ${largeRows[k]} rows read at 20,000 trials exceeds its bound ${SITE_BOUNDS[k]}`);
       assert.ok(smallRows[k] <= SITE_BOUNDS[k], `${k}: ${smallRows[k]} rows read at 1,000 trials exceeds its bound ${SITE_BOUNDS[k]}`);
     }
+    // The usual write, a new trial at the end of its lane, reads a fixed number of rows too.
+    for (const rows of [smallRows, largeRows]) assert.ok(rows["POST /api/nodes"] <= 100, `POST /api/nodes: ${rows["POST /api/nodes"]} rows read`);
   }
 });

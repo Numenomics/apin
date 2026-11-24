@@ -1,13 +1,12 @@
-/* Overview page: the live gate illustration and the two summary tables. */
+/* Overview page: the join prompt, two commands and the live gate illustration. */
 (function () {
   "use strict";
-  const { $, esc, fmt, status, cmd } = apin;
+  const { $, fmt, status, cmd } = apin;
 
   apin.mount("home");
 
   $("#join-prompt").innerHTML = cmd(apin.JOIN_PROMPT, { prose: true });
-  $("#way-research").innerHTML = cmd("uv run apin autoresearch brief --lane A1");
-  $("#way-bench").innerHTML = cmd("harbor run -p harbor/tasks -a claude-code \\\n  -m anthropic/claude-sonnet-4-5");
+  $("#way-bench").innerHTML = cmd("harbor run -p harbor/tasks -x 's3-*' \\\n  -a claude-code -m anthropic/claude-sonnet-4-5");
   $("#way-score").innerHTML = cmd("uv run apin invariance --sampler mine.py");
 
   /* ---------- the gate, running ----------
@@ -238,73 +237,4 @@
     visible = true;
     start();
   }
-
-  /* ---------- frontier summary ---------- */
-
-  apin
-    .openStore()
-    .then(async (store) => {
-      const overview = await store.overview();
-      const rows = apin.laneRows(overview);
-      const t = overview.totals;
-      $("#front-note").textContent =
-        `The best kept result in each lane so far: ${fmt.int(t.trials)} trials recorded, ${fmt.int(t.kept)} kept, ` +
-        `${t.claims} ${t.claims === 1 ? "task" : "tasks"} claimed now` +
-        (store.source === "snapshot" ? " (from the snapshot shipped with this page)." : ".");
-      $("#front-table").innerHTML =
-        "<thead><tr><th>Lane</th><th>Focus</th><th class='num'>Best efficiency</th><th class='num'>Gain within its run</th>" +
-        "<th>Real Stan posteriors</th><th class='num'>Trials</th><th>Progress</th></tr></thead><tbody>" +
-        rows
-          .map((r) => {
-            if (!r.trials) {
-              return `<tr><td>${apin.laneTag(r.lane.id)}</td><td>${esc(r.lane.name)}</td><td colspan="5" class="sub">No trials recorded yet. <a href="/lanes/#${r.lane.id}">Start this lane</a></td></tr>`;
-            }
-            const stan = r.stan
-              ? status(r.stan.real_stan_passed === r.stan.real_stan_total ? "good" : "mute", `${r.stan.real_stan_passed} of ${r.stan.real_stan_total} passed`)
-              : '<span class="sub">not run yet</span>';
-            return (
-              `<tr><td>${apin.laneTag(r.lane.id)}</td><td><a href="/lanes/#${r.lane.id}">${esc(r.lane.name)}</a></td>` +
-              `<td class="num">${fmt.eff(r.top && r.top.soft_min_eff)}</td><td class="num">${fmt.times(r.gain)}</td>` +
-              `<td>${stan}</td><td class="num">${fmt.int(r.kept)} kept of ${fmt.int(r.trials)}</td>` +
-              `<td>${apin.sparkline(r.steps, apin.laneColor(r.lane.id))}</td></tr>`
-            );
-          })
-          .join("") +
-        "</tbody>";
-    })
-    .catch(() => {
-      $("#front-table").innerHTML = '<tbody><tr><td class="empty">Could not load the frontier. Reload the page, or read <a href="/api/frontier">the API</a>.</td></tr></tbody>';
-    });
-
-  /* ---------- benchmark summary ---------- */
-
-  /* The task blocks open their runs on the benchmark page. */
-  $("#board-table").addEventListener("click", (e) => {
-    if (e.target.closest("[data-run]")) location.href = "/benchmark/";
-  });
-
-  apin
-    .getJSON("/data/benchmark.json")
-    .then((data) => {
-      const rel = apin.bench.release(data, data.current_release);
-      const board = rel.leaderboard || [];
-      const whole = (r, v) => fmt.num(v, r.attempts_per_task > 1 ? 1 : 0);
-      $("#board-note").textContent = `Release ${rel.release}: ${board.length} model and effort settings, ${rel.trials.length} runs across ${rel.tasks.length} tasks.`;
-      $("#board-table").innerHTML =
-        "<thead><tr><th></th><th>Model</th><th>Effort</th><th>Tasks, fixes then speed-ups</th><th class='num'>Solved</th>" +
-        "<th class='num'>Typical speed-up</th><th class='num'>Cost of the sweep</th></tr></thead><tbody>" +
-        board
-          .slice(0, 6)
-          .map(
-            (r) =>
-              `<tr><td class="rank">${r.rank}</td><td>${esc(r.label)}</td><td><span class="tag">${esc(r.effort)}</span></td>` +
-              `<td>${apin.bench.pips(rel, r)}</td><td class="num">${whole(r, r.solved)} of ${r.n_tasks}</td>` +
-              `<td class="num">${r.opt_geomean ? fmt.times(r.opt_geomean) : "—"}</td><td class="num">${fmt.usd(r.total_cost_usd)}</td></tr>`
-          )
-          .join("") +
-        "</tbody>";
-    })
-    .catch(() => {
-      $("#board-table").innerHTML = '<tbody><tr><td class="empty">No benchmark results are published with this build yet.</td></tr></tbody>';
-    });
 })();
