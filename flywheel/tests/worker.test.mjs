@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -15,6 +16,11 @@ const MIGRATIONS_SQL = fs
   .filter((f) => f.endsWith(".sql"))
   .sort()
   .map((f) => fs.readFileSync(path.join(MIGRATIONS_DIR, f), "utf8"));
+/** The flag backfill of migration 0004, for trials written straight into SQLite (as seed.sql does). */
+const BACKFILL_SQL = fs
+  .readFileSync(path.join(MIGRATIONS_DIR, "0004_frontier_steps.sql"), "utf8")
+  .split("-- BACKFILL BEGIN")[1]
+  .split("-- BACKFILL END")[0];
 
 /**
  * Minimal in-memory Cloudflare D1Database shim backed by node:sqlite.
@@ -190,11 +196,15 @@ describe("apin Flywheel Worker", () => {
       real_stan_total: 5,
       real_ess_per_cost: 0.024,
       overhead_ratio: 4.5,
+      dims: [6, 20],
       verified: true,
       created_at: "2026-11-21T10:05:00Z",
     });
     assert.equal(n2.status, 201);
     assert.equal(n2.json.node.verified, 1);
+    // T0001 ran on dims [6], not A1's standard [6, 20]: it never takes part in the frontier.
+    assert.deepEqual([n1.json.node.standard, n1.json.node.frontier_step], [false, false]);
+    assert.deepEqual([n2.json.node.standard, n2.json.node.frontier_step], [true, true]);
 
     // Post discarded high-eff node (must NOT displace frontier!) + auto-generated ID
     const n3 = await reqJson(env, "POST", "/api/nodes", {
@@ -473,6 +483,7 @@ describe("apin Flywheel Worker", () => {
             trial_id: "T0001",
             decision: "keep",
             soft_min_eff: 0.002,
+            dims: [6, 20],
           },
         },
       },
@@ -762,7 +773,7 @@ async function registerToken(env, handle, ip) {
 
 function trial(id, extra = {}) {
   const [lane, run_id, trial_id] = id.split(":");
-  return { id, lane, run_id, trial_id, decision: "keep", soft_min_eff: 0.001, ...extra };
+  return { id, lane, run_id, trial_id, decision: "keep", soft_min_eff: 0.001, dims: [6, 20], ...extra };
 }
 
 async function rawPost(env, pathname, bodyText, headers = {}) {
@@ -1379,10 +1390,10 @@ describe("verification queue", () => {
 const TRIAL_COLUMNS = [
   "id", "parent_id", "lane", "run_id", "trial_id", "agent_model", "author", "author_tier", "title", "hypothesis",
   "decision", "soft_min_eff", "real_stan_passed", "real_stan_total", "verified", "state", "codex_refs",
-  "metrics_json", "created_at",
+  "metrics_json", "dims", "created_at",
 ];
 
-/** Inserts trials straight into SQLite (triggers keep run_stats current). */
+/** Inserts trials straight into SQLite (triggers keep run_stats current), then backfills the step flags. */
 function seedTrials(sqlite, rows) {
   const stmt = sqlite.prepare(
     `INSERT INTO nodes (${TRIAL_COLUMNS.join(", ")}) VALUES (${TRIAL_COLUMNS.map(() => "?").join(", ")})`
@@ -1394,11 +1405,12 @@ function seedTrials(sqlite, rows) {
       parent_id: null, lane, run_id, trial_id, agent_model: "model-x", author: `${run_id}-author`, author_tier: null,
       title: `${trial_id}: ${r.hypothesis ?? "idea"}`, hypothesis: "idea", decision: "discard_no_gain",
       soft_min_eff: null, real_stan_passed: null, real_stan_total: null, verified: 0, state: "unverified",
-      codex_refs: "[]", metrics_json: '{"loc":10}', ...r,
+      codex_refs: "[]", metrics_json: '{"loc":10}', dims: "[6,20]", ...r,
     };
     stmt.run(...TRIAL_COLUMNS.map((c) => row[c] ?? null));
   }
   sqlite.exec("COMMIT");
+  sqlite.exec(BACKFILL_SQL);
 }
 
 const ts = (i) => new Date(Date.UTC(2026, 0, 1) + i * 60_000).toISOString();
@@ -1419,7 +1431,7 @@ describe("bounded reads", () => {
       { id: "A1:r2:T1", decision: "keep", soft_min_eff: 0.95, state: "disputed", created_at: ts(8), author: "bob", agent_model: "deepseek" },
       { id: "A1:r2:T2", decision: "discard_no_gain", soft_min_eff: 0.01, created_at: ts(9), author: "bob",
         real_stan_passed: 4, real_stan_total: 5 },
-      // Lane A3 with only discards: frontier falls back to the best non-excluded trial.
+      // Lane A3 with only discards: no frontier.
       { id: "A3:z:T1", decision: "discard_tier1", soft_min_eff: 0.002, created_at: ts(10), agent_model: null },
     ]);
     await reqJson(env, "POST", "/api/claims", { task_id: "t", lane: "A1", agent: "x" }, ADMIN);
@@ -1431,13 +1443,17 @@ describe("bounded reads", () => {
     assert.deepEqual(Object.keys(o).sort(), ["alignment", "claims", "lanes", "models", "totals"]);
     assert.deepEqual(
       { ...o.totals, latest_at: undefined },
-      { trials: 10, kept: 5, runs: 3, contributors: 3, claims: 1, latest_at: undefined }
+      // Steps in A1: T2, T4, T7 (T6 keep_incumbent_failed is not frontier-eligible): two improvements.
+      { trials: 10, kept: 5, runs: 3, contributors: 3, improvements: 2, claims: 1, latest_at: undefined }
     );
     assert.equal(o.totals.latest_at, ts(10));
     assert.deepEqual(o.lanes.map((l) => l.lane), ["A1", "A3"]);
 
     const a1 = o.lanes[0];
-    assert.deepEqual({ trials: a1.trials, kept: a1.kept, runs: a1.runs, latest_at: a1.latest_at }, { trials: 9, kept: 5, runs: 2, latest_at: ts(9) });
+    assert.deepEqual(
+      { trials: a1.trials, kept: a1.kept, runs: a1.runs, latest_at: a1.latest_at, steps: a1.steps },
+      { trials: 9, kept: 5, runs: 2, latest_at: ts(9), steps: 3 }
+    );
     const frontier = await reqJson(env, "GET", "/api/frontier");
     assert.deepEqual(a1.frontier, frontier.json.frontier.A1); // same row as /api/frontier
     assert.equal(a1.frontier.id, "A1:r1:T7");
@@ -1447,8 +1463,7 @@ describe("bounded reads", () => {
     assert.deepEqual(a1.stan, { id: "A1:r2:T2", run_id: "r2", trial_id: "T2", real_stan_passed: 4, real_stan_total: 5 });
 
     const a3 = o.lanes[1];
-    assert.equal(a3.frontier.id, "A3:z:T1");
-    assert.deepEqual(a3.run, { run_id: "z", first_eff: null, gain: null, steps: [], steps_truncated: false });
+    assert.deepEqual([a3.frontier, a3.run, a3.steps], [null, null, 0]);
     assert.equal(a3.stan, null);
 
     assert.equal(o.claims.length, 1);
@@ -1640,7 +1655,9 @@ describe("bounded reads", () => {
     assert.equal(dag.nodes[0].id, "A1:chain:T0100"); // oldest of the newest 300 first
     assert.equal(dag.edges.length, 299); // only edges whose both ends are present
     assert.ok(!("metrics_json" in dag.nodes[0]));
+    // The frontier is the latest step: every trial here scores above the one before it.
     assert.equal(dag.frontier.A1.id, "A1:chain:T0399");
+    assert.equal(dag.frontier.A1.frontier_step, true);
     const small = (await reqJson(env, "GET", "/api/dag?lane=A2")).json;
     assert.deepEqual({ n: small.nodes.length, total: small.total, truncated: small.truncated }, { n: 0, total: 0, truncated: false });
   });
@@ -2085,7 +2102,7 @@ describe("review round 3", () => {
     assert.deepEqual((await reqJson(env, "GET", "/api/nodes?lane=A1&limit=2")).json.nodes.map((n) => n.id), ["A1:tie:T5999", "A1:tie:T5998"]);
   });
 
-  it("the frontier pick reads one index row, even for a lane with no eligible trial and a long score tie", async () => {
+  it("the frontier pick reads one index row, even for a lane with no step and a long timestamp tie", async () => {
     const { env, sqlite } = makeEnv();
     const plainDb = env.DB;
     seedTrials(sqlite, [
@@ -2095,7 +2112,7 @@ describe("review round 3", () => {
     for (const path of ["/api/frontier", "/api/overview", "/api/dag"]) {
       const seen = recordQueries(env);
       assert.equal((await reqJson(env, "GET", path)).status, 200, path);
-      const picks = seen.filter(([q]) => /INDEXED BY idx_nodes_frontier/.test(q));
+      const picks = seen.filter(([q]) => /INDEXED BY idx_nodes_steps WHERE lane = \? AND frontier_step = 1\s+ORDER BY created_at DESC/.test(q));
       assert.ok(picks.length > 0, path);
       for (const [q, values] of picks) {
         const plan = sqlite.prepare(`EXPLAIN QUERY PLAN ${q}`).all(...values).map((r) => r.detail).join(" | ");
@@ -2104,7 +2121,8 @@ describe("review round 3", () => {
       env.DB = plainDb;
     }
     const frontier = (await reqJson(env, "GET", "/api/frontier")).json.frontier;
-    assert.deepEqual([frontier.A5.id, frontier.A6.id], ["A5:tie:T999", "A6:tie:T999"]); // newest on ties: highest id as text
+    // A5 has only discards. In A6 every score ties, so only the first trial (lowest id as text) is a step.
+    assert.deepEqual([frontier.A5, frontier.A6.id], [undefined, "A6:tie:T0"]);
   });
 
   it("2: the filter window takes the newest trials in the page's own order when a tie crosses the cutoff", async () => {
@@ -2134,5 +2152,635 @@ describe("review round 3", () => {
     const node = sqlite.prepare("SELECT lane FROM nodes WHERE id = 'A1:move:T1'").get().lane;
     const queued = sqlite.prepare("SELECT lane FROM verify_queue WHERE node_id = 'A1:move:T1'").get().lane;
     assert.equal(queued, node);
+  });
+});
+
+it("exports nothing that stops the Worker from starting", async () => {
+  // workerd refuses a module whose named export is a bare number, string or boolean.
+  const mod = await import("../src/index.ts");
+  for (const [name, value] of Object.entries(mod)) {
+    assert.ok(typeof value === "function" || (typeof value === "object" && value !== null), `export ${name} is a ${typeof value}`);
+  }
+});
+
+describe("frontier steps (migration 0004)", () => {
+  const KEPT = new Set(["keep", "keep_baseline", "keep_simpler"]);
+  const STANDARD = { A0: [6, 20], A1: [6, 20], A2: [6, 20], A3: [6, 20], A4: [6, 20] };
+  const byPosition = (a, b) =>
+    a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+
+  /** The definition, from scratch over every trial: independent of the Worker and of the migration. */
+  function expected(sqlite) {
+    const rows = sqlite.prepare("SELECT id, lane, created_at, soft_min_eff, decision, verified, state, dims FROM nodes").all();
+    rows.sort(byPosition);
+    const best = new Map();
+    const flags = {};
+    for (const r of rows) {
+      const want = STANDARD[r.lane];
+      let dims = null;
+      try {
+        dims = JSON.parse(r.dims);
+      } catch {}
+      const standard = !want || (Array.isArray(dims) && dims.length === want.length && dims.every((x, i) => typeof x === "number" && x === want[i]));
+      const eligible = standard && r.soft_min_eff > 0 && !["retracted", "disputed"].includes(r.state) && (r.verified === 1 || KEPT.has(r.decision));
+      const step = eligible && (!best.has(r.lane) || r.soft_min_eff > best.get(r.lane));
+      if (step) best.set(r.lane, r.soft_min_eff);
+      flags[r.id] = [standard ? 1 : 0, step ? 1 : 0];
+    }
+    return flags;
+  }
+  const stored = (sqlite) =>
+    Object.fromEntries(sqlite.prepare("SELECT id, standard, frontier_step FROM nodes").all().map((r) => [r.id, [r.standard, r.frontier_step]]));
+
+  function assertConsistent(sqlite, label) {
+    assert.deepEqual(stored(sqlite), expected(sqlite), label);
+    const counters = sqlite.prepare("SELECT lane, standard, steps FROM lane_stats WHERE trials > 0 ORDER BY lane").all().map((r) => ({ ...r }));
+    const counted = sqlite
+      .prepare("SELECT lane, SUM(standard) AS standard, SUM(frontier_step) AS steps FROM nodes GROUP BY lane ORDER BY lane")
+      .all()
+      .map((r) => ({ ...r }));
+    assert.deepEqual(counters, counted, `${label}: lane_stats counters`);
+  }
+
+  it("the Worker and the migration's backfill agree on which trials are standard", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    const variants = [
+      [6, 20], [6], [20, 6], [6, 20, 1], "[6.0, 20]", '["6", 20]', "[6, 20.5]", "[[6], 20]", "{}", "6", "not json", null,
+    ];
+    let k = 0;
+    for (const lane of ["A0", "A4", "S1"]) {
+      for (const dims of variants) {
+        k += 1;
+        const res = await reqJson(env, "POST", "/api/nodes", trial(`${lane}:std:T${k}`, { dims, created_at: ts(k) }), ADMIN);
+        assert.equal(res.status, 201);
+        const want = lane === "S1" || dims === "[6.0, 20]" || (Array.isArray(dims) && dims.length === 2 && dims[0] === 6 && dims[1] === 20);
+        assert.equal(res.json.node.standard, want, `${lane} ${JSON.stringify(dims)}`);
+      }
+    }
+    const before = stored(sqlite);
+    sqlite.exec(BACKFILL_SQL);
+    assert.deepEqual(stored(sqlite), before);
+    assertConsistent(sqlite, "variants");
+  });
+
+  it("an old [6] trial with a higher score does not hold the frontier; only standard trials step", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    const post = (id, extra) => reqJson(env, "POST", "/api/nodes", trial(id, extra), ADMIN);
+    await post("A2:old:T1", { dims: [6], soft_min_eff: 0.05, created_at: ts(1) });
+    await post("A2:new:T1", { soft_min_eff: 0.01, created_at: ts(2) });
+    await post("A2:new:T2", { soft_min_eff: 0.01, created_at: ts(3) }); // a tie with the best is not a step
+    await post("A2:new:T3", { soft_min_eff: 0.011, created_at: ts(4) });
+    await post("A2:new:T4", { soft_min_eff: 0.9, decision: "discard_tier1", created_at: ts(5) });
+    await post("A2:new:T5", { soft_min_eff: 0.0109, created_at: ts(6) }); // below the best
+    // S1 has no standard dims: every trial is standard there.
+    await post("S1:any:T1", { dims: [6], soft_min_eff: 0.002, created_at: ts(1) });
+    assertConsistent(sqlite, "mixed dims");
+
+    const frontier = (await reqJson(env, "GET", "/api/frontier")).json.frontier;
+    assert.equal(frontier.A2.id, "A2:new:T3");
+    assert.deepEqual([frontier.A2.standard, frontier.A2.frontier_step], [true, true]);
+    assert.equal(frontier.S1.id, "S1:any:T1");
+    const mcp = await reqJson(env, "POST", "/api/mcp", {
+      jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "flywheel_frontier", arguments: { lane: "A2" } },
+    });
+    assert.equal(mcp.json.result.structuredContent.frontier.A2.id, "A2:new:T3");
+
+    const old = (await reqJson(env, "GET", `/api/nodes/${encodeURIComponent("A2:old:T1")}`)).json.node;
+    assert.deepEqual([old.standard, old.frontier_step], [false, false]);
+    const listed = (await reqJson(env, "GET", "/api/nodes?lane=A2")).json.nodes;
+    assert.ok(listed.every((n) => typeof n.standard === "boolean" && typeof n.frontier_step === "boolean"));
+
+    const o = (await reqJson(env, "GET", "/api/overview")).json;
+    const a2 = o.lanes.find((l) => l.lane === "A2");
+    assert.equal(a2.frontier.id, "A2:new:T3");
+    assert.deepEqual([a2.frontier.standard, a2.frontier.frontier_step], [true, true]);
+    assert.equal(a2.steps, 2);
+    assert.equal(o.lanes.find((l) => l.lane === "S1").steps, 1);
+    assert.equal(o.totals.improvements, 1); // A2:new:T3; each lane's first step is its starting point
+
+    // A lane whose only kept trials are on another setup has no frontier at all.
+    await post("A3:old:T1", { dims: [6], soft_min_eff: 0.5, created_at: ts(1) });
+    assert.equal((await reqJson(env, "GET", "/api/frontier?lane=A3")).json.frontier.A3, undefined);
+    assert.equal((await reqJson(env, "GET", "/api/overview")).json.lanes.find((l) => l.lane === "A3").frontier, null);
+  });
+
+  it("stored flags equal a from-scratch walk after any sequence of writes", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    env.FLYWHEEL_INVITE_CODE = "inv";
+    const mint = async (handle) =>
+      (await reqJson(env, "POST", "/api/admin/keys", { handle, role: "contributor", hourly_limit: 10000 }, ADMIN)).json.token;
+    const carol = await mint("carol");
+    const dave = await mint("dave");
+    let daveActive = true;
+    let carolActive = true;
+
+    let seed = 20261124;
+    const rand = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+    const pick = (xs) => xs[Math.floor(rand() * xs.length)];
+    const LANES_ = ["A1", "A2", "S1"];
+    const EFFS = [0.01, 0.0104, 0.0105, 0.011, 0.0116, 0.012, 0.02, 0.03, 0, null];
+    const DECISIONS = ["keep", "keep", "keep_baseline", "keep_simpler", "discard_tier1", "archive_only"];
+    const DIMS = [[6, 20], [6, 20], [6, 20], [6]];
+    const ids = [];
+    let next = 0;
+    const tally = {};
+
+    for (let step = 0; step < 300; step += 1) {
+      const op = ids.length < 5 ? "post" : pick(["post", "post", "post", "repost", "state", "flag", "verify", "admin_verify", "delete", "lease"]);
+      tally[op] = (tally[op] ?? 0) + 1;
+      if (op === "post") {
+        const lane = pick(LANES_);
+        const id = `${lane}:r${Math.floor(rand() * 3)}:T${(next += 1)}`;
+        const who = carolActive && rand() < 0.5 ? bearer(carol) : ADMIN;
+        const res = await reqJson(env, "POST", "/api/nodes", trial(id, {
+          soft_min_eff: pick(EFFS), decision: pick(DECISIONS), dims: pick(DIMS),
+          created_at: ts(Math.floor(rand() * 40)), source: rand() < 0.5 ? `# ${id}\n` : undefined,
+        }), who);
+        assert.ok([200, 201].includes(res.status), JSON.stringify(res.json));
+        ids.push(id);
+      } else {
+        const id = pick(ids);
+        const path = encodeURIComponent(id);
+        if (op === "repost") {
+          const row = sqlite.prepare("SELECT lane, run_id, trial_id FROM nodes WHERE id = ?").get(id);
+          if (!row) continue;
+          await reqJson(env, "POST", "/api/nodes", {
+            id, lane: rand() < 0.15 ? pick(LANES_) : row.lane, run_id: row.run_id, trial_id: row.trial_id,
+            soft_min_eff: pick(EFFS), decision: pick(DECISIONS), dims: pick(DIMS),
+          }, ADMIN);
+        } else if (op === "state") {
+          await reqJson(env, "POST", `/api/nodes/${path}/state`, { state: pick(["unverified", "retracted", "disputed", "verified", "replicated", "needs-replication"]) }, ADMIN);
+        } else if (op === "flag" && daveActive) {
+          await reqJson(env, "POST", `/api/nodes/${path}/state`, { state: pick(["disputed", "needs-replication"]), reason: "rerun differs" }, bearer(dave));
+        } else if (op === "verify") {
+          await reqJson(env, "POST", `/api/admin/nodes/${path}/verify`, { verified: rand() < 0.7 }, ADMIN);
+        } else if (op === "admin_verify") {
+          await reqJson(env, "POST", `/api/admin/nodes/${path}/verify`, { verified: false }, ADMIN);
+        } else if (op === "delete") {
+          await reqJson(env, "DELETE", `/api/admin/nodes/${path}`, undefined, ADMIN);
+        } else if (op === "lease" && daveActive) {
+          const lease = await reqJson(env, "POST", "/api/verify/claim", {}, bearer(dave));
+          if (lease.status === 200) {
+            await reqJson(env, "POST", `/api/verify/${encodeURIComponent(lease.json.lease.node_id)}/result`,
+              { lease_token: lease.json.lease.lease_token, passed: rand() < 0.5 }, bearer(dave));
+          }
+        }
+      }
+      if (step === 200) {
+        // Purging dave reopens every flag and result dave set; purging carol deletes her trials.
+        assert.equal((await reqJson(env, "POST", "/api/admin/handles/dave/purge", undefined, ADMIN)).status, 200);
+        daveActive = false;
+        assertConsistent(sqlite, "after purging dave");
+      }
+      if (step === 260) {
+        assert.equal((await reqJson(env, "POST", "/api/admin/handles/carol/purge", undefined, ADMIN)).status, 200);
+        carolActive = false;
+        assertConsistent(sqlite, "after purging carol");
+      }
+      assertConsistent(sqlite, `after op ${step} (${op})`);
+    }
+    // The sequence exercised every kind of write, and the lanes have real step structure.
+    for (const op of ["post", "repost", "state", "flag", "verify", "delete", "lease"]) assert.ok(tally[op] > 0, op);
+    assert.ok(sqlite.prepare("SELECT COUNT(*) AS n FROM nodes WHERE frontier_step = 1").get().n >= 3);
+    // The migration's backfill computes the same flags from scratch.
+    const before = stored(sqlite);
+    sqlite.exec(BACKFILL_SQL);
+    assert.deepEqual(stored(sqlite), before);
+  });
+
+  /** Wraps env.DB and records every statement a request prepares, with its bound values. */
+  function recordQueries(env) {
+    const seen = [];
+    const db = env.DB;
+    const wrap = (q, stmt, values = []) => ({
+      q, values,
+      bind: (...v) => wrap(q, stmt.bind(...v), v),
+      first: (c) => (seen.push([q, values]), stmt.first(c)),
+      all: () => (seen.push([q, values]), stmt.all()),
+      run: () => (seen.push([q, values]), stmt.run()),
+      execSync: () => (seen.push([q, values]), stmt.execSync()),
+    });
+    env.DB = { prepare: (q) => wrap(q, db.prepare(q)), batch: (stmts) => db.batch(stmts) };
+    return { seen, restore: () => void (env.DB = db) };
+  }
+
+  it("a new trial at the end of its lane reads a bounded number of rows to set its flags", async () => {
+    const { env, sqlite } = makeEnv();
+    seedTrials(sqlite, Array.from({ length: 3000 }, (_, i) => ({
+      id: `A1:big:T${String(i).padStart(4, "0")}`, decision: i % 3 ? "discard_no_gain" : "keep", soft_min_eff: (i % 97) / 1000 + 0.001, created_at: ts(i),
+    })));
+    const { seen, restore } = recordQueries(env);
+    const dirty = () => sqlite.prepare("SELECT COUNT(*) AS n FROM lane_stats WHERE steps_dirty = 1").get().n;
+    const flagQueries = () => seen.filter(([q]) => /frontier_step|standard = 1|steps_dirty/.test(q) && !/^\s*INSERT/.test(q));
+    const plan = ([q, v]) => sqlite.prepare(`EXPLAIN QUERY PLAN ${q}`).all(...v).map((r) => r.detail).join(" | ");
+
+    // A step at the end: its own flag, no later step to clear, and no dirty lane to recompute.
+    const big = await reqJson(env, "POST", "/api/nodes", trial("A1:new:T1", { soft_min_eff: 5, created_at: ts(5000) }));
+    assert.equal(big.json.node.frontier_step, true);
+    assert.equal(dirty(), 0);
+    const settle = flagQueries().filter(([q]) => /1 - frontier_step/.test(q));
+    assert.equal(settle.length, 1);
+    // The recompute starts from the dirty lanes, an empty partial index outside a transaction.
+    assert.match(plan(settle[0]), /^SEARCH nodes .*SCAN d USING COVERING INDEX idx_lane_stats_dirty/);
+    for (const q of flagQueries()) {
+      if (q === settle[0]) continue;
+      assert.ok(!/SCAN (nodes|n|a|x|p)\b|TEMP B-TREE/.test(plan(q)), plan(q));
+    }
+    // The statement that clears later steps found none to clear: the trial is the newest.
+    const after = seen.find(([q]) => /SELECT a\.id FROM nodes AS x/.test(q));
+    assert.equal(sqlite.prepare(after[0].replace(/^UPDATE nodes SET frontier_step = 0 WHERE id IN \(/, "SELECT COUNT(*) AS n FROM (")).get(...after[1]).n, 0);
+
+    // Not a step (a tie): the same statements, and still nothing dirty.
+    seen.length = 0;
+    const small = await reqJson(env, "POST", "/api/nodes", trial("A1:new:T2", { soft_min_eff: 5, created_at: ts(5001) }));
+    assert.equal(small.json.node.frontier_step, false);
+    assert.equal(dirty(), 0);
+    // An unchanged re-post marks nothing dirty and changes no flag.
+    const before = stored(sqlite);
+    await reqJson(env, "POST", "/api/nodes", trial("A1:new:T1", { soft_min_eff: 5 }));
+    assert.equal(dirty(), 0);
+    assert.deepEqual(stored(sqlite), before);
+    restore();
+    assertConsistent(sqlite, "tail posts");
+  });
+
+  it("a new trial in the middle of a lane becomes a step and clears the later steps it beats", async () => {
+    const { env, sqlite } = makeEnv();
+    const post = (id, eff, at, extra = {}) => reqJson(env, "POST", "/api/nodes", trial(id, { soft_min_eff: eff, created_at: ts(at), ...extra }));
+    await post("A1:r:T1", 0.01, 10);
+    await post("A1:r:T2", 0.02, 20);
+    await post("A1:r:T3", 0.03, 30);
+    await post("A1:r:T4", 0.025, 40); // not a step
+    await post("A1:r:T5", 0.05, 50);
+    const steps = () => sqlite.prepare("SELECT id FROM nodes WHERE frontier_step = 1 ORDER BY created_at, id").all().map((r) => r.id);
+    assert.deepEqual(steps(), ["A1:r:T1", "A1:r:T2", "A1:r:T3", "A1:r:T5"]);
+    // At position 15 with 0.04: a step, and T2 and T3 (0.02 and 0.03) are no longer steps.
+    // T4 stays a non-step. T5 (0.05) still beats it.
+    const mid = await post("A1:m:T1", 0.04, 15);
+    assert.equal(mid.json.node.frontier_step, true);
+    assert.deepEqual(steps(), ["A1:r:T1", "A1:m:T1", "A1:r:T5"]);
+    // At the very start, with the best score so far: the first step, and every other step is beaten.
+    await post("A1:m:T0", 0.05, 1);
+    assert.deepEqual(steps(), ["A1:m:T0"]);
+    // A tie in the middle is not a step and changes nothing.
+    await post("A1:m:T2", 0.05, 25);
+    assert.deepEqual(steps(), ["A1:m:T0"]);
+    // An ineligible trial in the middle changes nothing either.
+    await post("A1:m:T3", 0.9, 5, { decision: "discard_tier1" });
+    assert.deepEqual(steps(), ["A1:m:T0"]);
+    assertConsistent(sqlite, "mid-lane posts");
+    assert.equal((await reqJson(env, "GET", "/api/frontier?lane=A1")).json.frontier.A1.id, "A1:m:T0");
+  });
+
+  /**
+   * Runs requests at once with their D1 calls interleaved in a chosen order, as overlapping
+   * requests interleave on D1. Every D1 call of a request waits at a gate. When every
+   * unfinished request waits, `choose(n)` picks which of the n waiting ones goes next (in
+   * request order). A batch still runs as one transaction.
+   */
+  async function interleave(env, requests, choose) {
+    const als = new AsyncLocalStorage();
+    const db = env.DB;
+    const waiting = new Map(); // request -> its calls waiting at the gate (a request may run reads in parallel)
+    const done = new Set();
+    const gate = () =>
+      new Promise((resolve) => {
+        const tag = als.getStore();
+        waiting.set(tag, [...(waiting.get(tag) ?? []), resolve]);
+      });
+    const wrap = (stmt) => ({
+      inner: stmt,
+      bind: (...v) => wrap(stmt.bind(...v)),
+      first: async (c) => (await gate(), stmt.first(c)),
+      all: async () => (await gate(), stmt.all()),
+      run: async () => (await gate(), stmt.run()),
+    });
+    env.DB = { prepare: (q) => wrap(db.prepare(q)), batch: async (stmts) => (await gate(), db.batch(stmts.map((x) => x.inner))) };
+    const all = Promise.all(requests.map((fn, tag) => als.run(tag, fn).finally(() => done.add(tag))));
+    try {
+      for (;;) {
+        await new Promise((r) => setImmediate(r)); // let each running request reach its next gate
+        if (done.size === requests.length) break;
+        if (waiting.size + done.size < requests.length) continue;
+        const tags = [...waiting.keys()].sort((x, y) => x - y);
+        const tag = tags[choose(tags.length)];
+        const [release, ...rest] = waiting.get(tag);
+        if (rest.length > 0) waiting.set(tag, rest);
+        else waiting.delete(tag);
+        release();
+      }
+      return await all;
+    } finally {
+      env.DB = db;
+    }
+  }
+
+  /** Every interleaving of the requests' D1 calls, depth first. `setup` builds a fresh case each time. */
+  async function everyInterleaving(setup, check) {
+    const todo = [[]];
+    let runs = 0;
+    while (todo.length > 0) {
+      const prefix = todo.pop();
+      const trace = [];
+      const c = await setup();
+      const results = await interleave(c.env, c.requests, (n) => {
+        const pick = trace.length < prefix.length ? prefix[trace.length] : 0;
+        if (trace.length >= prefix.length) for (let alt = 1; alt < n; alt += 1) todo.push([...trace, alt]);
+        trace.push(pick);
+        return pick;
+      });
+      check(c, results, `interleaving ${trace.join("")}`);
+      runs += 1;
+    }
+    return runs;
+  }
+
+  it("overlapping state changes commit consistent flags in every interleaving", async () => {
+    // The review's reproduction: T1 10, T2 20, T3 15. One request retracts T2 and another
+    // restores it, at once. From either start state and in every order of their D1 calls,
+    // the flags must match the walk and the frontier must follow T2's final state.
+    for (const start of ["unverified", "retracted"]) {
+      const runs = await everyInterleaving(
+        async () => {
+          const { env, sqlite } = makeEnv();
+          const post = (id, eff, at) => reqJson(env, "POST", "/api/nodes", trial(id, { soft_min_eff: eff * 0.001, created_at: ts(at) }));
+          await post("A1:r:T1", 10, 1);
+          await post("A1:r:T2", 20, 2);
+          await post("A1:r:T3", 15, 3);
+          const set = (state) => () => reqJson(env, "POST", `/api/nodes/${encodeURIComponent("A1:r:T2")}/state`, { state });
+          await set(start)();
+          return { env, sqlite, requests: [set("retracted"), set("unverified")] };
+        },
+        ({ sqlite }, results, label) => {
+          label = `start ${start}, ${label}`;
+          assert.ok(results.every((r) => r.status === 200), label);
+          assertConsistent(sqlite, label);
+          const state = sqlite.prepare("SELECT state FROM nodes WHERE id = 'A1:r:T2'").get().state;
+          const top = sqlite.prepare("SELECT id FROM nodes WHERE frontier_step = 1 ORDER BY created_at DESC, id DESC LIMIT 1").get().id;
+          assert.equal(top, state === "retracted" ? "A1:r:T3" : "A1:r:T2", label);
+          assert.equal(sqlite.prepare("SELECT steps FROM lane_stats WHERE lane = 'A1'").get().steps, 2, label);
+        }
+      );
+      assert.ok(runs >= 10, `${runs} interleavings`); // both orders and the overlaps between them
+    }
+  });
+
+  it("a concurrent mix of posts and state changes in one lane ends consistent", async () => {
+    const { env, sqlite } = makeEnv();
+    let seed = 7;
+    const rand = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+    const eff = () => Math.round(rand() * 60) / 1000 + 0.001;
+    const ids = [];
+    for (let k = 0; k < 12; k += 1) {
+      ids.push(`A1:r:T${k}`);
+      await reqJson(env, "POST", "/api/nodes", trial(`A1:r:T${k}`, { soft_min_eff: eff(), created_at: ts(k * 10) }));
+    }
+    for (let round = 0; round < 40; round += 1) {
+      const requests = [];
+      const existing = [...ids];
+      for (let j = 0; j < 4; j += 1) {
+        const u = rand();
+        const any = existing[Math.floor(rand() * existing.length)];
+        if (u < 0.4) {
+          // A new trial anywhere in the lane (a maintainer may set created_at).
+          const id = `A1:c${round}:T${j}`;
+          ids.push(id);
+          const body = trial(id, { soft_min_eff: eff(), created_at: ts(Math.floor(rand() * 130)) });
+          requests.push(() => reqJson(env, "POST", "/api/nodes", body));
+        } else if (u < 0.6) {
+          const body = trial(any, { soft_min_eff: eff() });
+          requests.push(() => reqJson(env, "POST", "/api/nodes", body));
+        } else {
+          const state = ["retracted", "unverified", "disputed", "verified"][Math.floor(rand() * 4)];
+          requests.push(() => reqJson(env, "POST", `/api/nodes/${encodeURIComponent(any)}/state`, { state }));
+        }
+      }
+      const results = await interleave(env, requests, (n) => Math.floor(rand() * n));
+      assert.ok(results.every((r) => r.status < 300), JSON.stringify(results.map((r) => [r.status, r.json?.error])));
+      assertConsistent(sqlite, `round ${round}`);
+    }
+    assert.ok(sqlite.prepare("SELECT COUNT(*) AS n FROM nodes WHERE frontier_step = 1").get().n >= 2);
+  });
+
+  it("rollout: trials the old Worker writes after the migration are repaired by the backfill, which is idempotent", async () => {
+    const { env, sqlite } = makeEnv();
+    const post = (id, eff, at) => reqJson(env, "POST", "/api/nodes", trial(id, { soft_min_eff: eff, created_at: ts(at) }));
+    await post("A1:new:T1", 0.01, 1);
+    await post("A1:new:T2", 0.03, 3);
+    // The old Worker sets neither flag: it inserts trials and changes states with plain writes.
+    const insert = sqlite.prepare(
+      "INSERT INTO nodes (id, lane, run_id, decision, soft_min_eff, dims, verified, state, created_at) VALUES (?, ?, 'old', ?, ?, '[6,20]', 0, 'unverified', ?)"
+    );
+    insert.run("A1:old:T1", "A1", "keep", 0.02, ts(2)); // between the two steps
+    insert.run("A1:old:T2", "A1", "keep", 0.05, ts(4)); // a new best: steps 0.01, 0.02 and 0.05
+    insert.run("A2:old:T1", "A2", "keep", 0.01, ts(1)); // a lane the new Worker never wrote
+    insert.run("S1:old:T1", "S1", "keep_baseline", 0.02, ts(1));
+    sqlite.prepare("UPDATE nodes SET state = 'disputed' WHERE id = 'A1:new:T2'").run();
+    assert.notDeepEqual(stored(sqlite), expected(sqlite));
+    sqlite.exec(BACKFILL_SQL);
+    assertConsistent(sqlite, "after the backfill");
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM lane_stats WHERE steps_dirty = 1").get().n, 0);
+    assert.deepEqual(
+      sqlite.prepare("SELECT lane, standard, steps FROM lane_stats WHERE lane IN ('A1', 'A2', 'S1') ORDER BY lane").all().map((r) => ({ ...r })),
+      [{ lane: "A1", standard: 4, steps: 3 }, { lane: "A2", standard: 1, steps: 1 }, { lane: "S1", standard: 1, steps: 1 }]
+    );
+    assert.equal((await reqJson(env, "GET", "/api/frontier?lane=A1")).json.frontier.A1.id, "A1:old:T2");
+    const once = stored(sqlite);
+    sqlite.exec(BACKFILL_SQL);
+    assert.deepEqual(stored(sqlite), once);
+    assertConsistent(sqlite, "after a second backfill");
+  });
+
+  it("a lane left dirty by another writer is recomputed by the next Worker write", async () => {
+    const { env, sqlite } = makeEnv();
+    await reqJson(env, "POST", "/api/nodes", trial("A1:r:T1", { soft_min_eff: 0.01, created_at: ts(1) }));
+    await reqJson(env, "POST", "/api/nodes", trial("A1:r:T2", { soft_min_eff: 0.02, created_at: ts(2) }));
+    // The old Worker retracts the frontier without touching flags: the trigger marks the lane.
+    sqlite.prepare("UPDATE nodes SET state = 'retracted' WHERE id = 'A1:r:T2'").run();
+    assert.equal(sqlite.prepare("SELECT steps_dirty FROM lane_stats WHERE lane = 'A1'").get().steps_dirty, 1);
+    await reqJson(env, "POST", "/api/nodes", trial("A2:r:T1", { soft_min_eff: 0.01, created_at: ts(3) }));
+    assertConsistent(sqlite, "after an unrelated write");
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM lane_stats WHERE steps_dirty = 1").get().n, 0);
+  });
+
+  it("migration 0004 backfills flags and counters on a database that has trials", () => {
+    const sqlite = new DatabaseSync(":memory:");
+    sqlite.exec(SCHEMA_SQL);
+    for (const sql of MIGRATIONS_SQL.slice(0, 3)) sqlite.exec(sql);
+    const insert = sqlite.prepare(
+      "INSERT INTO nodes (id, lane, run_id, decision, soft_min_eff, dims, verified, state, created_at) VALUES (?, ?, 'r', ?, ?, ?, ?, ?, ?)"
+    );
+    insert.run("A1:r:T1", "A1", "keep", 0.05, "[6]", 0, "unverified", ts(1));
+    insert.run("A1:r:T2", "A1", "keep_baseline", 0.01, "[6,20]", 0, "unverified", ts(2));
+    insert.run("A1:r:T3", "A1", "discard_tier1", 0.02, "[6,20]", 1, "verified", ts(3));
+    insert.run("A1:r:T4", "A1", "keep", 0.03, "[6,20]", 0, "disputed", ts(4));
+    insert.run("A1:r:T5", "A1", "keep", 0.02, "[6,20]", 0, "unverified", ts(5));
+    insert.run("S2:r:T1", "S2", "keep", 0.1, null, 0, "unverified", ts(1));
+    sqlite.exec(MIGRATIONS_SQL[3]);
+    assertConsistent(sqlite, "after 0004");
+    const steps = sqlite.prepare("SELECT id FROM nodes WHERE frontier_step = 1 ORDER BY id").all().map((r) => r.id);
+    assert.deepEqual(steps, ["A1:r:T2", "A1:r:T3", "S2:r:T1"]); // T3 is verified; T5 ties with it
+  });
+
+  it("GET /api/lanes/:lane/chart: standard trials oldest first, slim rows, paging and its cache key", async () => {
+    const { env, sqlite } = makeEnv();
+    seedTrials(sqlite, [
+      { id: "A1:c:T1", decision: "keep", soft_min_eff: 0.01, created_at: ts(1), hypothesis: "x".repeat(300) },
+      { id: "A1:c:T2", decision: "keep", soft_min_eff: 0.02, created_at: ts(2), hypothesis: null, title: "T2: short title" },
+      { id: "A1:c:T3", decision: "keep", soft_min_eff: 0.9, created_at: ts(3), dims: "[6]" },
+      ...Array.from({ length: 1200 }, (_, i) => ({ id: `A1:d:T${String(i).padStart(4, "0")}`, soft_min_eff: 0.001, created_at: ts(10 + i) })),
+    ]);
+    const first = await reqJson(env, "GET", "/api/lanes/A1/chart");
+    assert.equal(first.status, 200);
+    assert.equal(first.headers.get("Cache-Control"), "public, max-age=30, s-maxage=30");
+    const c = first.json;
+    assert.deepEqual(Object.keys(c).sort(), ["lane", "limit", "next_after", "points", "standard_dims", "steps", "total"]);
+    assert.deepEqual([c.lane, c.standard_dims, c.total, c.steps, c.limit], ["A1", [6, 20], 1202, 2, 1000]);
+    assert.equal(c.next_after, `${c.points.at(-1).created_at}|${c.points.at(-1).id}`);
+    assert.equal(c.points.length, 1000);
+    assert.deepEqual(c.points.slice(0, 2).map((p) => [p.id, p.step]), [["A1:c:T1", true], ["A1:c:T2", true]]); // T3 is not standard
+    assert.deepEqual(Object.keys(c.points[0]).sort(), [
+      "agent_model", "author", "author_tier", "created_at", "decision", "id", "run_id", "soft_min_eff", "state", "step", "title", "trial_id",
+    ]);
+    assert.equal(c.points[0].title, "x".repeat(140));
+    assert.equal(c.points[1].title, "T2: short title");
+    // The cursor of one page starts the next exactly after its last point, at any depth.
+    const last = (await reqJson(env, "GET", `/api/lanes/A1/chart?limit=5000&after=${encodeURIComponent(c.next_after)}`)).json;
+    assert.deepEqual([last.points.length, last.limit, last.next_after], [202, 1000, null]);
+    assert.equal(last.points[0].id, "A1:d:T0998");
+    assert.equal(last.points.at(-1).id, "A1:d:T1199");
+    const one = (await reqJson(env, "GET", "/api/lanes/A1/chart?limit=1")).json;
+    const paged = (await reqJson(env, "GET", `/api/lanes/A1/chart?limit=2&after=${encodeURIComponent(one.next_after)}`)).json;
+    assert.deepEqual(paged.points.map((p) => p.id), ["A1:c:T2", "A1:d:T0000"]);
+    assert.equal((await reqJson(env, "GET", "/api/lanes/A1/chart?after=nonsense")).json.error, "invalid_after");
+
+    // A lane without standard dims, or without trials.
+    const none = (await reqJson(env, "GET", "/api/lanes/Z9/chart")).json;
+    assert.deepEqual([none.standard_dims, none.points, none.total, none.next_after], [null, [], 0, null]);
+    assert.equal((await reqJson(env, "GET", "/api/lanes/A-1/chart")).json.error, "invalid_identifier");
+
+    // The edge-cache key keeps after and limit only.
+    const keys = [];
+    env.CACHE = { match: async () => undefined, put: async (k) => void keys.push(typeof k === "string" ? k : k.url) };
+    await reqJson(env, "GET", "/api/lanes/A1/chart?limit=10&junk=1&after=x%7Cy");
+    assert.deepEqual(keys, ["https://flywheel.test/api/lanes/A1/chart?after=x%7Cy&limit=10"]);
+  });
+
+  it("/api/nodes?step=1: served by the step indexes, exact counts, and q searches every step", async () => {
+    const { env, sqlite } = makeEnv();
+    seedTrials(sqlite, [
+      { id: "A1:s:T1", decision: "keep", soft_min_eff: 0.01, created_at: ts(1), hypothesis: "needle in the haystack" },
+      { id: "A1:s:T2", decision: "keep", soft_min_eff: 0.02, created_at: ts(2) },
+      { id: "A2:s:T1", decision: "keep", soft_min_eff: 0.01, created_at: ts(3), hypothesis: "needle too" },
+      // 2,500 newer trials that also match the search but are not steps.
+      ...Array.from({ length: 2500 }, (_, i) => ({ id: `A1:n:T${i}`, hypothesis: "needle", soft_min_eff: 0.001, created_at: ts(10 + i) })),
+    ]);
+    const all = (await reqJson(env, "GET", "/api/nodes?step=1")).json;
+    assert.deepEqual([all.nodes.map((n) => n.id), all.count, all.count_capped], [["A2:s:T1", "A1:s:T2", "A1:s:T1"], 3, false]);
+    assert.ok(all.nodes.every((n) => n.frontier_step === true && n.standard === true));
+    const lane = (await reqJson(env, "GET", "/api/nodes?lane=A1&step=1")).json;
+    assert.deepEqual([lane.nodes.map((n) => n.id), lane.count], [["A1:s:T2", "A1:s:T1"], 2]);
+    const q = (await reqJson(env, "GET", "/api/nodes?lane=A1&step=1&q=needle")).json;
+    assert.deepEqual([q.nodes.map((n) => n.id), q.count, q.window_truncated], [["A1:s:T1"], 1, false]);
+    // Without step=1 the same search only sees the newest 2,000 trials of the lane.
+    const windowed = (await reqJson(env, "GET", "/api/nodes?lane=A1&q=haystack")).json;
+    assert.deepEqual([windowed.count, windowed.window_truncated], [0, true]);
+
+    const seen = [];
+    const db = env.DB;
+    env.DB = { prepare: (sql) => (seen.push(sql), db.prepare(sql)), batch: (s) => db.batch(s) };
+    await reqJson(env, "GET", "/api/nodes?step=1&outcome=kept");
+    await reqJson(env, "GET", "/api/nodes?lane=A2&step=1&q=needle");
+    env.DB = db;
+    assert.ok(seen.some((s) => /INDEXED BY idx_nodes_steps_created/.test(s)));
+    assert.ok(seen.some((s) => /INDEXED BY idx_nodes_steps WHERE/.test(s)));
+  });
+
+  it("the server sets created_at: contributors cannot backdate a trial, maintainers must send a date", async () => {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    const carol = (await reqJson(env, "POST", "/api/admin/keys", { handle: "carol", role: "contributor" }, ADMIN)).json.token;
+    await reqJson(env, "POST", "/api/nodes", trial("A1:r:T1", { soft_min_eff: 0.01, created_at: ts(10) }), ADMIN);
+    // A backdated trial with a better score would take over the lane's history. It is stored
+    // at the server time instead, so it is the newest trial and the latest step.
+    const t0 = Date.now();
+    const back = await reqJson(env, "POST", "/api/nodes", trial("A1:c:T1", { soft_min_eff: 0.02, created_at: "2000-01-01T00:00:00Z" }), bearer(carol));
+    assert.equal(back.status, 201);
+    const at = Date.parse(back.json.node.created_at);
+    assert.ok(at >= t0 - 1000 && at <= Date.now() + 1000, back.json.node.created_at);
+    assert.equal(back.json.node.created_at, new Date(at).toISOString());
+    assert.deepEqual(sqlite.prepare("SELECT id FROM nodes WHERE frontier_step = 1 ORDER BY created_at, id").all().map((r) => r.id), ["A1:r:T1", "A1:c:T1"]);
+    // A re-post by the owner keeps the stored created_at, whatever it sends.
+    const again = await reqJson(env, "POST", "/api/nodes", trial("A1:c:T1", { soft_min_eff: 0.02, created_at: "1999-01-01T00:00:00Z" }), bearer(carol));
+    assert.equal(again.json.node.created_at, back.json.node.created_at);
+    // Something that is not a time is ignored for a contributor too.
+    assert.equal((await reqJson(env, "POST", "/api/nodes", trial("A1:c:T2", { created_at: "not a time" }), bearer(carol))).status, 201);
+    // A maintainer's created_at is used, in one canonical form, and must parse.
+    const seeded = await reqJson(env, "POST", "/api/nodes", trial("A1:r:T0", { created_at: "2026-01-01T01:00:00+01:00" }), ADMIN);
+    assert.equal(seeded.json.node.created_at, "2026-01-01T00:00:00.000Z");
+    const bad = await reqJson(env, "POST", "/api/nodes", trial("A1:r:T9", { created_at: "next tuesday" }), ADMIN);
+    assert.deepEqual([bad.status, bad.json.error], [400, "invalid_created_at"]);
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM nodes WHERE id = 'A1:r:T9'").get().n, 0);
+    // Without created_at a maintainer's trial gets the server time as well.
+    const plain = await reqJson(env, "POST", "/api/nodes", trial("A1:r:T8"), ADMIN);
+    assert.ok(Date.parse(plain.json.node.created_at) >= t0 - 1000);
+    assertConsistent(sqlite, "created_at");
+  });
+
+  it("the chart cursor survives old free-text created_at values with a | and of any length", async () => {
+    const { env, sqlite } = makeEnv();
+    const long = `2026-01-01 legacy ${"x".repeat(2000)}`;
+    seedTrials(sqlite, [
+      { id: "A1:c:T1", decision: "keep", soft_min_eff: 0.01, created_at: "2026|01|01 a" },
+      { id: "A1:c:T2", decision: "keep", soft_min_eff: 0.02, created_at: "2026|01|01 b" },
+      { id: "A1:c:T3", decision: "keep", soft_min_eff: 0.03, created_at: long },
+      { id: "A1:c:T4", decision: "keep", soft_min_eff: 0.04, created_at: "2026|02" },
+    ]);
+    const seen = [];
+    let after = null;
+    for (let page = 0; page < 5; page += 1) {
+      const res = await reqJson(env, "GET", `/api/lanes/A1/chart?limit=1${after ? `&after=${encodeURIComponent(after)}` : ""}`);
+      assert.equal(res.status, 200, JSON.stringify(res.json));
+      seen.push(...res.json.points.map((p) => p.id));
+      after = res.json.next_after;
+      if (!after) break;
+    }
+    assert.deepEqual(seen, ["A1:c:T3", "A1:c:T1", "A1:c:T2", "A1:c:T4"]); // text order: "-" sorts before "|"
+    for (const bad of ["|A1:c:T1", "2026|", "no-bar"]) {
+      assert.equal((await reqJson(env, "GET", `/api/lanes/A1/chart?after=${encodeURIComponent(bad)}`)).json.error, "invalid_after", bad);
+    }
+  });
+
+  it("the verification queue lists and leases only trials that are standard now", async () => {
+    const { env } = makeEnv({ apiKey: "root-admin-secret" });
+    const dave = (await reqJson(env, "POST", "/api/admin/keys", { handle: "dave", role: "contributor" }, ADMIN)).json.token;
+    const post = (id, extra) => reqJson(env, "POST", "/api/nodes", trial(id, { source: `# ${id}\n`, ...extra }), ADMIN);
+    assert.equal((await post("A1:q:T1", { soft_min_eff: 0.01 })).json.verify_queued, true);
+    // Re-posted on other dims while queued: the queue row stays, but the trial is no longer standard.
+    await post("A1:q:T1", { soft_min_eff: 0.01, dims: [6] });
+    // A trial on other dims sent for replication by hand is queued too.
+    await post("A1:q:T2", { soft_min_eff: 0.5, dims: [6] });
+    await reqJson(env, "POST", `/api/nodes/${encodeURIComponent("A1:q:T2")}/state`, { state: "needs-replication" }, ADMIN);
+    const queue = (await reqJson(env, "GET", "/api/verify/queue?status=all")).json;
+    assert.deepEqual([queue.items, queue.count], [[], 0]);
+    assert.equal((await reqJson(env, "POST", "/api/verify/claim", {}, bearer(dave))).json.error, "queue_empty");
+    assert.equal((await reqJson(env, "POST", "/api/verify/claim", { node_id: "A1:q:T2" }, bearer(dave))).status, 409);
+    // Back on the standard dims, the queued trial can be leased again.
+    await post("A1:q:T1", { soft_min_eff: 0.01 });
+    assert.deepEqual((await reqJson(env, "GET", "/api/verify/queue")).json.items.map((i) => i.node_id), ["A1:q:T1"]);
+    assert.equal((await reqJson(env, "POST", "/api/verify/claim", {}, bearer(dave))).json.lease.node_id, "A1:q:T1");
+  });
+
+  it("the verification queue compares standard trials only and never queues another setup", async () => {
+    const { env } = makeEnv({ apiKey: "root-admin-secret" });
+    const post = (id, extra) => reqJson(env, "POST", "/api/nodes", trial(id, { source: `# ${id}\n`, ...extra }), ADMIN);
+    // A reviewed [6] trial with a high score must not set the bar for [6, 20] trials.
+    await post("A1:old:T1", { dims: [6], soft_min_eff: 0.5 });
+    await reqJson(env, "POST", `/api/nodes/${encodeURIComponent("A1:old:T1")}/state`, { state: "replicated" }, ADMIN);
+    assert.equal((await post("A1:new:T1", { soft_min_eff: 0.01 })).json.verify_queued, true);
+    assert.equal((await post("A1:old:T2", { dims: [6], soft_min_eff: 0.9 })).json.verify_queued, false);
+    // A reviewed standard trial does set it.
+    await reqJson(env, "POST", `/api/nodes/${encodeURIComponent("A1:new:T1")}/state`, { state: "replicated" }, ADMIN);
+    assert.equal((await post("A1:new:T2", { soft_min_eff: 0.009 })).json.verify_queued, false);
+    assert.equal((await post("A1:new:T3", { soft_min_eff: 0.02 })).json.verify_queued, true);
   });
 });

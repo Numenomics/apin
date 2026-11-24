@@ -27,7 +27,7 @@ TASK_NAMES = sorted(p.parent.name for p in TASKS.glob("*/task.toml"))
 LEAK_PATHS = (
     ".git", "tests", "results", "scripts", "flywheel", "examples", "benchmarks",
     "upstream", "harbor", "runs", "build", "scores", "jobs", ".venv", ".cache",
-    "autoresearch/lanes/S1", "autoresearch/lanes/S2", "autoresearch/lanes/S3",
+    "autoresearch/lanes/S2", "autoresearch/lanes/S3",
     "autoresearch/task_catalog.json", "REPORT.md", "ARCHIVE.md",
 )
 LEAK_NAMES = {"runs", "archive", "incumbent.py", "__pycache__", "fixtures", ".git"}

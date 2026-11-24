@@ -63,16 +63,6 @@
       "starting_file": "autoresearch/lanes/A4/submission.py"
     },
     {
-      "id": "s1-upstream-sampler-patches",
-      "lane": "S1",
-      "priority": 7,
-      "title": "Upstream sampler patches (walnutpie / stan / nuts-rs) under allowed_paths & statistical gate",
-      "codex_refs": ["walnuts-drghmc", "fisher-low-rank"],
-      "goal": "Optimize upstream C++/Rust sampler adaptation or trajectory control on owner fork branches, passing upstream unit tests and apin statistical gate.",
-      "bottlenecks": ["walnutpie arma11 macro-time abort", "low-rank Fisher shrinkage in Stan/nutpie"],
-      "starting_file": "autoresearch/lanes/S1/program.md"
-    },
-    {
       "id": "s2-gradient-compiler-speed",
       "lane": "S2",
       "priority": 8,

@@ -212,7 +212,7 @@ def test_sync_ledger_links_incumbent_lineage(monkeypatch: pytest.MonkeyPatch, tm
     assert posted_nodes[2]["long_horizon_eff"] == 0.0006
 
 
-def test_seed_from_apin_generates_valid_snapshot_and_sql(tmp_path: Path) -> None:
+def test_seed_from_apin_generates_valid_sql(tmp_path: Path) -> None:
     seed_mod = _load_seed_module()
 
     # Build a synthetic mini-repo
@@ -238,7 +238,7 @@ def test_seed_from_apin_generates_valid_snapshot_and_sql(tmp_path: Path) -> None
             "timestamp": "2026-11-21T12:05:00+00:00",
             "lane": "A1",
             "candidate_sha": "sha_keep",
-            "dim": 6,
+            "dims": [6, 20],
             "hypothesis": "Improved A1 with 'quoted' note",
             "codex_refs": ["fisher-low-rank"],
             "soft_min_eff": 0.0011,
@@ -277,19 +277,9 @@ def test_seed_from_apin_generates_valid_snapshot_and_sql(tmp_path: Path) -> None
     summary = seed_mod.generate_seed_artifacts(tmp_path, out_dir)
     assert summary["nodes"] == 3
     assert summary["edges"] == 2
-    assert summary["alignment"] == 1
-
-    snapshot = json.loads((out_dir / "public" / "snapshot.json").read_text(encoding="utf-8"))
-    assert set(snapshot.keys()) == {"nodes", "edges", "frontier", "claims", "alignment"}
-    assert snapshot["frontier"]["A1"]["id"] == "A1:glm53_a1_1h:T0002"
-    assert snapshot["frontier"]["A1"]["real_stan_passed"] == 2
-    assert snapshot["frontier"]["A1"]["real_stan_total"] == 3
-    assert snapshot["frontier"]["A1"]["verified"] == 1
-    assert snapshot["alignment"][0]["real_stan_pass_rate"] == pytest.approx(2 / 3)
-
-    assert all(e["relation"] == "incumbent" for e in snapshot["edges"])
-    assert snapshot["frontier"]["A1"]["state"] == "verified"
-    assert all(n["has_source"] is False and "state" in n for n in snapshot["nodes"])
+    assert summary["lanes"] == ["A1"]
+    # The site reads the live API only: no offline snapshot is written any more.
+    assert sorted(p.name for p in out_dir.iterdir()) == ["seed.sql"]
 
     # Verify generated seed.sql executes cleanly against flywheel/schema.sql + migrations in sqlite3
     schema_sql = (REPO_ROOT / "flywheel" / "schema.sql").read_text(encoding="utf-8")
@@ -317,6 +307,63 @@ def test_seed_from_apin_generates_valid_snapshot_and_sql(tmp_path: Path) -> None
     assert conn.execute("SELECT lane, run_id, trials, kept, archived FROM run_stats").fetchall() == [
         ("A1", "glm53_a1_1h", 3, 2, 1)
     ]
+    # seed.sql ends with migration 0004's backfill: only T0002 ran on A1's standard dims [6, 20],
+    # so it is the lane's one frontier step, and the lane counters agree.
+    flags = conn.execute("SELECT id, standard, frontier_step FROM nodes ORDER BY id").fetchall()
+    assert flags == [
+        ("A1:glm53_a1_1h:T0001", 0, 0),
+        ("A1:glm53_a1_1h:T0002", 1, 1),
+        ("A1:glm53_a1_1h:T0003", 0, 0),
+    ]
+    assert conn.execute("SELECT standard, steps FROM lane_stats WHERE lane = 'A1'").fetchone() == (1, 1)
+    assert seed_mod.flag_backfill_sql() in seed_sql
+    conn.close()
+
+
+def test_seed_from_apin_writes_the_flag_backfill_for_the_rollout_repair(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--backfill-sql writes the BACKFILL block alone. Applied after a deploy, it repairs the
+    trials the old Worker wrote between `migrations apply` and `deploy`, and it is idempotent."""
+    seed_mod = _load_seed_module()
+    out = tmp_path / "backfill.sql"
+    seed_mod.main(["--backfill-sql", str(out)])
+    assert str(out) in capsys.readouterr().out
+    sql = out.read_text(encoding="utf-8")
+    assert seed_mod.flag_backfill_sql() in sql
+    assert "ALTER TABLE" not in sql and "CREATE TRIGGER" not in sql
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript((REPO_ROOT / "flywheel" / "schema.sql").read_text(encoding="utf-8"))
+    for mig in sorted((REPO_ROOT / "flywheel" / "migrations").glob("*.sql")):
+        conn.executescript(mig.read_text(encoding="utf-8"))
+    # Trials as the old Worker writes them: neither flag set.
+    rows = [
+        ("A1:r:T1", "A1", "keep", 0.01, "[6, 20]", "2026-01-01T00:01:00Z"),
+        ("A1:r:T2", "A1", "keep", 0.03, "[6, 20]", "2026-01-01T00:02:00Z"),
+        ("A1:r:T3", "A1", "keep", 0.02, "[6, 20]", "2026-01-01T00:03:00Z"),
+        ("A1:r:T4", "A1", "keep", 0.09, "[6]", "2026-01-01T00:04:00Z"),
+        ("S1:r:T1", "S1", "discard_tier1", 0.5, None, "2026-01-01T00:01:00Z"),
+        ("S1:r:T2", "S1", "keep_simpler", 0.2, None, "2026-01-01T00:02:00Z"),
+    ]
+    conn.executemany(
+        "INSERT INTO nodes (id, lane, run_id, decision, soft_min_eff, dims, created_at) VALUES (?, ?, 'r', ?, ?, ?, ?)",
+        rows,
+    )
+    assert conn.execute("SELECT SUM(standard) + SUM(frontier_step) FROM nodes").fetchone() == (0,)
+    for _ in range(2):
+        conn.executescript(sql)
+        flags = conn.execute("SELECT id, standard, frontier_step FROM nodes ORDER BY id").fetchall()
+        assert flags == [
+            ("A1:r:T1", 1, 1),
+            ("A1:r:T2", 1, 1),
+            ("A1:r:T3", 1, 0),
+            ("A1:r:T4", 0, 0),
+            ("S1:r:T1", 1, 0),
+            ("S1:r:T2", 1, 1),
+        ]
+        stats = conn.execute("SELECT lane, standard, steps, steps_dirty FROM lane_stats ORDER BY lane").fetchall()
+        assert stats == [("A1", 3, 2, 0), ("S1", 2, 1, 0)]
     conn.close()
 
 

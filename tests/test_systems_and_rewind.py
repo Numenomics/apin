@@ -1,4 +1,4 @@
-"""Unit tests for Systems Lanes S1 & S2 and Rewind Calibration Lane S3 (AUARC)."""
+"""Unit tests for systems lane S2 and rewind calibration lane S3 (AUARC)."""
 
 from __future__ import annotations
 
@@ -21,33 +21,6 @@ def _init_git_repo(path: Path) -> None:
     (path / "other" / "b.cpp").write_text("int g() { return 2; }\n")
     subprocess.run(["git", "add", "."], cwd=path, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=path, check=True)
-
-
-def test_s1_allowed_paths_guard_and_ledger(tmp_path):
-    repo = tmp_path / "upstream_repo"
-    _init_git_repo(repo)
-    ar_dir = tmp_path / "ar"
-
-    # Violating edit outside allowed_paths is rejected
-    (repo / "other" / "b.cpp").write_text("int g() { return 99; }\n")
-    r_bad = systems_lanes.evaluate_s1_trial(
-        "walnutpie", "bad edit", allowed_paths=["src/"],
-        upstream_dir=repo, autoresearch_dir=ar_dir, run_id="t1",
-    )
-    assert r_bad["decision"] == "discard_path_violation"
-    assert r_bad["paths_ok"] is False
-
-    # Restore forbidden file, edit inside allowed_paths
-    (repo / "other" / "b.cpp").write_text("int g() { return 2; }\n")
-    (repo / "src" / "a.cpp").write_text("int f() { return 42; }\n")
-    r_ok = systems_lanes.evaluate_s1_trial(
-        "walnutpie", "good edit", allowed_paths=["src/"],
-        build_cmd="true", test_cmd="true",
-        upstream_dir=repo, autoresearch_dir=ar_dir, run_id="t1",
-    )
-    assert r_ok["decision"] == "keep_tests_only"
-    assert r_ok["paths_ok"] is True
-    assert (ar_dir / "lanes" / "S1" / "runs" / "t1" / "results.tsv").is_file()
 
 
 def test_s2_fd_check_byte_identical_canary_and_timing(tmp_path):

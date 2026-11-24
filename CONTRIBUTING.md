@@ -10,7 +10,7 @@ uv sync && uv run apin fetch-data
 | You want to | Start with | Needs |
 |---|---|---|
 | Join the autoresearch (improve a sampler in one of the lanes) | [Let an agent do it](#let-an-agent-do-it) or [do it by hand](#do-it-by-hand) | Nothing more |
-| Benchmark a model or coding agent on the eight tasks | [harbor/README.md](harbor/README.md) | Docker and the Harbor CLI |
+| Benchmark a model or coding agent on the five tasks | [harbor/README.md](harbor/README.md) | Docker and the Harbor CLI |
 | Score your own sampler on real Stan posteriors | [Score your own sampler](#score-your-own-sampler) | CmdStan only if you want the CmdStan baseline |
 
 The [lane guide](https://apin-flywheel.m0hawk.workers.dev/lanes/) explains what each lane is and where it stands. The [README](README.md#words-with-a-fixed-meaning) defines lane, trial, run, track, task and record.

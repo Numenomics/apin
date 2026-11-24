@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Agent benchmark | apin</title>
-    <meta name="description" content="How coding agents do at fixing and speeding up Bayesian samplers: eight tasks, the same sealed container and hidden seeds for every model." />
+    <title>Benchmark | apin</title>
+    <meta name="description" content="How much faster coding agents can make a Bayesian sampler. Five tasks, the same sealed container and hidden seeds for every model." />
     <link rel="stylesheet" href="/assets/site.css" />
     <style>
       .matrix th.config {
@@ -26,10 +26,16 @@
         white-space: normal;
         min-width: 250px;
       }
+      .matrix td.task b {
+        display: block;
+        font-family: var(--display);
+        font-size: 1.02rem;
+      }
       .matrix td.task code {
         background: none;
         padding: 0;
-        font-size: 0.8rem;
+        font-size: 0.78rem;
+        color: var(--ink-3);
       }
       .matrix td.task a {
         font-size: 0.78rem;
@@ -45,13 +51,6 @@
       .matrix td.task span.yard {
         color: var(--ink-2);
         font-family: var(--sans);
-      }
-      .matrix tr.group td {
-        padding-top: 18px;
-        font-family: var(--display);
-        font-weight: 600;
-        font-size: 0.98rem;
-        border-bottom-color: var(--rule-2);
       }
       .heat {
         appearance: none;
@@ -137,10 +136,6 @@
         color: var(--ink-2);
         font-size: 0.96rem;
       }
-      .rules strong {
-        color: var(--ink);
-        font-weight: 600;
-      }
       .stack {
         display: grid;
         gap: 12px;
@@ -157,9 +152,9 @@
     <noscript><p class="wrap">This page needs JavaScript. The raw results are in <a href="/data/benchmark.json">benchmark.json</a>.</p></noscript>
     <main class="wrap">
       <header class="page-head">
-        <h1>Agent benchmark</h1>
+        <h1>Benchmark</h1>
         <p class="lede">
-          The benchmark has eight tasks from real sampler work: three bugs to fix and five samplers to speed up. Every model uses the same starting code in the same sealed container and may work for up to 24 hours. The verifier grades the result on hidden seeds.
+          The benchmark has five tasks. Each gives a coding agent a working sampler and asks for a faster one. Every model starts from the same code in the same sealed container, may work for up to 24 hours, and is graded on hidden seeds.
         </p>
         <p class="meta-line" id="meta">Loading results.</p>
       </header>
@@ -168,28 +163,24 @@
         <div class="section-head">
           <div>
             <h2 id="board-h">Leaderboard</h2>
-            <p>Each row is one model and reasoning-effort setting, ranked by tasks solved, typical speed-up and cost. Settings with unfinished tasks come last.</p>
+            <p>One row per model and reasoning effort, ranked by speed-up. Rows with an unfinished task come last.</p>
             <p id="release-note"></p>
           </div>
           <div class="filters">
             <label class="sr-only" for="f-release">Release</label>
             <select id="f-release" hidden></select>
-            <label class="sr-only" for="f-model">Model</label>
-            <select id="f-model"><option value="">All models</option></select>
-            <label class="sr-only" for="f-effort">Effort</label>
-            <select id="f-effort"><option value="">All efforts</option></select>
           </div>
         </div>
         <div class="table-scroll"><table class="data" id="board"></table></div>
         <p class="caption">
-          Each block in the Tasks column is one task: the three fixes, then the five speed-ups. A filled block is solved, an outlined one is valid but not solved, a red one failed the checks and a hatched one did not finish. Select a block to open its runs. When a task has more than one attempt, Solved counts the share that solved it. <span id="speedup-rule"></span>
+          Speed-up is the geometric mean, over the tasks a row finished, of the sampler's efficiency relative to the starting code. Each block is one task. A filled block is at least 5% faster than the starting code, an outlined one is valid but no faster, a red one failed the checks and a hatched one did not finish. Select a block to open its runs.
         </p>
       </section>
 
       <section class="section" aria-labelledby="cost-h">
         <figure class="figure">
           <div class="figure-bar">
-            <h2 id="cost-h" style="font-size:1.6rem">What a result costs</h2>
+            <h2 id="cost-h" style="font-size:1.6rem">Cost</h2>
             <div class="seg" role="group" aria-label="Horizontal axis">
               <button type="button" data-x="cost" aria-pressed="true">Cost</button>
               <button type="button" data-x="tokens" aria-pressed="false">Tokens</button>
@@ -198,22 +189,23 @@
           </div>
           <div class="legend" id="scatter-legend"></div>
           <div id="scatter-box"><svg class="chart" id="scatter" role="img" aria-labelledby="cost-h"></svg></div>
-          <figcaption class="caption">
-            Tasks solved against the total spent on the sweep. The dotted line joins the settings that no other setting beats on both axes. A run has 24 hours and no token budget, so read a result next to what it cost.
-          </figcaption>
         </figure>
       </section>
 
       <section class="section" aria-labelledby="matrix-h">
         <div class="section-head">
           <div>
-            <h2 id="matrix-h">Task by task</h2>
-            <p>Each task is a directory under <code>harbor/tasks/</code> with instructions, frozen starting code and a hidden verifier. A coloured cell is solved; a plain number is valid but not solved. Select a cell to see its runs: the score per target shape, tokens, time and the agent's closing note.</p>
+            <h2 id="matrix-h">Tasks</h2>
+            <p>Each cell is the speed-up over the starting code. Select one to see its runs.</p>
           </div>
-          <div class="ramp" aria-hidden="true">
-            <span>1×</span>
-            <span class="steps"><i style="background:var(--seq-1)"></i><i style="background:var(--seq-2)"></i><i style="background:var(--seq-3)"></i><i style="background:var(--seq-4)"></i><i style="background:var(--seq-5)"></i><i style="background:var(--seq-6)"></i></span>
-            <span id="ramp-top">4× the reference</span>
+          <div class="filters">
+            <div class="ramp" aria-hidden="true">
+              <span>1×</span>
+              <span class="steps"><i style="background:var(--seq-1)"></i><i style="background:var(--seq-2)"></i><i style="background:var(--seq-3)"></i><i style="background:var(--seq-4)"></i><i style="background:var(--seq-5)"></i><i style="background:var(--seq-6)"></i></span>
+              <span>8×</span>
+            </div>
+            <label class="sr-only" for="f-model">Model</label>
+            <select id="f-model"></select>
           </div>
         </div>
         <div class="table-scroll"><table class="data matrix" id="matrix"></table></div>
@@ -222,16 +214,16 @@
       <section class="section" aria-labelledby="score-h">
         <div class="two-up">
           <div class="stack">
-            <h2 id="score-h" style="font-size:1.6rem">How a run is scored</h2>
+            <h2 id="score-h" style="font-size:1.6rem">Scoring</h2>
             <ul class="rules">
-              <li><strong>Fix tasks are pass or fail.</strong> The agent gets a sampler with a real bug; the task is solved if the repaired code passes a hidden invariance or Jacobian check.</li>
-              <li><strong>Speed-up tasks use a Stan-style reference.</strong> The verifier scores the agent's file on hidden seeds and divides its efficiency by the reference's. The reference is Stan's NUTS with step-size and diagonal mass-matrix adaptation, rewritten for this harness and checked against CmdStan. In the two lanes where the judge fixes the kernel, the reference is Stan's warmup alone.</li>
-              <li><strong>The reference is not a high bar.</strong> The judge measures short runs from scattered starting points and charges double for gradients, which does not suit NUTS. On these tasks the reference scores between 0.7 and 1.3 times the starting code. Each task row above shows that ratio and the lane's frontier (its best sampler), where one passes the hidden checks.</li>
-              <li><strong>A solved speed-up result meets three conditions.</strong> It must pass every validity check, beat the starting code by at least 5% and be at least as efficient as the reference, so returning the starting code unchanged does not count. The 5% margin comes from scoring copies of one sampler that differ only in their random draws: at eight repeats none scored more than 3% above the original.</li>
-              <li><strong>The verifier rechecks statistical rejections.</strong> At eight repeats, the statistical checks reject about one valid sampler in eight by chance. When a result fails only statistical checks, the verifier scores it on a second seed and marks it invalid only if that run fails too. About 2 valid results in 100 are still marked invalid.</li>
-              <li><strong>The weakest shape sets the efficiency.</strong> Efficiency is a soft minimum over target classes (a power mean with exponent −4), so a gain on easy Gaussians cannot offset a loss on funnels.</li>
-              <li><strong>Cut-off runs are not scored.</strong> If the model provider or the infrastructure ends a run, the page draws it hatched and leaves it out of every count, whatever it produced; it never counts as a zero or a pass. The same holds for a valid result that the verifier cannot score.</li>
-              <li><strong>The container is sealed.</strong> It holds the harness with its models and data, the lane documents and technique cards, and the starting code. It holds no other sampler, and during a run it can reach only the model provider.</li>
+              <li>The verifier runs the agent's file on hidden seeds and divides its efficiency by the efficiency of the starting code. That ratio is the speed-up.</li>
+              <li>A model's score is the geometric mean of its speed-ups over the tasks it finished. A result that fails the validity checks counts as 0.1×, so a broken sampler costs more than an unchanged one. No task counts for less than 0.1×.</li>
+              <li>Efficiency is accuracy per unit of cost. It is a soft minimum over six classes of target shape, so a gain on easy Gaussians cannot offset a loss on funnels.</li>
+              <li>A difference under 5% is noise. When copies of one sampler that differ only in their random draws were scored at eight repeats, none came out more than 3% above the original.</li>
+              <li>Each task row also shows a Stan-style reference. It is Stan's NUTS with step-size and diagonal mass-matrix adaptation, rewritten for this harness and checked against CmdStan. In the two lanes where the judge fixes the kernel, it is Stan's warmup alone. The judge measures short runs from scattered starting points and charges double for gradients, which does not suit NUTS, so the reference scores between 0.7 and 1.3 times the starting code.</li>
+              <li>When a result fails only statistical checks, the verifier scores it on a second seed and marks it invalid only if it fails again. About 2 valid results in 100 are still marked invalid.</li>
+              <li>A run that the model provider or the infrastructure cuts off is not scored, so it does not count as a zero.</li>
+              <li>The container holds only the harness, the lane documents and the starting code, and during a run it can reach only the model provider.</li>
             </ul>
           </div>
           <div class="stack">
@@ -242,7 +234,7 @@
             <div id="cmd-verify"></div>
             <h3>Publish a sweep to this page</h3>
             <div id="cmd-collect"></div>
-            <p class="note">Task definitions and verifier are in <a href="https://github.com/Numenomics/apin/tree/main/harbor">harbor/</a>. Raw results: <a href="/data/benchmark.json">benchmark.json</a>.</p>
+            <p class="note">Task definitions and verifier are in <a href="https://github.com/Numenomics/apin/tree/main/harbor">harbor/</a>. Raw results are in <a href="/data/benchmark.json">benchmark.json</a>.</p>
           </div>
         </div>
       </section>

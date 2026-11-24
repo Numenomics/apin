@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -160,19 +161,18 @@ def test_harbor_verify_records_solution_complexity_and_collector_builds_site_dat
     data = mod.collect_jobs([tmp_path / "job1"], pricing, release_tag="bench-v0.2.0")
     rel = data["releases"][0]
     assert data["current_release"] == rel["release"] == "bench-v0.2.0"
-    assert len(rel["trials"]) == 1 and len(rel["leaderboard"]) == 1
+    assert len(rel["trials"]) == 1
     tr = rel["trials"][0]
     assert tr["input_tokens"] == 10000 and tr["cached_tokens"] == 40000 and tr["reasoning_tokens"] == 1200
     assert tr["cache_hit_rate"] == 0.8 and tr["test_runs"] == 1 and tr["tool_calls"] == 1 and tr["turns"] == 1
     assert tr["cost_usd"] > 0 and tr["agent_wall_s"] == 75.0
     assert "coin mixture" in tr["approach_summary"]
     assert tr["termination"] == "finished" and tr["outcome"] == "solved"
-    row = rel["leaderboard"][0]
-    assert row["label"] == "GLM-5.3-Flash" and row["interrupted"] == 0 and row["agents"]
-    assert row["solved"] == 1.0 and row["tasks"][tr["task_id"]]["solve_rate"] == 1.0
+    # A bug-fix attempt is kept as a record, but the benchmark is the speed-up tasks: it adds
+    # no leaderboard row and no task to the release.
+    assert tr["category"] == "rewind" and rel["leaderboard"] == [] and tr["task_id"] not in rel["tasks"]
+    assert rel["tasks"] == mod.speedup_tasks() and len(rel["tasks"]) == 5
     # Every task on the page is described from its own task.toml, never restated by hand.
-    meta = rel["task_meta"][tr["task_id"]]
-    assert meta["category"] == tr["category"]
     assert mod.load_task_meta(["a1-preconditioning"])["a1-preconditioning"]["lane"] == "A1"
 
 
@@ -198,46 +198,61 @@ def _attempt(trial_id, cfg, task, *, release="bench-v0.2.0", passed=True, outcom
     }
 
 
-def test_collector_ranks_by_tasks_solved_and_never_scores_interrupted_runs():
+def test_collector_ranks_by_speedup_and_never_scores_interrupted_runs(monkeypatch):
     mod = _load_collector()
+    # A benchmark of two tasks, so that a row can be complete with few attempts.
+    monkeypatch.setattr(mod, "speedup_tasks", lambda: ["a0-ground-up", "a1-preconditioning"])
     trials = [
-        # Setting A: one fix, and one speed-up task attempted three times.
+        # Setting A: one task attempted three times, one of them invalid. A bug-fix attempt too.
         _attempt("a1", "m/a#low", "s3-unadjusted-ula", outcome="solved"),
         _attempt("a2", "m/a#low", "a0-ground-up", outcome="solved", ref=1.5, start=6.0),
         _attempt("a3", "m/a#low", "a0-ground-up", outcome="improved", ref=0.5, start=2.0),
         _attempt("a4", "m/a#low", "a0-ground-up", passed=False, outcome="invalid", ref=0.0, start=0.0),
-        # Setting B: a larger speed-up on its only scored run, but the fix was never finished.
-        _attempt("b1", "m/b#low", "s3-unadjusted-ula", termination="provider_limit", outcome="solved"),
+        _attempt("a5", "m/a#low", "a1-preconditioning", outcome="no_gain", ref=0.7, start=1.0),
+        # Setting B: the largest speed-up of all, but its second task was cut off by the provider.
+        _attempt("b1", "m/b#low", "a1-preconditioning", termination="provider_limit", outcome="solved", ref=3.0, start=5.0),
         _attempt("b2", "m/b#low", "a0-ground-up", outcome="solved", ref=9.0, start=30.0),
-        # Setting C: returned the starting code unchanged.
-        _attempt("c1", "m/c#low", "s3-unadjusted-ula", passed=False, outcome="invalid"),
-        _attempt("c2", "m/c#low", "a0-ground-up", outcome="no_gain", ref=0.2, start=1.0),
+        # Setting C: one modest gain, one broken sampler.
+        _attempt("c1", "m/c#low", "a1-preconditioning", passed=False, outcome="invalid"),
+        _attempt("c2", "m/c#low", "a0-ground-up", outcome="improved", ref=0.4, start=2.0),
         # A valid result the verifier could not score (its own reference failed) is nobody's zero.
         _attempt("c3", "m/c#low", "a0-ground-up", outcome="unscorable"),
     ]
     rel = mod.aggregate_results(trials, {"models": {}}, release_tag="bench-v0.2.0")["releases"][0]
     assert rel["scoring"] == "reference"
+    # The benchmark is the speed-up tasks. The bug-fix attempt stays in the record only.
+    assert rel["tasks"] == ["a0-ground-up", "a1-preconditioning"] and any(t["trial_id"] == "a1" for t in rel["trials"])
     board = {r["config_key"]: r for r in rel["leaderboard"]}
 
     a = board["m/a#low"]
     task = a["tasks"]["a0-ground-up"]
-    assert task["attempts"] == 3 and task["outcomes"] == {"solved": 1, "improved": 1, "invalid": 1}
-    assert task["solve_rate"] == round(1 / 3, 4)
-    # The invalid attempt counts as zero in the mean; it is not dropped.
-    assert task["ratio_mean"] == round((1.5 + 0.5 + 0.0) / 3, 4) and task["ratio_min"] == 0.0 and task["ratio_max"] == 1.5
-    assert a["solved"] == round(1 + 1 / 3, 3) and a["complete"] and a["attempts_per_task"] == 3
+    assert task["attempts"] == 3 and task["valid"] == 2 and task["outcomes"] == {"solved": 1, "improved": 1, "invalid": 1}
+    # The invalid attempt enters the mean at the floor; it is not dropped.
+    assert task["speedup"] == round((6.0 + 2.0 + mod.INVALID_FLOOR) / 3, 4) and task["speedup_min"] == mod.INVALID_FLOOR and task["speedup_max"] == 6.0
+    assert task["ref_speedup"] == 1.0 and task["best_trial"] == "a2"
+    assert a["complete"] and a["attempts_per_task"] == 3 and "s3-unadjusted-ula" not in a["tasks"]
+    assert a["speedup"] == pytest.approx(math.sqrt((8.1 / 3) * 1.0), abs=1e-3)
 
     b = board["m/b#low"]
-    # The interrupted fix is neither a pass nor a fail, whatever the verifier wrote for it.
-    assert b["interrupted"] == 1 and b["tasks"]["s3-unadjusted-ula"]["attempts"] == 0 and not b["complete"]
+    # The interrupted run is neither a result nor a zero, whatever the verifier wrote for it.
+    assert b["interrupted"] == 1 and b["tasks"]["a1-preconditioning"]["attempts"] == 0 and not b["complete"]
     assert [t["outcome"] for t in rel["trials"] if t["trial_id"] == "b1"] == ["interrupted"]
+    assert b["speedup"] == 30.0
 
     c = board["m/c#low"]
-    assert c["solved"] == 0 and c["tasks"]["a0-ground-up"]["outcomes"] == {"no_gain": 1}
-    assert c["tasks"]["a0-ground-up"]["attempts"] == 1 and c["interrupted"] == 1 and c["opt_valid"] == 1.0
+    # A task with no valid attempt enters the geometric mean at the floor.
+    assert c["speedup"] == pytest.approx(math.sqrt(2.0 * mod.INVALID_FLOOR), abs=1e-3) and c["valid"] == 1.0
+    assert c["tasks"]["a0-ground-up"]["attempts"] == 1 and c["interrupted"] == 1
 
-    # Complete settings first, then tasks solved. B's bigger ratio does not lift it over A.
+    # Complete settings first, then the larger speed-up. B's bigger ratio does not lift it over A.
     assert [r["config_key"] for r in rel["leaderboard"]] == ["m/a#low", "m/c#low", "m/b#low"]
+
+    # Against the real task list, a row that ran two of the five tasks is not complete,
+    # even though no row in the release ran the other three.
+    monkeypatch.undo()
+    full = mod.aggregate_results(trials, {"models": {}}, release_tag="bench-v0.2.0")["releases"][0]
+    assert len(full["tasks"]) == 5 and not any(r["complete"] for r in full["leaderboard"])
+    assert {r["config_key"]: r["tasks_run"] for r in full["leaderboard"]} == {"m/a#low": 2, "m/b#low": 1, "m/c#low": 2}
 
 
 def test_collector_keeps_releases_apart_and_maps_earlier_trials():
@@ -260,7 +275,7 @@ def test_collector_keeps_releases_apart_and_maps_earlier_trials():
     assert by_id["old1"]["start_speedup"] == 1.0 and "speedup" not in by_id["old1"]
     # A run cut off by the provider is excluded even though it scored well.
     assert by_id["old2"]["outcome"] == "interrupted" and by_id["old2"]["start_speedup"] is None
-    assert old["leaderboard"][0]["solved"] == 0 and old["leaderboard"][0]["time_limit_hits"] == 1
+    assert old["leaderboard"][0]["speedup"] == 1.0 and old["leaderboard"][0]["time_limit_hits"] == 1
 
 
 def test_collector_writes_json_a_browser_can_parse(tmp_path):
