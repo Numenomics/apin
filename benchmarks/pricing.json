@@ -19,6 +19,13 @@
       "cached_input_per_1m": 0.0,
       "output_per_1m": 0.0,
       "free_tier": true
+    },
+    "opencode-go/hungerg-free": {
+      "label": "HungerG Free",
+      "input_per_1m": 0.0,
+      "cached_input_per_1m": 0.0,
+      "output_per_1m": 0.0,
+      "free_tier": true
     }
   }
 }
