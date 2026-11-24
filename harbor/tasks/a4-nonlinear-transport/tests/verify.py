@@ -31,6 +31,7 @@ import json
 import math
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -383,6 +384,26 @@ def verify_optimize(lane: str, submission: Path, out_dir: Path, *, tests_dir: Pa
     return {"invalid": 1, "unscorable": 2}.get(outcome, 0)
 
 
+_CONFINEMENT_PROBE = (
+    "import sys; from pathlib import Path; from harness import sandbox; "
+    "sandbox.confine_worker(Path(sys.argv[1]), mode='strict')"
+)
+
+
+def require_confinement() -> None:
+    """Stop before any grading when this machine cannot confine agent code.
+
+    Without this probe the failure would surface inside the candidate's load check and read as
+    an invalid submission with reward 0. A verifier that cannot confine is a setup failure, so
+    it exits without writing a reward and Harbor records an error, not a result."""
+    res = subprocess.run([sys.executable, "-c", _CONFINEMENT_PROBE, str(Path(__file__).resolve())],
+                         capture_output=True, text=True, timeout=120, cwd=str(ROOT))
+    if res.returncode != 0:
+        lines = [ln for ln in res.stderr.strip().splitlines() if ln.strip()]
+        raise SystemExit("verifier setup failure, no reward written: agent code cannot be confined here "
+                         f"({lines[-1] if lines else f'exit {res.returncode}'})")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="harbor/verify.py")
     sub = ap.add_subparsers(dest="mode", required=True)
@@ -418,6 +439,7 @@ def main(argv: list[str] | None = None) -> int:
     # code must not run here unless both confinement layers are active, so a layer that fails to
     # install fails the run instead of being skipped.
     os.environ[sandbox.ENV_SANDBOX] = "strict"
+    require_confinement()
     return verify_optimize(a.lane, a.submission, out_dir, tests_dir=a.tests_dir, overrides=overrides, cfg=cfg)
 
 

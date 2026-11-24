@@ -172,6 +172,12 @@ def test_the_verifier_requires_both_confinement_layers(verify, tmp_path, monkeyp
     monkeypatch.setattr(verify, "verify_optimize", lambda *a, **k: seen.setdefault("mode", sandbox.sandbox_mode()) and 0)
     assert verify.main(["optimize", "--lane", "A2", "--submission", str(tmp_path / "s.py"), "--out-dir", str(tmp_path)]) == 0
     assert seen["mode"] == "strict"
+    # A machine that cannot confine is a setup failure: no grading and no reward file.
+    monkeypatch.setattr(verify, "_CONFINEMENT_PROBE", "raise RuntimeError('strict sandbox Landlock guard failed')")
+    seen.clear()
+    with pytest.raises(SystemExit, match="verifier setup failure.*Landlock"):
+        verify.main(["optimize", "--lane", "A2", "--submission", str(tmp_path / "s.py"), "--out-dir", str(tmp_path / "o")])
+    assert not seen and not (tmp_path / "o").exists()
 
 
 def test_denominators_never_ship_in_the_agent_image():
