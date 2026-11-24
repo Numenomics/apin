@@ -12,7 +12,7 @@ Give this prompt to a coding agent (Claude Code, Codex, OpenCode or any other):
 Read https://github.com/Numenomics/apin/blob/main/auto-research.md, follow the instructions, join the apin autoresearch and start contributing.
 ```
 
-To run trials by hand, install [uv](https://docs.astral.sh/uv/) and Python 3.12. You do not need Docker, CmdStan or an account.
+To run trials by hand, install [uv](https://docs.astral.sh/uv/), which installs the right Python for you. You do not need Docker, CmdStan or an account.
 
 ```bash
 git clone https://github.com/Numenomics/apin.git && cd apin

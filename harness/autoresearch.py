@@ -356,8 +356,6 @@ def evaluate_lane_trial(
             "is_duplicate": is_dup,
             "lint_ok": lint_error is None,
             "lint_error": lint_error,
-            "tier0_ok": (not is_dup or allow_duplicate) and lint_error is None,
-            "tier1_ok": False,
             "decision": (
                 "dry_run_duplicate" if (is_dup and not allow_duplicate)
                 else ("dry_run_lint_error" if lint_error is not None else "dry_run_ok")
@@ -452,6 +450,11 @@ def evaluate_lane_trial(
     return finish(row)
 
 
+DUPLICATE_HINT = ("The same code was already tried in this run (comments and whitespace do not count), so it "
+                  "was not graded again. Its earlier row in results.tsv has the outcome. "
+                  "Pass --allow-duplicate to grade it anyway.")
+
+
 def trial_report(row: dict, run_id: str) -> list[str]:
     """The lines `apin autoresearch eval` prints for one trial row."""
     dims = ",".join(str(x) for x in (row.get("dims") or []))
@@ -470,6 +473,8 @@ def trial_report(row: dict, run_id: str) -> list[str]:
         lines.append(f"CLASS_METRIC {cls_name}={cls_val}")
     if row.get("error"):
         lines.append(f"Failed a check: {row['error']}")
+    if row.get("decision") == "discard_duplicate":
+        lines.append(DUPLICATE_HINT)
 
     kept = row.get("decision") in flywheel.KEPT_DECISIONS
     if kept:
@@ -606,6 +611,10 @@ def format_evaluator_json(
     }
 
 
+def _clip(text: str, n: int) -> str:
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
 def _extract_list(resp: object, *keys: str) -> list[dict]:
     if isinstance(resp, list):
         return [x for x in resp if isinstance(x, dict)]
@@ -722,7 +731,7 @@ def build_research_brief(
             lines.append(f"## Recent Discarded Trials on {lane} (do not repeat)")
             if discards:
                 for n in discards[:max_failures]:
-                    hyp = str(n.get("hypothesis") or n.get("title") or "")[:100]
+                    hyp = _clip(str(n.get("hypothesis") or n.get("title") or ""), 300)
                     lines.append(f"- `{n.get('id', '?')}` [{n.get('decision')}]: {hyp}")
             else:
                 lines.append("- (none recorded on Flywheel)")
@@ -736,12 +745,10 @@ def build_research_brief(
     if lane_dir is not None:
         neg_path = lane_dir / "NEGATIVE_MEMORY.md"
         if neg_path.is_file():
-            neg_lines = [ln for ln in neg_path.read_text().splitlines() if ln.strip()]
-            if neg_lines:
+            neg_text = neg_path.read_text().strip()
+            if neg_text:
                 lines.append(f"## Local Negative Memory (`{neg_path.name}`)")
-                lines.extend(neg_lines[:20])
-                if len(neg_lines) > 20:
-                    lines.append(f"... ({len(neg_lines) - 20} more lines in `{neg_path}`)")
+                lines.extend(neg_text.splitlines())
                 lines.append("")
 
     # 3. Local run ledger + stall / bottleneck diagnostics + RESEARCH_HANDOFF.md
