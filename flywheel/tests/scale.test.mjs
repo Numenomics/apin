@@ -51,6 +51,7 @@ const INSERT_NOTE =
   "INSERT INTO notes (id, kind, lane, title, body, state, author, node_ids, created_at, updated_at) VALUES (?, 'insight', 'A1', 'Note', 'body', 'open', 'x', ?, ?, ?)";
 
 const TIE_TRIALS = 3000;
+const STATE_OF_STEP = "POST /api/nodes/:id/state (first step, lane recompute)";
 // A chart cursor two hours into the synthetic timeline: at both table sizes lane A1 still
 // holds more than a page of 100 trials after it.
 const CHART_CURSOR = "2026-01-01T02:00:00.000Z|0";
@@ -114,7 +115,7 @@ function synthesize(n) {
 /**
  * The requests measured, in order. `site` marks the reads the website uses. `flat: false`
  * skips the flat-JS check: for a page the 1,000-trial table cannot fill (its cost grows up to
- * the page cap, then stops), and for the rare lane rewalk, whose cost grows with the lane.
+ * the page cap, then stops), and for the rare lane recompute, whose cost grows with the lane.
  */
 function requests(n, target, firstStepA1) {
   const get = (p) => () => new Request(`https://x${p}`);
@@ -151,8 +152,8 @@ function requests(n, target, firstStepA1) {
           parent_ids: [{ id: target, relation: "incumbent" }], source: `${SOURCE}# ${k}\n`,
         }),
       })],
-    // Disputing (and restoring) A1's first step rewalks the whole lane: the rare path.
-    ["POST /api/nodes/:id/state (first step, rewalk)", false, (k) =>
+    // Disputing (and restoring) A1's first step recomputes the whole lane: the rare path.
+    [STATE_OF_STEP, false, (k) =>
       new Request(`https://x/api/nodes/${encodeURIComponent(firstStepA1)}/state`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -404,5 +405,11 @@ it("keeps Worker CPU flat and D1 rows read bounded from 1,000 to 20,000 trials",
     }
     // The usual write, a new trial at the end of its lane, reads a fixed number of rows too.
     for (const rows of [smallRows, largeRows]) assert.ok(rows["POST /api/nodes"] <= 100, `POST /api/nodes: ${rows["POST /api/nodes"]} rows read`);
+    // The lane recompute reads each standard trial of the lane about once: linear, not worse.
+    for (const [rows, n] of [[smallRows, 1000], [largeRows, 20000]]) {
+      const lane = synthesize(n).statements.filter(([sql, params]) => sql === INSERT_NODE && params[2] === "A1").length;
+      assert.ok(rows[STATE_OF_STEP] <= 2 * lane + 100, `${STATE_OF_STEP}: ${rows[STATE_OF_STEP]} rows read for ${lane} trials in A1`);
+      console.log(`lane A1 at ${n} trials: ${lane} standard trials; state change of its first step read ${rows[STATE_OF_STEP]} rows`);
+    }
   }
 });

@@ -320,6 +320,53 @@ def test_seed_from_apin_generates_valid_sql(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_seed_from_apin_writes_the_flag_backfill_for_the_rollout_repair(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--backfill-sql writes the BACKFILL block alone. Applied after a deploy, it repairs the
+    trials the old Worker wrote between `migrations apply` and `deploy`, and it is idempotent."""
+    seed_mod = _load_seed_module()
+    out = tmp_path / "backfill.sql"
+    seed_mod.main(["--backfill-sql", str(out)])
+    assert str(out) in capsys.readouterr().out
+    sql = out.read_text(encoding="utf-8")
+    assert seed_mod.flag_backfill_sql() in sql
+    assert "ALTER TABLE" not in sql and "CREATE TRIGGER" not in sql
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript((REPO_ROOT / "flywheel" / "schema.sql").read_text(encoding="utf-8"))
+    for mig in sorted((REPO_ROOT / "flywheel" / "migrations").glob("*.sql")):
+        conn.executescript(mig.read_text(encoding="utf-8"))
+    # Trials as the old Worker writes them: neither flag set.
+    rows = [
+        ("A1:r:T1", "A1", "keep", 0.01, "[6, 20]", "2026-01-01T00:01:00Z"),
+        ("A1:r:T2", "A1", "keep", 0.03, "[6, 20]", "2026-01-01T00:02:00Z"),
+        ("A1:r:T3", "A1", "keep", 0.02, "[6, 20]", "2026-01-01T00:03:00Z"),
+        ("A1:r:T4", "A1", "keep", 0.09, "[6]", "2026-01-01T00:04:00Z"),
+        ("S1:r:T1", "S1", "discard_tier1", 0.5, None, "2026-01-01T00:01:00Z"),
+        ("S1:r:T2", "S1", "keep_simpler", 0.2, None, "2026-01-01T00:02:00Z"),
+    ]
+    conn.executemany(
+        "INSERT INTO nodes (id, lane, run_id, decision, soft_min_eff, dims, created_at) VALUES (?, ?, 'r', ?, ?, ?, ?)",
+        rows,
+    )
+    assert conn.execute("SELECT SUM(standard) + SUM(frontier_step) FROM nodes").fetchone() == (0,)
+    for _ in range(2):
+        conn.executescript(sql)
+        flags = conn.execute("SELECT id, standard, frontier_step FROM nodes ORDER BY id").fetchall()
+        assert flags == [
+            ("A1:r:T1", 1, 1),
+            ("A1:r:T2", 1, 1),
+            ("A1:r:T3", 1, 0),
+            ("A1:r:T4", 0, 0),
+            ("S1:r:T1", 1, 0),
+            ("S1:r:T2", 1, 1),
+        ]
+        stats = conn.execute("SELECT lane, standard, steps, steps_dirty FROM lane_stats ORDER BY lane").fetchall()
+        assert stats == [("A1", 3, 2, 0), ("S1", 2, 1, 0)]
+    conn.close()
+
+
 def test_token_only_defaults_to_public_url_and_post_trial_row(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("APIN_FLYWHEEL_URL", raising=False)
     monkeypatch.setenv("APIN_FLYWHEEL_TOKEN", "apfw_contributor_tok")

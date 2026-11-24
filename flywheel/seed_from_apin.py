@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Seed apin Flywheel D1 SQL (`flywheel/seed.sql`) from local autoresearch ledgers and
 real-Stan score CSVs.
+
+With --backfill-sql PATH it writes only the flag backfill of migration 0004 to PATH, for the
+one-time repair after a deploy (README.md, "Deploy").
 """
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import math
@@ -454,7 +458,29 @@ def generate_seed_artifacts(repo_root: Path, flywheel_dir: Path | None = None) -
     }
 
 
-def main() -> None:
+def write_backfill_sql(path: Path) -> Path:
+    """Write the BACKFILL block of migration 0004 as a standalone SQL file."""
+    path.write_text(
+        "-- The BACKFILL block of flywheel/migrations/0004_frontier_steps.sql. Safe to re-run.\n"
+        + flag_backfill_sql()
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--backfill-sql",
+        type=Path,
+        metavar="PATH",
+        help="write only the flag backfill of migration 0004 to PATH, and do not seed",
+    )
+    args = parser.parse_args(argv)
+    if args.backfill_sql:
+        print(f"Wrote the 0004 flag backfill to {write_backfill_sql(args.backfill_sql)}")
+        return
     flywheel_dir = Path(__file__).resolve().parent
     repo_root = flywheel_dir.parent
     summary = generate_seed_artifacts(repo_root, flywheel_dir)

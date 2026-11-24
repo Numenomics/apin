@@ -792,11 +792,14 @@ function deserializeNode(row: NodeRow): NodeRecord {
 const OUTCOME_KEPT = ["keep", "keep_baseline", "keep_simpler", "keep_incumbent_failed"];
 const sqlList = (xs: readonly string[]) => xs.map((x) => `'${x}'`).join(", ");
 const SQL_OUTCOME_KEPT = sqlList(OUTCOME_KEPT);
-/** Frontier eligibility: not retracted or disputed, and kept or verified. */
-const SQL_FRONTIER_OK = `state NOT IN (${sqlList(FRONTIER_EXCLUDED_STATES)})`;
-const SQL_FRONTIER_ELIGIBLE = `(verified = 1 OR decision IN (${sqlList([...KEPT_DECISIONS])}))`;
-/** A trial that takes part in the step walk. Must match the BACKFILL block of migration 0004. */
-const SQL_STEP_ELIGIBLE = `(standard = 1 AND soft_min_eff > 0 AND ${SQL_FRONTIER_OK} AND ${SQL_FRONTIER_ELIGIBLE})`;
+/**
+ * A trial that takes part in the step walk: standard, scored, not retracted or disputed, and
+ * kept or verified. `t` is a table alias with its dot, or "" for the bare table. Must match the
+ * triggers and the BACKFILL block of migration 0004.
+ */
+const sqlStepEligible = (t = "") =>
+  `(${t}standard = 1 AND ${t}soft_min_eff > 0 AND ${t}state NOT IN (${sqlList(FRONTIER_EXCLUDED_STATES)})
+    AND (${t}verified = 1 OR ${t}decision IN (${sqlList([...KEPT_DECISIONS])})))`;
 
 type NodeWithoutRaw = Omit<NodeRecord, "metrics_json">;
 
@@ -882,16 +885,20 @@ async function laneFrontiers(db: D1DatabaseLike, lanes: string[]): Promise<Recor
 // ---------------------------------------------------------------------------
 // Frontier steps
 //
-// Per lane, walk the eligible trials (SQL_STEP_ELIGIBLE) in (created_at, id) order. The first
+// Per lane, walk the eligible trials (sqlStepEligible) in (created_at, id) order. The first
 // is a step. Each later one is a step when its score is above the latest step's (a tie is
 // not a step). nodes.frontier_step stores the result, and the lane frontier is the latest step.
 //
-// A trial that is not a step never changes `best`, so adding, changing or removing one
-// changes no other flag. Every write therefore (1) sets the written trial's own flag from the
-// latest step before it, in the write's own batch (stepSelfStmt), and (2) only when the trial
-// was or became a step, rewalks its lane from its position (settleSteps). A new trial at the
-// end of its lane rewalks just itself. A changed or removed step in the middle of a lane
-// rewalks the rest of the lane: rare (disputes, retractions, maintainer edits).
+// Every flag a write changes commits in the write's own batch, computed in SQL from the rows
+// as they are inside that transaction, so overlapping requests cannot leave stale flags.
+//   * A new trial: stepSelfStmt sets its own flag from the latest step before it, and
+//     stepsAfterStmt clears the later steps it now beats. Nothing else can change: a later
+//     trial that was not a step still is not. For a trial at the end of its lane, the usual
+//     post, both read a row or two.
+//   * Any other change: the triggers of migration 0004 mark the lane dirty when other flags may
+//     move (the trial was a step, or is eligible now and changed its position or score), and
+//     settleStepsStmts, last in every batch that writes trials, recomputes each dirty lane
+//     from scratch and clears the mark. That reads the lane's standard trials: the rare path.
 // ---------------------------------------------------------------------------
 
 /** Standard when the lane has no standard dims, or the dims are a JSON array of numbers equal to them. */
@@ -902,18 +909,18 @@ function isStandard(lane: string, dims: string | null): boolean {
   return Array.isArray(got) && got.length === want.length && got.every((x, i) => typeof x === "number" && x === want[i]);
 }
 
-/** The latest step strictly before a position. Earlier flags never depend on later trials. */
-const SQL_STEP_BEFORE = (alias: string, lane: string, createdAt: string, id: string) =>
-  `SELECT ${alias}.soft_min_eff FROM nodes AS ${alias} INDEXED BY idx_nodes_steps
-   WHERE ${alias}.lane = ${lane} AND ${alias}.frontier_step = 1 AND (${alias}.created_at, ${alias}.id) < (${createdAt}, ${id})
-   ORDER BY ${alias}.created_at DESC, ${alias}.id DESC LIMIT 1`;
-
-/** Sets one trial's own flag from the latest step before it (for the write's batch). */
+/**
+ * Sets one trial's own flag from the latest step before it. Earlier flags never depend on
+ * later trials. Correct for a new trial, and a no-op for an unchanged one.
+ */
 function stepSelfStmt(db: D1DatabaseLike, id: string): D1PreparedStatement {
   return db
     .prepare(
-      `UPDATE nodes SET frontier_step = CASE WHEN ${SQL_STEP_ELIGIBLE}
-         AND coalesce(soft_min_eff > (${SQL_STEP_BEFORE("p", "nodes.lane", "nodes.created_at", "nodes.id")}), 1)
+      `UPDATE nodes SET frontier_step = CASE WHEN ${sqlStepEligible()}
+         AND coalesce(soft_min_eff > (
+           SELECT p.soft_min_eff FROM nodes AS p INDEXED BY idx_nodes_steps
+           WHERE p.lane = nodes.lane AND p.frontier_step = 1 AND (p.created_at, p.id) < (nodes.created_at, nodes.id)
+           ORDER BY p.created_at DESC, p.id DESC LIMIT 1), 1)
          THEN 1 ELSE 0 END
        WHERE id = ?`
     )
@@ -921,52 +928,45 @@ function stepSelfStmt(db: D1DatabaseLike, id: string): D1PreparedStatement {
 }
 
 /**
- * Rewalks a lane's flags from a trial's position on (the whole lane when `from` is null) and
- * writes only the flags that change. Reads the latest step before the position plus the
- * lane's standard trials from it, oldest first, as (id, score, flag, eligible).
+ * Clears the later steps of the trial's lane that it now beats (a step's score is at least
+ * theirs). Runs after stepSelfStmt. Reads the trial and the steps after it: none for the
+ * newest trial of its lane.
  */
-async function rewalkSteps(db: D1DatabaseLike, lane: string, from: { created_at: string; id: string } | null): Promise<void> {
-  type WalkRow = { id: string; soft_min_eff: number | null; frontier_step: number; ok: number | null };
-  const [rows, start] = await batchAll<Record<string, unknown>>(db, [
-    db
-      .prepare(
-        `SELECT id, soft_min_eff, frontier_step, ${SQL_STEP_ELIGIBLE} AS ok FROM nodes INDEXED BY idx_nodes_lane_standard
-         WHERE lane = ? AND standard = 1${from ? " AND (created_at, id) >= (?, ?)" : ""} ORDER BY created_at, id`
-      )
-      .bind(lane, ...(from ? [from.created_at, from.id] : [])),
-    from
-      ? db.prepare(SQL_STEP_BEFORE("p", "?", "?", "?")).bind(lane, from.created_at, from.id)
-      // A whole-lane walk also clears flags left on trials that are no longer standard.
-      : db.prepare("SELECT id FROM nodes INDEXED BY idx_nodes_steps WHERE lane = ? AND frontier_step = 1 AND standard = 0").bind(lane),
-  ]);
-  let best = from ? toFiniteNumber(start[0]?.soft_min_eff) : null;
-  const on: string[] = [];
-  const off: string[] = from ? [] : start.map((r) => String(r.id));
-  for (const r of rows as unknown as WalkRow[]) {
-    const eff = Number(r.soft_min_eff);
-    const step = Boolean(r.ok) && (best === null || eff > best);
-    if (step) best = eff;
-    if (step !== (Number(r.frontier_step) === 1)) (step ? on : off).push(r.id);
-  }
-  const set = (flag: number, ids: string[]) =>
-    db.prepare("UPDATE nodes SET frontier_step = ? WHERE id IN (SELECT value FROM json_each(?))").bind(flag, JSON.stringify(ids));
-  const writes = [...(on.length ? [set(1, on)] : []), ...(off.length ? [set(0, off)] : [])];
-  if (writes.length > 0) await runBatch(db, writes);
+function stepsAfterStmt(db: D1DatabaseLike, id: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE nodes SET frontier_step = 0 WHERE id IN (
+         SELECT a.id FROM nodes AS x CROSS JOIN nodes AS a INDEXED BY idx_nodes_steps
+         WHERE x.id = ? AND x.frontier_step = 1
+           AND a.lane = x.lane AND a.frontier_step = 1 AND (a.created_at, a.id) > (x.created_at, x.id)
+           AND a.soft_min_eff <= x.soft_min_eff)`
+    )
+    .bind(id);
 }
 
 /**
- * Restores the step invariant after one trial changed from `before` to `after` (null when
- * created or deleted). `after` must be read after the write, whose batch ran stepSelfStmt.
+ * Recomputes every dirty lane's flags and clears the marks. Per lane it reads the standard
+ * trials once and the steps once, and toggles each flag that differs from the walk: an
+ * eligible trial is a step when its score is above the best eligible score before it, and an
+ * ineligible trial is never a step. Reads no row when no lane is dirty. Must equal the
+ * recompute statement of migration 0004's BACKFILL block.
  */
-async function settleSteps(db: D1DatabaseLike, before: NodeRow | null, after: NodeRow | null): Promise<void> {
-  const b = before && Number(before.frontier_step) === 1 ? before : null;
-  const a = after && Number(after.frontier_step) === 1 ? after : null;
-  if (b && a && b.lane === a.lane && b.created_at === a.created_at && b.soft_min_eff === a.soft_min_eff) return;
-  // Both positions when the trial moved: the later walk cannot fix flags before its start,
-  // and the earlier one covers everything after it.
-  const starts = [b, a].filter((r): r is NodeRow => r !== null);
-  if (starts.length === 2 && starts[0].lane === starts[1].lane && starts[0].created_at === starts[1].created_at) starts.pop();
-  for (const r of starts) await rewalkSteps(db, r.lane, { created_at: r.created_at, id: r.id });
+const SQL_SETTLE_STEPS = `UPDATE nodes SET frontier_step = 1 - frontier_step WHERE id IN (
+  SELECT id FROM (
+    SELECT n.id, n.frontier_step AS was, n.soft_min_eff > coalesce(max(n.soft_min_eff) OVER (
+        PARTITION BY n.lane ORDER BY n.created_at, n.id ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS step
+    FROM lane_stats AS d INDEXED BY idx_lane_stats_dirty CROSS JOIN nodes AS n INDEXED BY idx_nodes_lane_standard
+    WHERE d.steps_dirty = 1 AND n.lane = d.lane AND ${sqlStepEligible("n.")}
+  ) WHERE step IS NOT was
+  UNION ALL
+  SELECT n.id FROM lane_stats AS d INDEXED BY idx_lane_stats_dirty CROSS JOIN nodes AS n INDEXED BY idx_nodes_steps
+  WHERE d.steps_dirty = 1 AND n.lane = d.lane AND n.frontier_step = 1 AND NOT coalesce(${sqlStepEligible("n.")}, 0))`;
+
+function settleStepsStmts(db: D1DatabaseLike): D1PreparedStatement[] {
+  return [
+    db.prepare(SQL_SETTLE_STEPS),
+    db.prepare("UPDATE lane_stats INDEXED BY idx_lane_stats_dirty SET steps_dirty = 0 WHERE steps_dirty = 1"),
+  ];
 }
 
 /** The run's latest LIMITS.runStepsWindow trials, oldest first after reversal: decision and score only. */
@@ -1421,6 +1421,13 @@ const opPostNode: Op = async (ctx, payload) => {
   if (long) return out(400, { error: "field_too_long", ...long });
   const badId = badIdentifier(payload, ["id", "run_id", "trial_id", "author"], ["lane"]);
   if (badId) return badId;
+  // created_at is the order of the frontier walk, so only a maintainer (seeding, backfills)
+  // may set it. Everyone else gets the server time, and nobody can backdate a trial.
+  const givenAt = isAdmin ? toNullableString(payload.created_at) : null;
+  const givenMs = givenAt === null ? null : Date.parse(givenAt);
+  if (givenMs !== null && !Number.isFinite(givenMs)) {
+    return out(400, { error: "invalid_created_at", detail: "created_at must be a date, for example 2026-11-24T10:00:00Z" });
+  }
 
   const id = toNullableString(payload.id) ?? crypto.randomUUID();
   const parents = parseParents(payload, id);
@@ -1488,7 +1495,7 @@ const opPostNode: Op = async (ctx, payload) => {
     verified,
     state: verified ? "verified" : "unverified",
     source_sha: sourceSha,
-    created_at: toNullableString(payload.created_at) ?? now,
+    created_at: givenMs === null ? now : new Date(givenMs).toISOString(),
     updated_at: now,
   };
 
@@ -1558,9 +1565,9 @@ const opPostNode: Op = async (ctx, payload) => {
     )
     .bind(...columns.map((c) => values[c]), ...(isAdmin ? [] : lockParams));
   // One batch (one transaction in D1): the trial row and the source body it points to are
-  // stored together, a maintainer's lane change moves the queue entry with it, and the
-  // trial's own step flag is set from the row as stored.
-  const writes: D1PreparedStatement[] = [upsert, stepSelfStmt(db, id)];
+  // stored together, a maintainer's lane change moves the queue entry with it, and every
+  // step flag the write changes is set from the rows as stored (see "Frontier steps").
+  const writes: D1PreparedStatement[] = [upsert, stepSelfStmt(db, id), stepsAfterStmt(db, id)];
   if (sourceSha && sourceBytes) {
     writes.push(
       db
@@ -1583,6 +1590,7 @@ const opPostNode: Op = async (ctx, payload) => {
         .bind(id, now, id, id)
     );
   }
+  writes.push(...settleStepsStmts(db));
   const [res] = await runBatch(db, writes);
   if (changesOf(res) === 0) {
     return existing && existing.author === principal.handle
@@ -1607,7 +1615,6 @@ const opPostNode: Op = async (ctx, payload) => {
   }
 
   const row = await getNodeRow(db, id);
-  await settleSteps(db, existing, row);
   const node = row ? deserializeNode(row) : null;
   const queued = node ? await maybeEnqueue(db, node) : false;
   return out(existing ? 200 : 201, { ok: true, created: !existing, node, verify_queued: queued });
@@ -1689,9 +1696,13 @@ const opLaneChart: Op = async (ctx, args) => {
   const limit = clampLimit(args.limit, LIMITS.chartPoints, LIMITS.chartPoints);
   // `after` is the `next_after` of the previous page: "<created_at>|<id>" of its last point.
   // A cursor, not an offset, so every page costs the same and no lane is too long to read.
+  // Split on the last "|": ids cannot hold one, but old created_at values are free text. Both
+  // came in one trial payload, so a cursor the server issued is never longer than that.
   const after = toNullableString(args.after);
-  const cut = after ? after.indexOf("|") : -1;
-  if (after && (cut <= 0 || cut === after.length - 1 || after.length > 300)) return out(400, { error: "invalid_after" });
+  const cut = after ? after.lastIndexOf("|") : -1;
+  if (after && (cut <= 0 || cut === after.length - 1 || after.length > LIMITS.nodeMetaBytes + 1)) {
+    return out(400, { error: "invalid_after" });
+  }
   const cursor = after ? [after.slice(0, cut), after.slice(cut + 1)] : [];
   const [rows, stats] = await batchAll<Record<string, unknown>>(db, [
     db
@@ -1998,7 +2009,7 @@ const opSetNodeState: Op = async (ctx, args) => {
     db
       .prepare("UPDATE nodes SET state = ?, verified = ?, state_reason = ?, state_by = ?, state_at = ? WHERE id = ?")
       .bind(state, state === "verified" ? 1 : 0, reason, principal.handle, now, id),
-    stepSelfStmt(db, id),
+    ...settleStepsStmts(db),
   ]);
 
   if (state === "needs-replication" && node.has_source) {
@@ -2022,7 +2033,6 @@ const opSetNodeState: Op = async (ctx, args) => {
   }
 
   const updated = await getNodeRow(db, id);
-  await settleSteps(db, row, updated);
   return out(200, { ok: true, node: updated ? deserializeNode(updated) : null });
 };
 
@@ -2492,7 +2502,7 @@ const opVerifyQueue: Op = async (ctx, args) => {
     .prepare(
       `SELECT q.*, n.* , q.lane AS q_lane, q.created_at AS q_created_at, q.updated_at AS q_updated_at
        FROM verify_queue q JOIN nodes n ON n.id = q.node_id
-       WHERE q.status IN (${placeholders(statuses.length)})${laneClause}
+       WHERE q.status IN (${placeholders(statuses.length)}) AND n.standard = 1${laneClause}
        ORDER BY q.created_at ASC, q.node_id ASC LIMIT ?`
     )
     .bind(...params, limit)
@@ -2532,6 +2542,9 @@ const opVerifyClaim: Op = async (ctx, args) => {
     "(q.status = 'queued' OR (q.status = 'leased' AND q.lease_expires_at <= ?))",
     "n.state NOT IN ('verified', 'retracted')",
     "n.source_sha IS NOT NULL",
+    // Only a standard trial can move a frontier. A trial re-posted on other dims keeps its
+    // queue row, so the lease checks the trial as it is now.
+    "n.standard = 1",
   ];
   const pickParams: unknown[] = [now];
   if (principal.role !== "admin") {
@@ -2636,7 +2649,7 @@ const opVerifyResult: Op = async (ctx, args) => {
          RETURNING node_id`
       )
       .bind(passed ? "pass" : "fail", metricsJson, principal.handle, now, ...leaseParams),
-    stepSelfStmt(db, nodeId),
+    ...settleStepsStmts(db),
   ]);
 
   if ((done?.results ?? []).length === 0) {
@@ -2648,7 +2661,6 @@ const opVerifyResult: Op = async (ctx, args) => {
   }
 
   const updated = await getNodeRow(db, nodeId);
-  await settleSteps(db, nodeRow, updated);
   return out(200, { ok: true, node_id: nodeId, result: passed ? "pass" : "fail", node: updated ? deserializeNode(updated) : null });
 };
 
@@ -2777,51 +2789,39 @@ const opAdminHandle: Op = async (ctx, args) => {
   if ((keys.results ?? []).length === 0) return out(404, { error: "not_found", handle });
   const now = nowIso();
   if (action === "purge") {
-    // Revoke every key of the handle and delete everything it posted, in one call.
-    const revoked = await db
-      .prepare("UPDATE api_keys SET revoked_at = ? WHERE lower(handle) = lower(?) AND revoked_at IS NULL")
-      .bind(now, handle)
-      .run();
-    // Lanes whose trials are deleted or reopened below: their steps are rewalked at the end.
-    const touched = await db
-      .prepare(
-        `SELECT DISTINCT lane FROM nodes WHERE lower(author) = lower(?)
-           OR (state IN ('replicated', 'disputed', 'needs-replication') AND lower(state_by) = lower(?))`
-      )
-      .bind(handle, handle)
-      .all<{ lane: string }>();
+    // Revoke every key of the handle and delete everything it posted, in one batch (one
+    // transaction), which ends by recomputing the steps of every lane it changed.
     const owned = "SELECT id FROM nodes WHERE lower(author) = lower(?)";
-    await db.prepare(`DELETE FROM node_parents WHERE child IN (${owned}) OR parent IN (${owned})`).bind(handle, handle).run();
-    await db.prepare(`DELETE FROM verify_queue WHERE node_id IN (${owned})`).bind(handle).run();
-    const nodes = await db.prepare("DELETE FROM nodes WHERE lower(author) = lower(?)").bind(handle).run();
-    const notes = await db.prepare("DELETE FROM notes WHERE lower(author) = lower(?)").bind(handle).run();
-    const claims = await db
-      .prepare("DELETE FROM claims WHERE lower(agent) = lower(?) OR lower(agent) LIKE lower(?) ESCAPE '\\'")
-      .bind(handle, `${handle.replace(/[\\%_]/g, (c) => `\\${c}`)}:%`)
-      .run();
-    const sources = await db
-      .prepare(
-        "DELETE FROM sources WHERE lower(uploaded_by) = lower(?) AND sha256 NOT IN (SELECT source_sha FROM nodes WHERE source_sha IS NOT NULL)"
-      )
-      .bind(handle)
-      .run();
-    // Lease results this handle posted on others' trials are reopened, not trusted.
-    await db
-      .prepare(
-        `UPDATE nodes SET state = 'unverified', state_reason = NULL, state_by = NULL, state_at = NULL
-         WHERE state IN ('replicated', 'disputed', 'needs-replication') AND lower(state_by) = lower(?)`
-      )
-      .bind(handle)
-      .run();
-    await db
-      .prepare(
-        `UPDATE verify_queue SET status = 'queued', result = NULL, result_json = NULL, verifier = NULL,
-           lease_token_hash = NULL, leased_by = NULL, lease_expires_at = NULL, updated_at = ?
-         WHERE lower(verifier) = lower(?) OR lower(leased_by) = lower(?)`
-      )
-      .bind(now, handle, handle)
-      .run();
-    for (const { lane } of touched.results ?? []) await rewalkSteps(db, lane, null);
+    const [revoked, , , nodes, notes, claims, sources] = await runBatch(db, [
+      db.prepare("UPDATE api_keys SET revoked_at = ? WHERE lower(handle) = lower(?) AND revoked_at IS NULL").bind(now, handle),
+      db.prepare(`DELETE FROM node_parents WHERE child IN (${owned}) OR parent IN (${owned})`).bind(handle, handle),
+      db.prepare(`DELETE FROM verify_queue WHERE node_id IN (${owned})`).bind(handle),
+      db.prepare("DELETE FROM nodes WHERE lower(author) = lower(?)").bind(handle),
+      db.prepare("DELETE FROM notes WHERE lower(author) = lower(?)").bind(handle),
+      db
+        .prepare("DELETE FROM claims WHERE lower(agent) = lower(?) OR lower(agent) LIKE lower(?) ESCAPE '\\'")
+        .bind(handle, `${handle.replace(/[\\%_]/g, (c) => `\\${c}`)}:%`),
+      db
+        .prepare(
+          "DELETE FROM sources WHERE lower(uploaded_by) = lower(?) AND sha256 NOT IN (SELECT source_sha FROM nodes WHERE source_sha IS NOT NULL)"
+        )
+        .bind(handle),
+      // Lease results this handle posted on others' trials are reopened, not trusted.
+      db
+        .prepare(
+          `UPDATE nodes SET state = 'unverified', state_reason = NULL, state_by = NULL, state_at = NULL
+           WHERE state IN ('replicated', 'disputed', 'needs-replication') AND lower(state_by) = lower(?)`
+        )
+        .bind(handle),
+      db
+        .prepare(
+          `UPDATE verify_queue SET status = 'queued', result = NULL, result_json = NULL, verifier = NULL,
+             lease_token_hash = NULL, leased_by = NULL, lease_expires_at = NULL, updated_at = ?
+           WHERE lower(verifier) = lower(?) OR lower(leased_by) = lower(?)`
+        )
+        .bind(now, handle, handle),
+      ...settleStepsStmts(db),
+    ]);
     return out(200, {
       ok: true,
       handle,
@@ -2875,7 +2875,7 @@ const opAdminVerifyNode: Op = async (ctx, payload) => {
            real_stan_passed = ?, real_stan_total = ?, real_ess_per_cost = ? WHERE id = ?`
       )
       .bind(verified, state, (ctx.principal as AuthPrincipal).handle, now, stanPassed, stanTotal, stanEss, nodeId),
-    stepSelfStmt(db, nodeId),
+    ...settleStepsStmts(db),
   ]);
   if (verified) {
     await db
@@ -2884,7 +2884,6 @@ const opAdminVerifyNode: Op = async (ctx, payload) => {
       .run();
   }
   const updated = await getNodeRow(db, nodeId);
-  await settleSteps(db, existing, updated);
   return out(200, { ok: true, node: updated ? deserializeNode(updated) : null });
 };
 
@@ -2893,10 +2892,12 @@ const opAdminDeleteNode: Op = async (ctx, args) => {
   const nodeId = toNullableString(args.id) ?? "";
   const existing = await getNodeRow(db, nodeId);
   if (!existing) return out(404, { error: "not_found" });
-  await db.prepare("DELETE FROM nodes WHERE id = ?").bind(nodeId).run();
-  await db.prepare("DELETE FROM node_parents WHERE child = ? OR parent = ?").bind(nodeId, nodeId).run();
-  await db.prepare("DELETE FROM verify_queue WHERE node_id = ?").bind(nodeId).run();
-  await settleSteps(db, existing, null);
+  await runBatch(db, [
+    db.prepare("DELETE FROM nodes WHERE id = ?").bind(nodeId),
+    db.prepare("DELETE FROM node_parents WHERE child = ? OR parent = ?").bind(nodeId, nodeId),
+    db.prepare("DELETE FROM verify_queue WHERE node_id = ?").bind(nodeId),
+    ...settleStepsStmts(db),
+  ]);
   return out(200, { ok: true, deleted: nodeId });
 };
 
