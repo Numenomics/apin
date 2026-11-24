@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Regenerate the verifier-side files under harbor/tasks/*/tests/ from their single sources.
+"""Regenerate the generated files under harbor/tasks/ from their single sources.
 
+  - autoresearch/lanes/<LANE>/start.py, the lane's frozen starting code, is copied byte for byte
+    to harbor/tasks/<task>/environment/baseline.py (the agent's starting file) and
+    tests/baseline.py (the verifier's starting-code denominator). The copies must be exact: the
+    lane's yardstick and the verifier's frozen score are keyed by the file's SHA-256.
   - harbor/verify.py is copied verbatim to every harbor/tasks/*/tests/verify.py.
-  - harbor/references/stan_core.py + one lane tail is written to tests/reference.py of each
-    optimize task (the worker sandbox lets a submission read only its own file, so every
-    reference must be one self-contained file).
+  - harbor/references/stan_core.py + one lane tail is written to tests/reference.py of each task
+    (the worker sandbox lets a submission read only its own file, so every reference must be one
+    self-contained file).
 
-Frozen scores (tests/frozen_scores.json) and the frontier copy (tests/frontier.py) are written by
-scripts/freeze_harbor_references.py, not here.
+Frozen scores (tests/frozen_scores.json, autoresearch/lanes/<LANE>/yardstick.json) and the
+frontier copy (tests/frontier.py) are written by scripts/freeze_harbor_references.py, not here.
 
     uv run python scripts/sync_harbor_tests.py          # write
     uv run python scripts/sync_harbor_tests.py --check  # exit 1 if any copy drifted
@@ -23,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 HARBOR = ROOT / "harbor"
 TASKS = HARBOR / "tasks"
 REFS = HARBOR / "references"
+LANES = ROOT / "autoresearch" / "lanes"
 
 # Lane -> (task directory, reference tail). Must agree with harbor/verify.py::LANE_TASKS.
 OPTIMIZE_TASKS = {
@@ -46,19 +51,20 @@ def build_reference(tail: str) -> str:
     return _HEADER.format(tail=tail) + core.rstrip("\n") + "\n\n\n" + lane
 
 
-def expected_files() -> dict[Path, str]:
-    verify = (HARBOR / "verify.py").read_text(encoding="utf-8")
-    out: dict[Path, str] = {}
-    for task in sorted(p for p in TASKS.iterdir() if (p / "tests").is_dir()):
-        out[task / "tests" / "verify.py"] = verify
-    for _lane, (task, tail) in sorted(OPTIMIZE_TASKS.items()):
-        out[TASKS / task / "tests" / "reference.py"] = build_reference(tail)
+def expected_files() -> dict[Path, bytes]:
+    verify = (HARBOR / "verify.py").read_bytes()
+    out: dict[Path, bytes] = {}
+    for lane, (task, tail) in sorted(OPTIMIZE_TASKS.items()):
+        start = (LANES / lane / "start.py").read_bytes()
+        out[TASKS / task / "environment" / "baseline.py"] = start
+        out[TASKS / task / "tests" / "baseline.py"] = start
+        out[TASKS / task / "tests" / "verify.py"] = verify
+        out[TASKS / task / "tests" / "reference.py"] = build_reference(tail).encode("utf-8")
     return out
 
 
 def drifted() -> list[Path]:
-    return [p for p, text in expected_files().items()
-            if not p.is_file() or p.read_text(encoding="utf-8") != text]
+    return [p for p, data in expected_files().items() if not p.is_file() or p.read_bytes() != data]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -70,9 +76,9 @@ def main(argv: list[str] | None = None) -> int:
         for p in bad:
             print(f"drift: {p.relative_to(ROOT)}")
         return 1 if bad else 0
-    for p, text in expected_files().items():
+    for p, data in expected_files().items():
         if p in bad:
-            p.write_text(text, encoding="utf-8")
+            p.write_bytes(data)
             print(f"wrote {p.relative_to(ROOT)}")
     return 0
 

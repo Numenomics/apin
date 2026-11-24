@@ -25,9 +25,9 @@ const MIGRATIONS = fs
   .filter((f) => f.endsWith(".sql"))
   .sort()
   .map((f) => fs.readFileSync(path.resolve(here, "../migrations", f), "utf8"));
-/** Trials below are inserted straight into SQLite, as seed.sql does, so they need 0004's flag backfill. */
+/** Trials below are inserted straight into SQLite, as seed.sql does, so they need 0005's flag backfill. */
 const BACKFILL = fs
-  .readFileSync(path.resolve(here, "../migrations/0004_frontier_steps.sql"), "utf8")
+  .readFileSync(path.resolve(here, "../migrations/0005_speedup.sql"), "utf8")
   .split("-- BACKFILL BEGIN")[1]
   .split("-- BACKFILL END")[0];
 
@@ -42,8 +42,8 @@ const METRICS = JSON.stringify({
 const SOURCE = "import numpy as np\n" + "def adapt(state):\n    return state\n".repeat(250);
 const NODE_COLS = [
   "id", "parent_id", "lane", "run_id", "trial_id", "agent_model", "author", "author_tier", "title", "hypothesis",
-  "decision", "soft_min_eff", "ratio_vs_incumbent", "real_stan_passed", "real_stan_total", "overhead_ratio", "b2_max",
-  "dims", "codex_refs", "code_sha", "metrics_json", "verified", "state", "created_at",
+  "decision", "soft_min_eff", "speedup", "yardstick", "ratio_vs_incumbent", "real_stan_passed", "real_stan_total",
+  "overhead_ratio", "b2_max", "dims", "codex_refs", "code_sha", "metrics_json", "verified", "state", "created_at",
 ];
 const INSERT_NODE = `INSERT INTO nodes (${NODE_COLS.join(", ")}) VALUES (${NODE_COLS.map(() => "?").join(", ")})`;
 const INSERT_EDGE = "INSERT OR IGNORE INTO node_parents (child, parent, relation, created_at) VALUES (?, ?, ?, ?)";
@@ -56,7 +56,11 @@ const STATE_OF_STEP = "POST /api/nodes/:id/state (first step, lane recompute)";
 // holds more than a page of 100 trials after it.
 const CHART_CURSOR = "2026-01-01T02:00:00.000Z|0";
 
-/** N trials over 8 lanes (one run of N/10 trials in A1, the rest in runs of about 60), a tie block, 30 notes. */
+/**
+ * N trials over 8 lanes (one run of N/10 trials in A1, the rest in runs of about 60), a tie block, 30 notes.
+ * Nine in ten trials are graded, with a speedup between 0.8 and 1.4 that drifts up over time
+ * (one in twenty of them failed its checks and has none). The rest are exploratory.
+ */
 function synthesize(n) {
   const longRun = Math.round(n / 10);
   const runCount = Math.max(8, Math.round((n - longRun) / 60));
@@ -72,7 +76,7 @@ function synthesize(n) {
   const statements = [];
   const incumbent = new Map();
   const last = new Map();
-  let firstStepA1 = null; // every synthetic trial is standard, so A1's first kept scored trial
+  let firstStepA1 = null; // A1's first kept graded trial with a speedup
   slots.forEach(({ run, k }, i) => {
     const id = `${run.lane}:${run.run_id}:T${String(k + 1).padStart(4, "0")}`;
     const u = rand();
@@ -80,18 +84,20 @@ function synthesize(n) {
     const stan = rand() < 0.02;
     const parent = incumbent.get(run.run_id) ?? null;
     const created = new Date(Date.UTC(2026, 0, 1) + i * 30_000).toISOString();
+    const graded = rand() < 0.9;
+    const speedup = graded && rand() < 0.95 ? 0.8 + 0.3 * rand() + (0.3 * i) / slots.length : null;
     statements.push([INSERT_NODE, [
       id, parent, run.lane, run.run_id, `T${k + 1}`, MODELS[(k + run.run_id.length) % MODELS.length],
       `agent-${run.run_id}`, "provisional", `T${k + 1}: ${HYPOTHESIS.slice(0, 70)}`, HYPOTHESIS, decision,
-      rand() / 100, 1 + rand(), stan ? Math.floor(rand() * 6) : null, stan ? 5 : null, 4 + rand(), 0.1, "[6,20]",
-      '["fisher-low-rank"]', "cbc54bbbd03d8511", METRICS, 0, "unverified", created,
+      rand() / 100, speedup, graded ? `${run.lane}:judge-1:r8` : null, 1 + rand(), stan ? Math.floor(rand() * 6) : null,
+      stan ? 5 : null, 4 + rand(), 0.1, "[6,20]", '["fisher-low-rank"]', "cbc54bbbd03d8511", METRICS, 0, "unverified", created,
     ]]);
     if (parent) statements.push([INSERT_EDGE, [id, parent, "incumbent", created]]);
     if (rand() < 0.03 && last.size > 0) {
       statements.push([INSERT_EDGE, [id, [...last.values()][Math.floor(rand() * last.size)], "combines", created]]);
     }
     if (decision === "keep") incumbent.set(run.run_id, id);
-    if (decision === "keep" && run.lane === "A1" && !firstStepA1) firstStepA1 = id;
+    if (decision === "keep" && speedup !== null && run.lane === "A1" && !firstStepA1) firstStepA1 = id;
     last.set(run.run_id, id);
   });
   // A block of TIE_TRIALS trials sharing the newest timestamp (lane TIE, model tie-model):
@@ -100,8 +106,8 @@ function synthesize(n) {
   for (let k = 0; k < TIE_TRIALS; k += 1) {
     statements.push([INSERT_NODE, [
       `TIE:tie:T${String(k).padStart(4, "0")}`, null, "TIE", "tie", `T${k}`, "tie-model", "agent-tie", "provisional",
-      `T${k}: tie`, HYPOTHESIS, "discard_tier1", 0.001, 1, null, null, 4, 0.1, "[6,20]", '["fisher-low-rank"]',
-      "cbc54bbbd03d8511", METRICS, 0, "unverified", tieAt,
+      `T${k}: tie`, HYPOTHESIS, "discard_tier1", 0.001, 1, "TIE:judge-1:r8", 1, null, null, 4, 0.1, "[6,20]",
+      '["fisher-low-rank"]', "cbc54bbbd03d8511", METRICS, 0, "unverified", tieAt,
     ]]);
   }
   const target = incumbent.get("long-run");
@@ -148,7 +154,7 @@ function requests(n, target, firstStepA1) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: `A1:long-run:P${n}-${k}`, lane: "A1", run_id: "long-run", trial_id: `P${k}`, decision: "keep",
-          soft_min_eff: 0.5, hypothesis: HYPOTHESIS, metrics_json: METRICS, dims: [6, 20], codex_refs: ["fisher-low-rank"],
+          soft_min_eff: 0.5, speedup: 5, yardstick: "A1:judge-1:r8", hypothesis: HYPOTHESIS, metrics_json: METRICS, dims: [6, 20], codex_refs: ["fisher-low-rank"],
           parent_ids: [{ id: target, relation: "incumbent" }], source: `${SOURCE}# ${k}\n`,
         }),
       })],
@@ -336,7 +342,7 @@ async function rowsRead(getPlatformProxy, n) {
 const RUN_SLICE = LIMITS.runsLimitMax * LIMITS.runNodes;
 const SITE_BOUNDS = {
   "/api/overview":
-    LIMITS.overviewLanes * (LIMITS.runStepsWindow + 45) +
+    LIMITS.overviewLanes * 45 +
     LIMITS.alignmentPoints * 2 + LIMITS.overviewModels * 2 + LIMITS.overviewClaims + 200,
   "/api/runs": LIMITS.runsLimitDefault * (LIMITS.runNodes + 1) + 200,
   "/api/runs?limit=60 (max page)": RUN_SLICE + LIMITS.runsLimitMax + 200,
@@ -357,7 +363,7 @@ const SITE_BOUNDS = {
   // A cursor seeks to its place in the index: the rows before it are never read.
   "/api/lanes/A1/chart?after=<cursor>&limit=100": 100 + 50,
   "/api/lanes/A1/chart (full page, 1,000 points)": LIMITS.chartPoints + 50,
-  // Steps are few (each one beats every score before it), and the count comes from lane_stats.
+  // Steps are few (each one beats the one before it by 5%), and the count comes from lane_stats.
   "/api/nodes?step=1": LIMITS.nodesLimitDefault * 2 + 50,
   "/api/nodes?lane=A1&step=1&q=james": LIMITS.nodesLimitDefault * 2 + 200,
   "/api/search?q=james": LIMITS.searchWindow * 4 + 50,
@@ -405,11 +411,11 @@ it("keeps Worker CPU flat and D1 rows read bounded from 1,000 to 20,000 trials",
     }
     // The usual write, a new trial at the end of its lane, reads a fixed number of rows too.
     for (const rows of [smallRows, largeRows]) assert.ok(rows["POST /api/nodes"] <= 100, `POST /api/nodes: ${rows["POST /api/nodes"]} rows read`);
-    // The lane recompute reads each standard trial of the lane about once: linear, not worse.
+    // The lane recompute reads each graded trial of the lane about once: linear, not worse.
     for (const [rows, n] of [[smallRows, 1000], [largeRows, 20000]]) {
       const lane = synthesize(n).statements.filter(([sql, params]) => sql === INSERT_NODE && params[2] === "A1").length;
       assert.ok(rows[STATE_OF_STEP] <= 2 * lane + 100, `${STATE_OF_STEP}: ${rows[STATE_OF_STEP]} rows read for ${lane} trials in A1`);
-      console.log(`lane A1 at ${n} trials: ${lane} standard trials; state change of its first step read ${rows[STATE_OF_STEP]} rows`);
+      console.log(`lane A1 at ${n} trials: ${lane} trials; state change of its first step read ${rows[STATE_OF_STEP]} rows`);
     }
   }
 });

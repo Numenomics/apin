@@ -1,5 +1,5 @@
-/* Autoresearch page: one lane at a time. The chart shows every trial of the lane that was
-   scored on the lane's standard setup, and the best efficiency so far as a stepped line.
+/* Autoresearch page: one lane at a time. The chart shows every graded trial of the lane by
+   its speed-up over the lane's starting code, and the best speed-up so far as a stepped line.
    All data comes from apin.api in bounded pages. */
 (function () {
   "use strict";
@@ -10,7 +10,7 @@
   const state = {
     overview: null,
     lane: null,
-    chart: { lane: null, points: [], dims: null, loading: false, failed: false, seq: 0 },
+    chart: { lane: null, points: [], loading: false, failed: false, seq: 0 },
     agent: "",
     list: { kind: "trial", rows: [], next: null, seq: 0, note: "" },
     selected: null,
@@ -25,9 +25,7 @@
   const who = (n) => n.author || n.agent_model || "unknown";
   /* A contributor who registered without an invite is marked until a maintainer promotes them. */
   const byline = (n) => esc(who(n)) + (n.author_tier === "provisional" ? ' <span class="tag" title="Registered without an invite and not yet promoted by a maintainer">new</span>' : "");
-  const scored = (p) => isNum(p.soft_min_eff) && p.soft_min_eff > 0;
-  /* The same rule the Flywheel uses for a new best: kept and not disputed or withdrawn. */
-  const counts = (p) => (p.decision === "keep" || p.decision === "keep_baseline" || p.decision === "keep_simpler" || p.state === "verified") && p.state !== "retracted" && p.state !== "disputed" && scored(p);
+  const scored = (p) => isNum(p.speedup) && p.speedup > 0;
   const hashValue = (name) => {
     const raw = (location.hash.match(new RegExp("^#" + name + "=(.+)$")) || [])[1];
     try {
@@ -67,16 +65,17 @@
   async function loadChart() {
     const c = state.chart;
     const seq = ++c.seq;
-    Object.assign(c, { lane: state.lane, points: [], dims: null, loading: true, failed: false });
+    Object.assign(c, { lane: state.lane, points: [], loading: true, failed: false });
     state.agent = "";
     renderLane();
     try {
-      let after;
+      let after, yardstick;
       for (let page = 0; page === 0 || after; page += 1) {
         const res = await api.chart(state.lane, after);
         if (seq !== c.seq) return; // the reader has moved to another lane
+        if (page > 0 && res.yardstick !== yardstick) throw new Error("the lane's grading setup changed during the load");
+        yardstick = res.yardstick;
         for (const p of res.points || []) c.points.push(p);
-        c.dims = res.standard_dims || null;
         if (res.next_after === after) throw new Error("the chart cursor did not advance");
         after = res.next_after;
         renderLane();
@@ -109,12 +108,12 @@
     $("#prompt").innerHTML = cmd(apin.lanePrompt(laneOf(state.lane)), { prose: true });
 
     if (!best) {
-      $("#best").innerHTML = `<p class="caption">${state.chart.loading ? "Loading." : state.chart.failed ? "Could not load this lane." : "No kept trial on the standard setup yet."}</p>`;
+      $("#best").innerHTML = `<p class="caption">${state.chart.loading ? "Loading." : state.chart.failed ? "Could not load this lane." : "No kept graded trial yet."}</p>`;
     } else {
       const n = (isNum(summary.steps) ? summary.steps : steps.length) - 1;
-      const gain = n > 0 && steps.length ? `${n} ${n === 1 ? "improvement" : "improvements"}, ${fmt.times(best.soft_min_eff / steps[0].soft_min_eff)} the first score` : "The first kept trial. Nothing has beaten it yet";
+      const gain = n > 0 ? `${n} ${n === 1 ? "improvement" : "improvements"}` : "No improvement yet";
       $("#best").innerHTML =
-        `<div class="value">${fmt.eff(best.soft_min_eff)}</div>` +
+        `<div class="value">${fmt.speedup(best.speedup)}</div><div class="over">over the starting code</div>` +
         `<div class="who"><button type="button" data-node="${esc(best.id)}">${esc(best.trial_id || best.id)} by ${esc(who(best))}</button>` +
         `${best.agent_model && best.agent_model !== best.author ? `, ${esc(best.agent_model)}` : ""}<br>${esc(fmt.day(best.created_at))}. ${esc(gain)}.</div>`;
     }
@@ -124,10 +123,13 @@
     for (const p of pts) {
       const a = agents.get(who(p)) || { name: who(p), model: p.agent_model, trials: 0, best: null };
       a.trials += 1;
-      if (counts(p) && (!a.best || p.soft_min_eff > a.best.soft_min_eff)) a.best = p;
+      /* A contributor is ranked by the best trial of theirs that was the lane's best when
+         posted. A result inside the 5% margin of the best is not one, so no contributor can
+         show a number above the lane's best. */
+      if (p.step && (!a.best || p.speedup > a.best.speedup)) a.best = p;
       agents.set(a.name, a);
     }
-    const ranked = [...agents.values()].sort((a, b) => (b.best ? b.best.soft_min_eff : 0) - (a.best ? a.best.soft_min_eff : 0) || b.trials - a.trials);
+    const ranked = [...agents.values()].sort((a, b) => (b.best ? b.best.speedup : 0) - (a.best ? a.best.speedup : 0) || b.trials - a.trials);
     $("#ranks").innerHTML = ranked.length
       ? ranked
           .slice(0, 12)
@@ -136,7 +138,7 @@
               `<li><span class="n">${i + 1}</span><span class="name"><i style="background:${colors.get(a.name) || "var(--lane-none)"}"></i>` +
               (a.best ? `<button type="button" data-node="${esc(a.best.id)}">${esc(a.name)}</button>` : esc(a.name)) +
               `<span class="sub">${a.model && a.model !== a.name ? esc(a.model) + ", " : ""}${fmt.int(a.trials)} ${a.trials === 1 ? "trial" : "trials"}</span></span>` +
-              `<span class="val">${a.best ? fmt.eff(a.best.soft_min_eff) : "—"}</span></li>`
+              `<span class="val">${a.best ? fmt.speedup(a.best.speedup) : "—"}</span></li>`
           )
           .join("")
       : `<li><span></span><span class="sub">${state.chart.loading ? "Loading." : "Nobody has posted here yet."}</span><span></span></li>`;
@@ -149,19 +151,18 @@
     const mark = (c) => `<svg viewBox="-8 -8 16 16" aria-hidden="true"><circle r="4.4" fill="${c}"/></svg>`;
     $("#legend").innerHTML =
       [...colors].map(([name, c]) => `<span>${mark(c)}${esc(name)}</span>`).join("") +
-      (pts.length ? `<span><svg viewBox="-8 -8 16 16" aria-hidden="true"><circle r="2.6" fill="var(--ink-3)" fill-opacity="0.5"/></svg>did not beat the best</span>` : "");
+      (pts.length ? `<span><svg viewBox="-8 -8 16 16" aria-hidden="true"><circle r="2.6" fill="var(--ink-3)" fill-opacity="0.5"/></svg>not an improvement</span>` : "");
   }
 
   function renderReading() {
     const c = state.chart;
     const n = c.points.length;
     const all = (state.overview.lanes.find((l) => l.lane === state.lane) || {}).trials || 0;
-    const setup = Array.isArray(c.dims) ? ` scored on ${c.dims.join(" and ")} dimensions` : "";
     const parts = [];
     if (c.failed) parts.push("Could not load every trial of this lane. Reload the page to try again.");
-    if (n) parts.push(`${fmt.int(n)} ${n === 1 ? "trial" : "trials"}${setup}.`);
-    if (!c.loading && !c.failed && all > n) parts.push(`${fmt.int(all - n)} more used other settings and are in the list below.`);
-    if (n) parts.push("Efficiency is accuracy per unit of cost, and the weakest of six classes of test target dominates it. Higher is better, with no upper limit. A score usually comes from two repeats and can move by a third between seeds.");
+    if (n) parts.push(`${fmt.int(n)} ${n === 1 ? "trial" : "trials"}.`);
+    if (n) parts.push("Speed-up is a sampler's efficiency divided by that of the lane's starting code, scored on eight repeats with fixed seeds. A difference under 5% is noise.");
+    if (!c.loading && !c.failed && all > n) parts.push(`${fmt.int(all - n)} more ${all - n === 1 ? "was" : "were"} not graded and ${all - n === 1 ? "is" : "are"} in the list below.`);
     $("#reading").textContent = parts.join(" ");
   }
 
@@ -169,17 +170,17 @@
 
   /* 1-2-5 ticks, or a finer set when the range is so narrow that those give fewer than three. */
   function logTicks(lo, hi) {
-    for (const steps of [[1, 2, 5], [1, 1.5, 2, 3, 4, 5, 7]]) {
+    for (const steps of [[1, 2, 5], [1, 1.5, 2, 3, 5, 7], [1, 1.1, 1.2, 1.3, 1.5, 1.7, 2, 2.5, 3, 4, 5, 6, 7, 8, 9]]) {
       const out = [];
       for (let k = Math.floor(Math.log10(lo)); k <= Math.ceil(Math.log10(hi)); k += 1) {
         for (const m of steps) {
-          const v = m * 10 ** k;
+          const v = Number((m * 10 ** k).toPrecision(6));
           if (v >= lo && v <= hi) out.push(v);
         }
       }
       if (out.length >= 3) return out;
     }
-    return [lo, hi];
+    return [lo, hi].map((v) => Number(v.toPrecision(2)));
   }
 
   function renderPlot(width) {
@@ -201,22 +202,23 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     state.geom = null;
     if (!pts.length) {
-      el.appendChild(svg("text", { x: W / 2, y: H / 2, "text-anchor": "middle" }, c.loading ? "Loading trials." : c.failed ? "Could not load this lane." : "No trial on the standard setup yet."));
+      el.appendChild(svg("text", { x: W / 2, y: H / 2, "text-anchor": "middle" }, c.loading ? "Loading trials." : c.failed ? "Could not load this lane." : "No graded trial yet."));
       return;
     }
 
     const pad = { l: 64, r: W < 620 ? 58 : 72, t: 24, b: 40 };
     const steps = pts.filter((p) => p.step);
-    /* Lowest and highest score, found in a loop: a lane can hold more points than a call can take as arguments. */
+    /* Lowest and highest speed-up, found in a loop: a lane can hold more points than a call can take as arguments. */
     let low = Infinity;
     let high = 1e-9;
     for (const p of pts) {
       if (!scored(p)) continue;
-      if (p.soft_min_eff < low) low = p.soft_min_eff;
-      if (p.soft_min_eff > high) high = p.soft_min_eff;
+      if (p.speedup < low) low = p.speedup;
+      if (p.speedup > high) high = p.speedup;
     }
-    const best = steps.length ? steps[steps.length - 1].soft_min_eff : high;
-    const first = steps.length ? steps[0].soft_min_eff : best;
+    if (low === Infinity) low = high = 1; // every trial failed its checks
+    const best = steps.length ? steps[steps.length - 1].speedup : high;
+    const first = steps.length ? steps[0].speedup : best;
     /* The axis follows the line: a trial far below the start or far above the best sits at the edge. */
     const lo = Math.max(Math.min(low, first), first / 8) / 1.2;
     const hi = Math.min(Math.max(high, best), best * 3) * 1.25;
@@ -228,16 +230,22 @@
     };
     const floor = H - pad.b - 4; // trials with no score sit on this row
 
+    /* 1.0×, 1.5×, 2×: one decimal below 2, none above for whole numbers. */
+    const tick = (v) => (v < 2 && Number.isInteger(v) ? v.toFixed(1) : String(v)) + "×";
     for (const v of logTicks(lo, hi)) {
       el.appendChild(svg("line", { class: "grid", x1: pad.l, x2: W - pad.r, y1: sy(v), y2: sy(v) }));
-      el.appendChild(svg("text", { x: pad.l - 8, y: sy(v) + 4, "text-anchor": "end" }, fmt.eff(v)));
+      el.appendChild(svg("text", { x: pad.l - 8, y: sy(v) + 4, "text-anchor": "end" }, tick(v)));
+    }
+    if (lo <= 1 && hi >= 1) {
+      el.appendChild(svg("line", { class: "ref", x1: pad.l, x2: W - pad.r, y1: sy(1), y2: sy(1) }));
+      el.appendChild(svg("text", { class: "ref-label", x: W - pad.r - 6, y: sy(1) - 6, "text-anchor": "end" }, "the starting code"));
     }
     el.appendChild(svg("line", { class: "axis", x1: pad.l, x2: W - pad.r, y1: H - pad.b, y2: H - pad.b }));
     const want = n / (W < 620 ? 4 : 8);
     const every = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000].find((v) => v >= want) || 100000;
     for (let i = 0; i < n; i += every) el.appendChild(svg("text", { x: sx(i), y: H - pad.b + 17, "text-anchor": "middle" }, "#" + i));
     el.appendChild(svg("text", { class: "axis-title", x: pad.l, y: H - 6 }, "Trial, in the order posted"));
-    el.appendChild(svg("text", { class: "axis-title", x: 0, y: 12 }, "Efficiency, log scale"));
+    el.appendChild(svg("text", { class: "axis-title", x: 0, y: 12 }, "Speed-up over the starting code, log scale"));
 
     const colors = agentColors(pts);
     const picked = state.agent;
@@ -258,7 +266,7 @@
         const p = pts[i];
         if (p.step || !keep(p) || !scored(p)) continue;
         const x = sx(i);
-        const y = sy(p.soft_min_eff);
+        const y = sy(p.speedup);
         ctx.moveTo(x + r, y);
         ctx.arc(x, y, r, 0, 2 * Math.PI);
       }
@@ -281,12 +289,12 @@
       let d = "";
       steps.forEach((p, k) => {
         const x = sx(idx.get(p.id));
-        const y = sy(p.soft_min_eff);
+        const y = sy(p.speedup);
         d += k ? `H${x.toFixed(1)}V${y.toFixed(1)}` : `M${x.toFixed(1)} ${y.toFixed(1)}`;
       });
       d += `H${(W - pad.r).toFixed(1)}`;
       el.appendChild(svg("path", { d, fill: "none", stroke: "var(--ink)", "stroke-width": 1.4, "stroke-opacity": 0.72, "stroke-linejoin": "round" }));
-      el.appendChild(svg("text", { class: "end", x: W - pad.r + 8, y: sy(best) + 4 }, fmt.eff(best)));
+      el.appendChild(svg("text", { class: "end", x: W - pad.r + 8, y: sy(best) + 4 }, fmt.speedup(best)));
 
       const angle = -32;
       const rad = (Math.abs(angle) * Math.PI) / 180;
@@ -294,10 +302,10 @@
       steps.forEach((p, k) => {
         const i = idx.get(p.id);
         const x = sx(i);
-        const y = sy(p.soft_min_eff);
+        const y = sy(p.speedup);
         const color = colors.get(who(p)) || "var(--lane-none)";
         const faded = picked && who(p) !== picked;
-        const g = svg("g", { class: "dot", "data-i": i, "data-node": p.id, tabindex: 0, role: "button", "aria-label": `${p.trial_id || p.id} by ${who(p)}: efficiency ${fmt.eff(p.soft_min_eff)}. ${clip(headline(p), 120)}` });
+        const g = svg("g", { class: "dot", "data-i": i, "data-node": p.id, tabindex: 0, role: "button", "aria-label": `${p.trial_id || p.id} by ${who(p)}: speed-up ${fmt.speedup(p.speedup)}. ${clip(headline(p), 120)}` });
         g.appendChild(svg("circle", { cx: x, cy: y, r: 11, fill: color, "fill-opacity": faded ? 0.05 : 0.16 }));
         g.appendChild(svg("circle", { class: "mark", cx: x, cy: y, r: 5, fill: color, "fill-opacity": faded ? 0.3 : 1, stroke: "var(--paper)", "stroke-width": 1 }));
         el.appendChild(g);
@@ -315,7 +323,7 @@
   function pointTip(p) {
     return (
       `<b>${esc(p.trial_id || p.id)}</b> · ${esc(decision(p).label)} · ${esc(who(p))}<br>` +
-      `<span class="k">Efficiency</span> ${scored(p) ? fmt.eff(p.soft_min_eff) : "no score"}${p.step ? " · best when posted" : ""}<br>` +
+      `<span class="k">Speed-up</span> ${scored(p) ? fmt.speedup(p.speedup) : "none, it failed a check"}${p.step ? " · best when posted" : ""}<br>` +
       esc(clip(headline(p), 150))
     );
   }
@@ -338,7 +346,7 @@
       const p = pts[i];
       if (!p || p.step) continue;
       const dx = g.sx(i) - x;
-      const dy = (scored(p) ? g.sy(p.soft_min_eff) : g.floor - 3) - y;
+      const dy = (scored(p) ? g.sy(p.speedup) : g.floor - 3) - y;
       if (dx * dx + dy * dy < nearest) {
         nearest = dx * dx + dy * dy;
         found = i;
@@ -444,14 +452,14 @@
       return;
     }
     $("#list").innerHTML =
-      "<thead><tr><th>Lane</th><th>Trial</th><th>By</th><th>Outcome</th><th class='num'>Efficiency</th><th>Hypothesis</th><th>Posted</th></tr></thead><tbody>" +
+      "<thead><tr><th>Lane</th><th>Trial</th><th>By</th><th>Outcome</th><th class='num'>Speed-up</th><th>Hypothesis</th><th>Posted</th></tr></thead><tbody>" +
       l.rows
         .map(
           (r) =>
             `<tr class="clickable${r.id === state.selected ? " is-selected" : ""}" data-node="${esc(r.id)}" tabindex="0"><td>${apin.laneTag(r.lane)}</td>` +
             `<td><code>${esc(r.run_id)}</code> ${esc(r.trial_id || "")}</td><td>${byline(r)}</td>` +
             `<td>${r.frontier_step ? '<span class="mark-step" title="The best in its lane when it was posted"></span>' : ""}${apin.decisionMark(r.decision, r.lane)}</td>` +
-            `<td class="num">${fmt.eff(r.soft_min_eff)}</td><td class="wrap-cell">${esc(clip(headline(r), 200))}</td><td>${esc(fmt.day(r.created_at))}</td></tr>`
+            `<td class="num">${fmt.speedup(r.speedup)}</td><td class="wrap-cell">${esc(clip(headline(r), 200))}</td><td>${esc(fmt.day(r.created_at))}</td></tr>`
         )
         .join("") +
       "</tbody>";
@@ -476,8 +484,9 @@
     const m = n.metrics || {};
     const pair = (k, v) => `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>`;
     const facts = [
+      pair("Speed-up over the starting code", fmt.speedup(n.speedup)),
       pair("Efficiency", fmt.eff(n.soft_min_eff)),
-      pair("Against the version before", fmt.times(n.ratio_vs_incumbent, 3)),
+      pair("Against the best of its run", fmt.times(n.ratio_vs_incumbent, 3)),
       pair("Short budget", fmt.eff(n.short_horizon_eff)),
       pair("Long budget", fmt.eff(n.long_horizon_eff)),
       pair("Real Stan models passed", n.real_stan_total > 0 ? `${n.real_stan_passed} of ${n.real_stan_total}` : "not run"),
@@ -508,7 +517,7 @@
       body:
         `<div>${apin.decisionMark(n.decision, n.lane)} &nbsp; ${status(st.tone, st.label)}` +
         `<p class="caption" style="margin-top:6px">${esc(d.note || "")}. ${esc(st.note)}${n.state_reason ? " Reason given: " + esc(n.state_reason) : ""}` +
-        `${n.frontier_step ? " It was the best in its lane when it was posted." : n.standard === false ? " It was scored on other settings than the lane's standard, so it is not on the chart." : ""}</p></div>` +
+        `${n.frontier_step ? " It was the best in its lane when it was posted." : n.standard === false ? " It was not graded, so it is not on the chart." : ""}</p></div>` +
         `<div><h4>Hypothesis</h4><p class="quote">${esc(n.hypothesis || "No hypothesis was recorded for this trial.")}</p></div>` +
         `<div class="kv">${facts.join("")}</div>` +
         (refs ? `<div><h4>Technique cards cited</h4><div class="chips">${refs}</div></div>` : "") +

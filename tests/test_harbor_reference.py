@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from harness import autoresearch
+from harness import grade
 from harness.models import ROOT
 
 TASKS = ROOT / "harbor" / "tasks"
@@ -226,7 +226,7 @@ def test_reference_passes_tier0(lane):
     verify = _load(ROOT / "harbor" / "verify.py", "apin_harbor_verify_t0")
     path = TASKS / REFERENCE_TASKS[lane] / "tests" / "reference.py"
     with tempfile.TemporaryDirectory() as d:
-        ok, info = autoresearch._eval_tier0(path, seed=verify.HIDDEN_VERIFIER_SEED, work_dir=Path(d), lane=lane)
+        ok, info = grade.eval_tier0(path, seed=verify.HIDDEN_VERIFIER_SEED, work_dir=Path(d), lane=lane)
     assert ok, info
 
 
@@ -248,7 +248,7 @@ def test_reference_passes_tier1_live_on_the_verifier_seeds():
     verify = _load(ROOT / "harbor" / "verify.py", "apin_harbor_verify_live")
     tests = TASKS / REFERENCE_TASKS["A2"] / "tests"
     with tempfile.TemporaryDirectory() as d:
-        live = verify.score_file(tests / "reference.py", "A2", verify.scoring_config(), Path(d))
+        live = grade.score_file(tests / "reference.py", "A2", verify.scoring_config(), Path(d))
     assert live["valid"], live.get("error")
     frozen = json.loads((tests / "frozen_scores.json").read_text())["scores"]["reference"]
     assert live["soft_min_eff"] == pytest.approx(frozen["soft_min_eff"], rel=1e-9)

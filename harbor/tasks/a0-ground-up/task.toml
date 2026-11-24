@@ -8,7 +8,7 @@ author_name = "Numenomics/apin"
 category = "optimize"
 lane = "A0"
 difficulty = "hard"
-description = "Build an adjusted posterior sampler from a 43-LOC isotropic RWM stub"
+description = "Build a fast sampler from a 43-line random-walk Metropolis stub"
 tags = ["mcmc", "optimization", "bayesian", "apin", "A0"]
 
 [agent]

@@ -12,12 +12,12 @@
   ];
   const BENCH_TASK = { A0: "a0-ground-up", A1: "a1-preconditioning", A2: "a2-funnel-dynamics", A3: "a3-integrator-trajectory", A4: "a4-nonlinear-transport" };
 
-  /* The lane's best trial on its standard setup, once the Flywheel has answered. */
+  /* The lane's best graded trial, once the Flywheel has answered. */
   function standing(summary) {
     if (!summary) return "";
     const t = summary.frontier;
     if (!t) return summary.trials ? "" : "<div><dt>Best so far</dt><dd>No trials posted yet.</dd></div>";
-    return `<div><dt>Best so far</dt><dd><a href="/autoresearch/#trial=${encodeURIComponent(t.id)}">${fmt.eff(t.soft_min_eff)} by ${esc(t.author || t.agent_model || "unknown")}</a>, from ${fmt.int(summary.trials)} trials</dd></div>`;
+    return `<div><dt>Best so far</dt><dd><a href="/autoresearch/#trial=${encodeURIComponent(t.id)}">${fmt.speedup(t.speedup)} by ${esc(t.author || t.agent_model || "unknown")}</a>, from ${fmt.int(summary.trials)} trials</dd></div>`;
   }
 
   function render(byLane) {

@@ -14,7 +14,7 @@ Design and evolve the **integrator, momentum-refreshment law, and trajectory-ter
 1. **Edit ONLY `autoresearch/lanes/A3/submission.py`** (and append to `autoresearch/lanes/A3/NEGATIVE_MEMORY.md` only for $\ge 2$-trial clean falsifications). Never modify `harness/`, `data/`, `models/`, or any other lane.
 2. **Respect `autoresearch/RULINGS.md` strictly:** `requires = ["grad"]` only; no unpriced `hvp`/`hess`, no inspecting `oracle` internals, no target fingerprinting.
 3. **Exact-draw invariance + `aux_spec`:** If you carry persistent momentum (`"gaussian"`), unit-sphere microcanonical velocity (`"unit_sphere"`), or a direction/parity bit (`"rademacher"`), you MUST declare its exact stationary law in `aux_spec` and preserve $\pi \otimes \text{aux\_law}$ (including momentum flip on rejection for GHMC/MAMS so detailed balance holds!).
-4. **Simplicity regularizer:** Within $\pm 2\%$ soft-min ratio, fewer LOC, fewer magic constants, or $\ge 15\%$ lower `overhead_ratio` wins (`keep_simpler`).
+4. **Simplicity rule:** A candidate within 2% of the run's best speed-up is kept as `keep_simpler` when it has fewer lines, fewer magic constants or at least 15% lower `overhead_ratio` than the incumbent.
 5. **Never stop early** while trial/wall-clock budget remains.
 
 ## 3. Research Loop & Priority Hypotheses
@@ -28,9 +28,9 @@ Design and evolve the **integrator, momentum-refreshment law, and trajectory-ter
    - **Surrogate-trajectory HMC (`codex/cards/surrogate-and-ess.md`):** Use a frozen quadratic/low-rank surrogate learned during `adapt()` for inner leapfrog proposals with exact target MH correction at the endpoints.
 3. **Evaluate:**
    ```bash
-   apin autoresearch eval --lane A3 --run-id <run_id> --repeats 2 --codex-ref mams-microcanonical --hypothesis "..."
+   apin autoresearch eval --lane A3 --run-id <run_id> --codex-ref mams-microcanonical --hypothesis "..."
    ```
-   Use `--dry-run` first to lint/check duplicates without burning a ledger row. On discard, restore from `autoresearch/lanes/A3/runs/<run_id>/incumbent.py` (do **not** run `git checkout`/`git reset` while other agents share the repo).
+   It prints `METRIC speedup=<x>`, the speed-up over the lane's starting code (`start.py`) on the public seeds, and keeps the change when it beats the run's best by at least 5%. Use `--dry-run` first to lint/check duplicates without burning a ledger row. On discard, restore from `autoresearch/lanes/A3/runs/<run_id>/incumbent.py` (do **not** run `git checkout`/`git reset` while other agents share the repo).
 4. **Real-posterior verification:**
    ```bash
    apin run logdensity --label a3_cand --opt sampler=autoresearch/lanes/A3/submission.py --models blr,eight_schools_noncentered,gp_regr,garch11,eight_schools_centered --reps 3

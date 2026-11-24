@@ -9,7 +9,7 @@
   apin.mount("benchmark");
 
   $("#cmd-run").innerHTML = cmd(
-    "uv tool install harbor==0.27.0\nuv run python scripts/build_harbor_base.py --tasks\nharbor run -p harbor/tasks -x 's3-*' -a claude-code -m anthropic/claude-sonnet-4-5 \\\n  --job-name bench-v0.2.0-claude-sonnet-4-5"
+    "uv tool install harbor==0.27.0\nuv run python scripts/build_harbor_base.py --tasks\nharbor run -p harbor/tasks -a claude-code -m anthropic/claude-sonnet-4-5 \\\n  --job-name bench-v0.3.0-claude-sonnet-4-5"
   );
   $("#cmd-verify").innerHTML = cmd("uv run python harbor/verify.py optimize --lane A1 \\\n  --submission path/to/submission.py");
   $("#cmd-collect").innerHTML = cmd("uv run python scripts/collect_harbor_results.py --jobs jobs/");

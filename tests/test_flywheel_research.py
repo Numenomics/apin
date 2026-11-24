@@ -376,7 +376,8 @@ def test_cli_verify_next_leases_reruns_and_posts(
     fake.on("POST", "/api/verify/claim", {
         "ok": True,
         "lease": {"node_id": node_id, "lane": "A1", "lease_token": "vlease_abc", "lease_expires_at": "2026-11-23T02:00:00Z"},
-        "node": {"id": node_id, "lane": "A1", "soft_min_eff": 0.002, "dims": [6, 20]},
+        "node": {"id": node_id, "lane": "A1", "soft_min_eff": 0.002, "dims": [6, 20],
+                 "speedup": 1.31, "yardstick": "A1-0123456789ab"},
     })
     fake.on("GET", f"/api/nodes/{node_id}/source", _source_payload(node_id, "def adapt(): pass\n"))
     fake.on("POST", f"/api/verify/{node_id}/result", lambda c: {"ok": True, "result": "pass" if c["body"]["passed"] else "fail"})
@@ -384,18 +385,26 @@ def test_cli_verify_next_leases_reruns_and_posts(
 
     def fake_rerun(path, lane, **kw):
         seen.update(path=path, lane=lane, **kw)
-        return {"passed": True, "metrics": {"soft_min_eff": 0.0019, "seed": 31}, "reason": "reproduced"}
+        return {"comparable": True, "passed": True, "metrics": {"speedup": 1.31}, "reason": "reproduced"}
 
     monkeypatch.setattr(autoresearch, "rerun_for_verification", fake_rerun)
-    assert cli.main(["autoresearch", "verify-next", "--lane", "A1", "--repeats", "1"]) == 0
+    assert cli.main(["autoresearch", "verify-next", "--lane", "A1"]) == 0
     assert fake.calls[0]["body"] == {"lane": "A1", "ttl_minutes": 120}
     assert seen["path"].read_text() == "def adapt(): pass\n"
     assert seen["path"].parent == tmp_path / "autoresearch" / "lanes" / "A1" / "runs" / "verify" / "A1_run_T0004"
-    assert seen["claimed_soft_min"] == 0.002 and seen["dims"] == (6, 20) and seen["repeats"] == 1
+    assert seen["claimed_speedup"] == 1.31 and seen["claimed_yardstick"] == "A1-0123456789ab"
     result = fake.calls[-1]
     assert result["body"] == {"lease_token": "vlease_abc", "passed": True,
-                              "metrics": {"soft_min_eff": 0.0019, "seed": 31}, "note": "reproduced"}
+                              "metrics": {"speedup": 1.31}, "note": "reproduced"}
     assert "replicated" in capsys.readouterr().out
+
+    # A trial graded against another yardstick is not evidence either way: nothing is posted.
+    monkeypatch.setattr(autoresearch, "rerun_for_verification", lambda *a, **k: {
+        "comparable": False, "passed": False, "metrics": {}, "reason": "not comparable: other yardstick"})
+    n_calls = len(fake.calls)
+    assert cli.main(["autoresearch", "verify-next"]) == 1
+    assert all(c["path"] != f"/api/verify/{node_id}/result" for c in fake.calls[n_calls:])
+    assert "not comparable" in capsys.readouterr().err
 
     # A crash in the evaluator posts nothing.
     monkeypatch.setattr(autoresearch, "rerun_for_verification", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))

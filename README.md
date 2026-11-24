@@ -22,11 +22,10 @@ uv sync && uv run apin fetch-data
 uv run apin autoresearch brief --lane A1
 
 # score the unmodified file once, so you have something to beat
-uv run apin autoresearch eval --lane A1 --run-id <handle>_a1 --dims 6,20 --repeats 2 \
-  --hypothesis "baseline: unmodified local incumbent"
+uv run apin autoresearch eval --lane A1 --run-id <handle>_a1 --hypothesis "baseline: unmodified local incumbent"
 ```
 
-Then edit `autoresearch/lanes/A1/submission.py`, write a one-sentence hypothesis stating what you expect, and run the `eval` command again with that sentence in `--hypothesis`. The harness reports whether it kept the change.
+Then edit `autoresearch/lanes/A1/submission.py`, write a one-sentence hypothesis stating what you expect, and run the `eval` command again with that sentence in `--hypothesis`. It prints your speed-up over the lane's starting code and says whether it kept the change. A change is kept when it beats the best version of your run by at least 5%.
 
 ## What this is
 
@@ -75,8 +74,10 @@ Each lane has a brief in `autoresearch/lanes/<LANE>/program.md` and a list of re
 | Word | Meaning |
 |---|---|
 | **Lane** | Where you work: one editable file (a declared set of source paths in `S2`) and one fixed judge. `A0` to `A4`, `S2` and `S3`. |
-| **Trial** | One change to a lane's file with a hypothesis written first. Kept if it beats the version before it. |
-| **Run** | The trials you make under one `--run-id`. Efficiencies are comparable between trials scored on the same settings (`--dims 6,20 --repeats 2`). |
+| **Trial** | One change to a lane's file with a hypothesis written first. Kept if its speed-up beats the best of its run by at least 5%. |
+| **Run** | The trials you make under one `--run-id`. |
+| **Speed-up** | A trial's efficiency divided by the frozen efficiency of the lane's starting code (`start.py`), both scored by the same grader on the same seeds. It reads as "times the starting code" and compares across runs and agents. |
+| **Yardstick** | The frozen score of a lane's starting code (`autoresearch/lanes/<LANE>/yardstick.json`). Every speed-up names the yardstick it divides by. |
 | **Track** | Where a finished sampler is ranked. `L1` to `L5`. Tracks are never pooled. |
 | **Task** | One of the five problems in the agent benchmark. Each mirrors one of the lanes `A0` to `A4`. |
 | **Record** | A result a maintainer has reproduced, committed under `records/`. |
@@ -87,7 +88,7 @@ Each lane has a brief in `autoresearch/lanes/<LANE>/program.md` and a list of re
 Every lane, track and benchmark task runs these four checks in order.
 
 1. **Valid kernel.** The harness lints the code, replays it bit for bit in a clean process, and tests invariance on targets with exact draws. A kernel that does not preserve the target distribution scores zero.
-2. **Efficiency on every shape.** The judge tests fresh Gaussians, funnels, bananas, Rosenbrock ridges, mixtures and heavy tails in 6 and 20 dimensions, at a short and a long budget. The score is a soft minimum across shape classes, so the worst class sets it.
+2. **Efficiency on every shape.** The grader (`harness/grade.py`) tests Gaussians, funnels, bananas, Rosenbrock ridges, mixtures and heavy tails in 6 and 20 dimensions, at a short and a long budget, on 8 seeded suites. The score is a soft minimum across shape classes, so the worst class sets it. Lanes report it as a speed-up over the starting code on public seeds. The benchmark runs the same grader on hidden seeds.
 3. **Accuracy on real posteriors.** On Stan models from [posteriordb](https://github.com/stan-dev/posteriordb), every checked quantity must lie within 0.1 posterior standard deviations of the reference at 99.5% confidence.
 4. **Independent reproduction.** A maintainer reruns the submission on new seeds before marking it verified.
 
@@ -112,7 +113,7 @@ Each track ranks finished samplers on a different criterion.
 ```bash
 uv tool install harbor==0.27.0
 uv run python scripts/build_harbor_base.py --tasks
-harbor run -p harbor/tasks -x 's3-*' -a claude-code -m anthropic/claude-sonnet-4-5 --job-name bench-v0.2.0-claude-sonnet-4-5
+harbor run -p harbor/tasks -a claude-code -m anthropic/claude-sonnet-4-5 --job-name bench-v0.3.0-claude-sonnet-4-5
 ```
 
 **Score your own sampler.** Write `adapt()` and `transition()` in one Python file. `examples/samplers/hmc.py` is a working example.

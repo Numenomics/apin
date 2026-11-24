@@ -65,13 +65,13 @@ npx wrangler d1 execute apin-flywheel --remote --yes --file=./schema.sql   # bas
 npx wrangler d1 migrations apply apin-flywheel --remote                  # applies flywheel/migrations/*.sql once each
 npx wrangler deploy
 ```
-- **The deploy that applies `0004_frontier_steps.sql` ends with its backfill.** The old Worker serves requests until `wrangler deploy` finishes, and the trials it writes have neither step flag. Apply the migration, deploy, and then run the `BACKFILL` block once: `python3 seed_from_apin.py --backfill-sql /tmp/backfill-0004.sql`, then `npx wrangler d1 execute apin-flywheel --remote --yes --file=/tmp/backfill-0004.sql`. It recomputes the flags and the lane counters from the rows, so it is safe to run again.
-- **Put schema changes in a new numbered file in `flywheel/migrations/`.** Never edit `schema.sql`, which is the base schema every migration builds on. Wrangler records applied files in the `d1_migrations` table, so `migrations apply` runs only new ones. Run `npx wrangler d1 migrations list apin-flywheel --remote` to see pending files. Apply a migration before deploying the Worker that needs it: from `0001_research_objects.sql` onwards, the Worker reads `nodes.state`, `sources`, `node_parents`, `notes` and `verify_queue`, from `0002_bounded_reads.sql` onwards `run_stats` and `note_links`, and from `0004_frontier_steps.sql` onwards `nodes.standard`, `nodes.frontier_step` and the step counters in `lane_stats`. Apply migrations before loading `seed.sql` as well.
+- **Deploy right after applying `0005_speedup.sql`.** It drops `nodes.standard`, which the Worker before it reads and writes, so trial posts and lane charts fail until `wrangler deploy` finishes. Trials posted before it have no `yardstick`. They stay in the lists, but the charts start empty and the lanes have no steps until graded trials arrive.
+- **Put schema changes in a new numbered file in `flywheel/migrations/`.** Never edit `schema.sql`, which is the base schema every migration builds on. Wrangler records applied files in the `d1_migrations` table, so `migrations apply` runs only new ones. Run `npx wrangler d1 migrations list apin-flywheel --remote` to see pending files. Apply a migration before deploying the Worker that needs it: from `0001_research_objects.sql` onwards, the Worker reads `nodes.state`, `sources`, `node_parents`, `notes` and `verify_queue`, from `0002_bounded_reads.sql` onwards `run_stats` and `note_links`, from `0004_frontier_steps.sql` onwards `nodes.frontier_step` and the step counters in `lane_stats`, and from `0005_speedup.sql` onwards `nodes.speedup` and `nodes.yardstick`. Apply migrations before loading `seed.sql` as well.
 - **Do not add virtual tables (FTS5).** D1 cannot export a database that has them, and the export above is the backup.
 - **Abuse limits** (registration caps, provisional write and trial caps) are listed in the API reference in `flywheel/README.md`. Change one with `npx wrangler secret put FLYWHEEL_<NAME>`. `FLYWHEEL_REGISTRATIONS_PER_DAY=0` closes open registration. Set `FLYWHEEL_IP_SALT` once to any random string.
 - **Publishing a benchmark sweep:** run `uv run python scripts/collect_harbor_results.py --jobs jobs/` (adds the new runs to `flywheel/public/data/benchmark.json` and keeps earlier releases), commit it, then deploy.
-- **Reads are bounded. Keep them that way.** Since migration `0002_bounded_reads.sql`, no read loads the whole trial table into the Worker. The site uses `/api/overview`, `/api/lanes/:lane/chart`, `/api/nodes`, `/api/nodes/:id`, `/api/notes` and `/api/search`, each measured at about 0.3 to 2 ms of JavaScript whether the Flywheel holds 1,000 or 20,000 trials. `/api/dag` is kept for old clients and capped at the newest 300 trials (about 6 to 8 ms). Run `node --test tests/scale.test.mjs` after changing a read. It fails when a read's cost grows with the table. Counts come from `run_stats`, which triggers on `nodes` keep current. Never write trials with `INSERT OR REPLACE`: it deletes rows without firing the delete trigger and double-counts. If the counts ever drift, rebuild them: `npx wrangler d1 execute apin-flywheel --remote --command "DELETE FROM run_stats"`, then run the `REBUILD` statement at the end of `migrations/0002_bounded_reads.sql` the same way. If the frontier step flags or their counters drift, run the `BACKFILL` block of `migrations/0004_frontier_steps.sql` the same way (`seed_from_apin.py --backfill-sql` writes it to a file).
-- **Loading local trials:** `.venv/bin/python flywheel/seed_from_apin.py` writes `flywheel/seed.sql` from the local ledgers. The file ends with the `BACKFILL` block of migration 0004, so the step flags are correct once it has run.
+- **Reads are bounded. Keep them that way.** Since migration `0002_bounded_reads.sql`, no read loads the whole trial table into the Worker. The site uses `/api/overview`, `/api/lanes/:lane/chart`, `/api/nodes`, `/api/nodes/:id`, `/api/notes` and `/api/search`, each measured at about 0.3 to 2 ms of JavaScript whether the Flywheel holds 1,000 or 20,000 trials. `/api/dag` is kept for old clients and capped at the newest 300 trials (about 6 to 8 ms). Run `node --test tests/scale.test.mjs` after changing a read. It fails when a read's cost grows with the table. Counts come from `run_stats`, which triggers on `nodes` keep current. Never write trials with `INSERT OR REPLACE`: it deletes rows without firing the delete trigger and double-counts. If the counts ever drift, rebuild them: `npx wrangler d1 execute apin-flywheel --remote --command "DELETE FROM run_stats"`, then run the `REBUILD` statement at the end of `migrations/0002_bounded_reads.sql` the same way. If the frontier step flags or their counters drift, run the `BACKFILL` block of `migrations/0005_speedup.sql` the same way (`seed_from_apin.py --backfill-sql` writes it to a file).
+- **Loading local trials:** `.venv/bin/python flywheel/seed_from_apin.py` writes `flywheel/seed.sql` from the local ledgers. The file ends with the `BACKFILL` block of migration 0005, so the step flags are correct once it has run.
 - **Lane and track descriptions** on the site live in one place, `flywheel/public/assets/site.js` (`LANES`, `TRACKS`). Update them when a lane's `program.md` changes its contract.
 - **Cost ceiling:** Keep Flywheel on the Cloudflare Workers Free plan ($0/mo). The free plan enforces hard fail-closed limits (100k req/day, 5M D1 reads/day, 100k D1 writes/day, 10ms CPU/req) and cannot incur overage charges. Public `GET` routes also carry a 30-second anti-cache-bust edge cache.
 
@@ -109,20 +109,32 @@ git submodule update --init upstream/math upstream/stan
 4. Record measurements in `results/records/`, push the fork branch (or tag `apin/<name>-<label>` if detached), update the submodule pin and `upstream/STATUS.md`.
 5. Only the owner submits upstream PRs to `stan-dev`, `flatironinstitute`, `pymc-devs` or `cmdstanr`. Agents never do.
 
-## 5. Running a Benchmark Sweep (Harbor, release `bench-v0.2.0`)
+## 5. Running a Benchmark Sweep (Harbor, release `bench-v0.3.0`)
 
 The tasks need Harbor 0.27.0 or later and a Docker host where Harbor's egress-control sidecar works (it needs nftables, without it Harbor fails the trial instead of running it unrestricted). [harbor/README.md](harbor/README.md) explains what the container holds and the network policy of each phase.
 
 ```bash
 git pull                                               # a plain checkout is enough; no submodules
 uv tool install harbor==0.27.0
-uv run python scripts/build_harbor_base.py --tasks     # sealed base + the 8 task images
+uv run python scripts/build_harbor_base.py --tasks     # sealed base + the 5 task images
 uv run pytest -q tests/test_harbor_seal.py             # add -m slow to inspect the built images
 eval "$(grep -E '^export ZAI_API_KEY=' ~/.bashrc)"     # load the key without printing it
-harbor run -p harbor/tasks -x 's3-*' -a opencode-v2 -m zai-coding-plan/glm-5.3-flash \
+harbor run -p harbor/tasks -a opencode-v2 -m zai-coding-plan/glm-5.3-flash \
   --ak reasoning_effort=high --api-key-name ZAI_API_KEY --allow-agent-host api.z.ai \
-  --job-name bench-v0.2.0-glm-5.3-flash-high     # the release prefix is how the collector tags trials
-uv run python scripts/collect_harbor_results.py --release bench-v0.2.0 --jobs jobs/
+  --job-name bench-v0.3.0-glm-5.3-flash-high     # the release prefix is how the collector tags trials
+uv run python scripts/collect_harbor_results.py --jobs jobs/
 ```
 
-The agent may run for 24 h per task, so start sweeps in the background. Rebuild the base image after any change to `harness/`, the lane documents or a task's `baseline.py`. A stale image still runs but measures the old code. `-x 's3-*'` leaves out the bug-fix tasks of lane S3, which the leaderboard does not count.
+The agent may run for 24 h per task, so start sweeps in the background. Rebuild the base image after any change to `harness/`, the lane documents, a lane's `start.py` or its `yardstick.json`. A stale image still runs but measures the old code.
+
+### Refreezing the scores
+
+Every speed-up divides by a frozen score: each lane's public yardstick (`autoresearch/lanes/<LANE>/yardstick.json`) and the benchmark's hidden denominators (`harbor/tasks/<task>/tests/frozen_scores.json`). Refreeze both after a change to a module in the judge digest (`harness/judge.py::judge_digest`), to a lane's `start.py`, to a reference, to a seed, or to the NumPy or SciPy version in `uv.lock` (the digest does not cover the lock file, so nothing reports that case):
+
+```bash
+uv run python scripts/sync_harbor_tests.py              # copy start.py, verify.py and the references into harbor/tasks/
+uv run python scripts/freeze_harbor_references.py --workers 4
+uv run pytest -q tests/test_harbor_scoring.py           # fails while any frozen score is stale
+```
+
+The freeze copies each lane's `submission.py` to `tests/frontier.py` first (`--keep-frontier` skips that). `--public-only` or `--hidden-only` freezes one half. The single source of a lane's starting code is `autoresearch/lanes/<LANE>/start.py`. The sync script writes it to `environment/baseline.py` and `tests/baseline.py` of the task. A new release rotates `HIDDEN_VERIFIER_SEED` and `HIDDEN_CONFIRMATION_SEED` in `harbor/verify.py` and lists the retired ones in the comment above them.

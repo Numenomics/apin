@@ -1,7 +1,9 @@
 """The Harbor benchmark containers hold no answers and give the agent no open network.
 
-Fast tests check the staged build context (scripts/build_harbor_base.py) and the task
-files. The slow test inspects built task images; build them first with
+An agent container holds the grader with its public seeds and every lane's public yardstick, so
+the agent can measure its speed-up. It never holds the verifier, its hidden seeds or the hidden
+frozen scores. Fast tests check the staged build context (scripts/build_harbor_base.py) and the
+task files. The slow test inspects built task images. Build them first with
 `uv run python scripts/build_harbor_base.py --tasks`.
 """
 
@@ -22,15 +24,17 @@ ROOT = Path(__file__).resolve().parent.parent
 TASKS = ROOT / "harbor" / "tasks"
 TASK_NAMES = sorted(p.parent.name for p in TASKS.glob("*/task.toml"))
 
-# Paths that must never reach an agent container: evolved code, example samplers,
-# hidden rewind fixtures and reference fixes, the verifier, results, history.
+# Paths that must never reach an agent container: evolved code, example samplers, the S3
+# fixtures and reference fixes, the verifier, results, history.
 LEAK_PATHS = (
     ".git", "tests", "results", "scripts", "flywheel", "examples", "benchmarks",
     "upstream", "harbor", "runs", "build", "scores", "jobs", ".venv", ".cache",
     "autoresearch/lanes/S2", "autoresearch/lanes/S3",
     "autoresearch/task_catalog.json", "REPORT.md", "ARCHIVE.md",
 )
-LEAK_NAMES = {"runs", "archive", "incumbent.py", "__pycache__", "fixtures", ".git"}
+LEAK_NAMES = {"runs", "archive", "incumbent.py", "__pycache__", "fixtures", ".git",
+              "frozen_scores.json", "verify.py", "frontier.py"}
+LANE_FILES = {"program.md", "NEGATIVE_MEMORY.md", "start.py", "yardstick.json", "submission.py"}
 ALLOWED_TOP = {"LICENSE", "pyproject.toml", "uv.lock", "harness", "models", "data", "codex",
                "autoresearch", "Dockerfile"}
 
@@ -48,12 +52,16 @@ def _task(name: str) -> dict:
 
 
 def _optimize_baselines() -> dict[str, bytes]:
-    out = {}
-    for name in TASK_NAMES:
-        meta = _task(name)["metadata"]
-        if meta["category"] == "optimize":
-            out[meta["lane"]] = (TASKS / name / "environment" / "baseline.py").read_bytes()
-    return out
+    """Lane -> its starting code, autoresearch/lanes/<LANE>/start.py."""
+    lanes = [_task(name)["metadata"]["lane"] for name in TASK_NAMES]
+    return {lane: (ROOT / "autoresearch" / "lanes" / lane / "start.py").read_bytes() for lane in lanes}
+
+
+def _hidden_seeds() -> list[int]:
+    spec = importlib.util.spec_from_file_location("apin_harbor_verify_seal", ROOT / "harbor" / "verify.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return [mod.HIDDEN_VERIFIER_SEED, mod.HIDDEN_CONFIRMATION_SEED]
 
 
 def _task_copies(name: str) -> dict[str, bytes]:
@@ -89,6 +97,27 @@ def test_staged_context_holds_only_the_allowlist(context: Path):
         assert p.name not in LEAK_NAMES, f"leak path staged: {p.relative_to(context)}"
     lanes = {p.name for p in (context / "autoresearch" / "lanes").iterdir()}
     assert lanes == set(_optimize_baselines())
+    for lane in lanes:
+        assert {p.name for p in (context / "autoresearch" / "lanes" / lane).iterdir()} == LANE_FILES
+
+
+def test_staged_context_holds_the_public_yardstick_and_no_hidden_score(context: Path):
+    from harness import autoresearch, grade
+
+    for lane, code in _optimize_baselines().items():
+        lane_dir = context / "autoresearch" / "lanes" / lane
+        assert (lane_dir / "start.py").read_bytes() == code
+        yd = json.loads((lane_dir / "yardstick.json").read_text())
+        assert yd["config"] == grade.config() and yd["sha256"] == grade.sha256(lane_dir / "start.py")
+        assert yd == autoresearch.load_yardstick(lane)
+    # The hidden seeds appear in no staged file, so neither the verifier's configuration nor any
+    # score frozen on it can be in the image.
+    hidden = [str(s).encode() for s in _hidden_seeds()]
+    for p in context.rglob("*"):
+        if p.is_file():
+            data = p.read_bytes()
+            assert not any(h in data for h in hidden), f"hidden seed in {p.relative_to(context)}"
+    assert (context / "harness" / "grade.py").is_file()
 
 
 def test_staged_context_is_enough_to_run_the_harness(context: Path):
@@ -114,19 +143,16 @@ def test_task_image_copies_its_own_starting_code(name: str):
     copies = _task_copies(name)
     assert copies, "task image copies no starting code"
     baseline = (TASKS / name / "environment" / "baseline.py").read_bytes()
-    assert set(copies.values()) == {baseline}
-    if _task(name)["metadata"]["category"] == "rewind":
-        hidden = (TASKS / name / "tests" / "tasks.json").read_text()
-        for task in json.loads(hidden)["tasks"]:
-            assert "fixtures" not in text and task["reference_submission"] not in text
+    assert set(copies.values()) == {baseline} == {_optimize_baselines()[_task(name)["metadata"]["lane"]]}
+    assert {p.name for p in (TASKS / name / "environment").iterdir()} == {"Dockerfile", "baseline.py"}
 
 
 @pytest.mark.parametrize("name", TASK_NAMES)
 def test_task_timeouts_and_network(name: str):
     cfg = _task(name)
-    category = cfg["metadata"]["category"]
+    assert cfg["metadata"]["category"] == "optimize"
     assert cfg["agent"]["timeout_sec"] == 86400.0
-    assert cfg["verifier"]["timeout_sec"] == (7200.0 if category == "optimize" else 1800.0)
+    assert cfg["verifier"]["timeout_sec"] == 7200.0
     assert cfg["agent"]["network_mode"] == "allowlist"
     assert cfg["agent"].get("allowed_hosts", []) == []
     assert cfg["verifier"]["network_mode"] == "no-network"
@@ -159,13 +185,14 @@ for d, dirs, files in os.walk("/app"):
     if d.startswith("/app/.venv"):
         continue
     leaks += [os.path.join(d, n) for n in dirs + files
-              if n in ("runs", "archive", "incumbent.py", "fixtures", ".git")]
+              if n in ("runs", "archive", "incumbent.py", "fixtures", ".git", "frozen_scores.json", "verify.py")]
+yardsticks = sorted(d for d, _, files in os.walk("/app/autoresearch") if "yardstick.json" in files)
 subs = {}
 for d, _, files in os.walk("/app"):
     if not d.startswith("/app/.venv"):
         subs.update({os.path.join(d, f): hashlib.sha256(open(os.path.join(d, f), "rb").read()).hexdigest()
                      for f in files if f == "submission.py"})
-print(json.dumps({"leaks": leaks, "subs": subs}))
+print(json.dumps({"leaks": leaks, "subs": subs, "yardsticks": yardsticks}))
 """
 
 
@@ -189,3 +216,4 @@ def test_built_task_image_is_sealed(name: str):
     expected = {k: hashlib.sha256(v).hexdigest() for k, v in _expected_files(name).items()
                 if k.endswith("submission.py")}
     assert probe["subs"] == expected
+    assert probe["yardsticks"] == sorted(f"/app/autoresearch/lanes/{lane}" for lane in _optimize_baselines())

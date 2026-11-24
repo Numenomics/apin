@@ -1,5 +1,7 @@
-"""Scoring of the Harbor verifier (harbor/verify.py): outcome rule, frozen denominators, output
-shape, isolation of test.sh, and that every copy under harbor/tasks/*/tests/ matches its source."""
+"""The grader (harness/grade.py) and the Harbor verifier around it (harbor/verify.py): outcome
+rule, frozen denominators and yardsticks, output shape, the confirmation of statistical
+rejections, seeds, the judge digest, isolation of test.sh, and that every generated copy under
+harbor/tasks/ matches its source."""
 
 from __future__ import annotations
 
@@ -13,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from harness import judge
+from harness import autoresearch, grade, judge
 from harness.models import ROOT
 
 TASKS = ROOT / "harbor" / "tasks"
@@ -88,10 +90,25 @@ def test_failed_denominators_make_the_run_unscorable_never_1x(verify):
 def test_scoring_constants_are_named_once(verify):
     import inspect
 
-    assert inspect.signature(verify.classify).parameters["margin"].default == verify.IMPROVEMENT_MARGIN
-    assert verify.IMPROVEMENT_MARGIN > 1.0 and verify.VERIFIER_REPEATS >= 2
-    assert verify.scoring_config()["repeats"] == verify.VERIFIER_REPEATS
-    assert verify.HIDDEN_VERIFIER_SEED != 88421077  # retired with bench-v0.2.0
+    assert inspect.signature(verify.classify).parameters["margin"].default == grade.IMPROVEMENT_MARGIN
+    assert verify.IMPROVEMENT_MARGIN == grade.IMPROVEMENT_MARGIN == 1.05 and grade.REPEATS == 8
+    # The verifier is the grader at the standard configuration with the hidden seeds in place of
+    # the public ones: nothing else differs.
+    hidden, public = verify.scoring_config(), grade.config()
+    assert {k: v for k, v in hidden.items() if "seed" not in k} == {k: v for k, v in public.items() if "seed" not in k}
+    assert hidden["seed"] == verify.HIDDEN_VERIFIER_SEED and hidden["confirmation_seed"] == verify.HIDDEN_CONFIRMATION_SEED
+
+
+def test_seeds_are_rotated_and_disjoint(verify):
+    retired = {88421077, 39389868, 78210474, 43547104, 64244275, 33259997, 10459241, 28495072, 91346270}
+    seeds = [verify.HIDDEN_VERIFIER_SEED, verify.HIDDEN_CONFIRMATION_SEED,
+             grade.PUBLIC_SEED, grade.PUBLIC_CONFIRMATION_SEED]
+    assert not retired & set(seeds)
+    # A seed s uses suites seeded from s to about s + 7919 * repeats + 2,500.
+    span = 7919 * grade.REPEATS + 100_000
+    for i, a in enumerate(seeds + sorted(retired)):
+        for b in (seeds + sorted(retired))[i + 1:]:
+            assert abs(a - b) > span, (a, b)
 
 
 # ----------------------------------------------------------------- copies and frozen scores
@@ -99,7 +116,13 @@ def test_scoring_constants_are_named_once(verify):
 def test_every_copy_matches_its_canonical_source():
     sync = _load(ROOT / "scripts" / "sync_harbor_tests.py", "apin_sync_harbor_tests")
     assert sync.drifted() == [], "run: uv run python scripts/sync_harbor_tests.py"
-    assert set(sync.OPTIMIZE_TASKS) == set(_load(ROOT / "harbor" / "verify.py", "apin_v_lanes").LANE_TASKS)
+    v = _load(ROOT / "harbor" / "verify.py", "apin_v_lanes")
+    assert {k: t for k, (t, _) in sync.OPTIMIZE_TASKS.items()} == v.LANE_TASKS
+    assert sorted(v.LANE_TASKS.values()) == sorted(p.name for p in TASKS.iterdir() if (p / "task.toml").is_file())
+    for lane, task in v.LANE_TASKS.items():
+        start = (ROOT / "autoresearch" / "lanes" / lane / "start.py").read_bytes()
+        assert (TASKS / task / "environment" / "baseline.py").read_bytes() == start
+        assert (TASKS / task / "tests" / "baseline.py").read_bytes() == start
 
 
 @pytest.mark.parametrize("lane", ["A0", "A1", "A2", "A3", "A4"])
@@ -114,9 +137,19 @@ def test_frozen_scores_are_current(verify, lane):
     digest = judge.judge_digest()
     cfg = verify.scoring_config()
     for role, name in verify.DENOMINATOR_FILES.items():
-        sha = verify._sha256(tests / name)
-        assert verify._frozen_match(frozen["scores"][role], lane, role, sha, cfg, digest), (lane, role)
+        sha = grade.sha256(tests / name)
+        assert grade.frozen_match(frozen["scores"][role], lane, role, sha, cfg, digest), (lane, role)
     assert frozen["scores"]["start"]["valid"], "the starting code must pass on the verifier seeds"
+
+
+@pytest.mark.parametrize("lane", ["A0", "A1", "A2", "A3", "A4"])
+def test_yardsticks_are_current(lane):
+    """Every lane's public yardstick matches today's judge, the standard configuration and
+    start.py. Fails after a change to a module in the judge digest: rerun
+    scripts/freeze_harbor_references.py."""
+    yd = autoresearch.load_yardstick(lane)
+    assert yd["config"] == grade.config() and yd["config"]["seed"] == grade.PUBLIC_SEED
+    assert yd["sha256"] == grade.sha256(ROOT / "autoresearch" / "lanes" / lane / "start.py")
 
 
 def test_test_sh_grades_in_isolated_mode_from_the_tests_dir(verify):
@@ -130,6 +163,24 @@ def test_test_sh_grades_in_isolated_mode_from_the_tests_dir(verify):
             assert f"--submission /app/autoresearch/lanes/{lane}/submission.py" in text
 
 
+def test_the_verifier_requires_both_confinement_layers(verify, tmp_path, monkeypatch):
+    """Agent code runs next to the hidden seeds and the reward file, so a confinement layer
+    that cannot be installed must fail the run, not be skipped."""
+    from harness import sandbox
+    monkeypatch.setenv(sandbox.ENV_SANDBOX, "auto")
+    monkeypatch.setattr(verify, "_CONFINEMENT_PROBE", "pass")  # the mode is under test here, not this machine
+    seen = {}
+    monkeypatch.setattr(verify, "verify_optimize", lambda *a, **k: seen.setdefault("mode", sandbox.sandbox_mode()) and 0)
+    assert verify.main(["optimize", "--lane", "A2", "--submission", str(tmp_path / "s.py"), "--out-dir", str(tmp_path)]) == 0
+    assert seen["mode"] == "strict"
+    # A machine that cannot confine is a setup failure: no grading and no reward file.
+    monkeypatch.setattr(verify, "_CONFINEMENT_PROBE", "raise RuntimeError('strict sandbox Landlock guard failed')")
+    seen.clear()
+    with pytest.raises(SystemExit, match="verifier setup failure.*Landlock"):
+        verify.main(["optimize", "--lane", "A2", "--submission", str(tmp_path / "s.py"), "--out-dir", str(tmp_path / "o")])
+    assert not seen and not (tmp_path / "o").exists()
+
+
 def test_denominators_never_ship_in_the_agent_image():
     for task in TASKS.iterdir():
         for name in ("reference.py", "frontier.py", "frozen_scores.json"):
@@ -139,7 +190,7 @@ def test_denominators_never_ship_in_the_agent_image():
 # ------------------------------------------------------------------------------ output shape
 
 def _stub_score(soft_min_by_file: dict[str, float | None]):
-    def score_file(path, lane, cfg, work_dir):
+    def score_file(path, lane, cfg, work_dir, **kw):
         sm = soft_min_by_file[Path(path).name]
         if sm is None:
             return {"valid": False, "tier0_ok": False, "tier1_ok": False, "error": "tier0 invariance_smoke: stub",
@@ -163,7 +214,7 @@ def test_optimize_output_shape(verify, tmp_path, monkeypatch):
     tests = _tests_dir(tmp_path, "a2-funnel-dynamics")
     sub = tmp_path / "cand.py"
     sub.write_text((tests / "baseline.py").read_text() + "\n# edited\n")
-    monkeypatch.setattr(verify, "score_file", _stub_score(
+    monkeypatch.setattr(grade, "score_file", _stub_score(
         {"submission.py": 3.0e-4, "baseline.py": 1.0e-4, "reference.py": 2.0e-4, "frontier.py": 4.0e-4}))
     rc = verify.verify_optimize("A2", sub, tmp_path / "out", tests_dir=tests)
     assert rc == 0
@@ -186,7 +237,7 @@ def test_optimize_output_shape(verify, tmp_path, monkeypatch):
 
 def test_optimize_unscorable_when_the_reference_fails(verify, tmp_path, monkeypatch):
     tests = _tests_dir(tmp_path, "a0-ground-up")
-    monkeypatch.setattr(verify, "score_file", _stub_score(
+    monkeypatch.setattr(grade, "score_file", _stub_score(
         {"submission.py": 3.0e-4, "baseline.py": 1.0e-4, "reference.py": None, "frontier.py": 4.0e-4}))
     rc = verify.verify_optimize("A0", tests / "frontier.py", tmp_path / "out", tests_dir=tests)
     reward = json.loads((tmp_path / "out" / "reward.json").read_text())
@@ -202,13 +253,13 @@ def test_frozen_denominators_are_used_only_when_the_key_matches(verify, tmp_path
     calls = []
     stub = _stub_score({"submission.py": 2.0e-4, "baseline.py": 1.0e-4, "reference.py": 1.0e-4, "frontier.py": 1.0e-4})
 
-    def counting(path, lane, cfg, work_dir):
+    def counting(path, lane, cfg, work_dir, **kw):
         calls.append(Path(path).name)
         return stub(path, lane, cfg, work_dir)
 
-    monkeypatch.setattr(verify, "score_file", counting)
+    monkeypatch.setattr(grade, "score_file", counting)
     cfg, digest = verify.scoring_config(), judge.judge_digest()
-    scores = {role: verify.frozen_entry("A3", role, tests / name, cfg, digest, stub(tests / name, "A3", cfg, None))
+    scores = {role: grade.frozen_entry("A3", role, tests / name, cfg, digest, stub(tests / name, "A3", cfg, None))
               for role, name in verify.DENOMINATOR_FILES.items()}
     scores["frontier"]["sha256"] = "0" * 64  # stale: the file changed after freezing
     (tests / verify.FROZEN_FILE).write_text(json.dumps({"schema": verify.FROZEN_SCHEMA, "lane": "A3", "scores": scores}))
@@ -242,8 +293,9 @@ def _fake_res(verify, effs, reasons):
         suites.append((r, suite))
         runs.append({"per_target": per_target, "passed": not any(why_r)})
     res = {"per_repeat": runs, "per_target": [t for run in runs for t in run["per_target"]],
-           "passed": all(run["passed"] for run in runs), "b2_max": 0.01, "overhead_ratio": 1.0}
-    rebuilt = verify.scores_from_targets(res, suites)
+           "passed": all(run["passed"] for run in runs), "b2_max": 0.01, "overhead_ratio": 1.0,
+           "median_adapt_cost": 1.0}
+    rebuilt = grade.scores_from_targets(res, suites)
     ok = res["passed"]
     for run, sm in zip(runs, rebuilt["per_repeat_soft_min"], strict=True):
         run["soft_min_eff"] = sm if run["passed"] else 0.0
@@ -262,13 +314,13 @@ def judge_stub(verify, monkeypatch):
     """Replace Tier 0 and Tier 1 with scripted results keyed by seed; records the Tier 1 calls."""
     script: dict = {}
     calls: list[int] = []
-    monkeypatch.setattr(verify.autoresearch, "_eval_tier0", lambda *a, **k: (True, {"stage": "passed"}))
+    monkeypatch.setattr(grade, "eval_tier0", lambda *a, **k: (True, {"stage": "passed"}))
 
     def tier1(path, lane, cfg, seed):
         calls.append(seed)
         return _fake_res(verify, *script[seed])
 
-    monkeypatch.setattr(verify, "_tier1", tier1)
+    monkeypatch.setattr(grade, "tier1", tier1)
     return script, calls
 
 
@@ -286,7 +338,7 @@ def test_statistical_rejection_confirmed_as_chance_keeps_first_run_numbers(verif
     script[cfg["seed"]] = first
     script[cfg["confirmation_seed"]] = ([[9e-3, 9e-3, 9e-3]] * 2, GOOD[1])
     tmp_path.joinpath("s.py").write_text("x = 1\n")
-    r = verify.score_file(tmp_path / "s.py", "A2", cfg, tmp_path / "w")
+    r = grade.score_file(tmp_path / "s.py", "A2", cfg, tmp_path / "w")
     assert calls == [cfg["seed"], cfg["confirmation_seed"]]
     assert r["valid"] and r["tier1_ok"] and r["failed_targets"] == []
     c = r["confirmation"]
@@ -294,7 +346,7 @@ def test_statistical_rejection_confirmed_as_chance_keeps_first_run_numbers(verif
     assert c["efficiency_source"] == "first_run_paired" and "banana" not in str(c["failed_targets"])
     assert "funnel" in c["failed_targets_first_run"][0]
     res, suites = _fake_res(verify, *first)
-    assert r["soft_min_eff"] == pytest.approx(verify.scores_from_targets(res, suites)["soft_min_eff"])
+    assert r["soft_min_eff"] == pytest.approx(grade.scores_from_targets(res, suites)["soft_min_eff"])
     assert r["soft_min_eff"] < 9e-3  # not the confirmation run's numbers
 
 
@@ -305,7 +357,7 @@ def test_confirmed_rejection_is_invalid(verify, judge_stub, tmp_path):
     script[cfg["seed"]] = bad
     script[cfg["confirmation_seed"]] = (GOOD[0], [["", "", ""], [REJECT, "", ""]])
     tmp_path.joinpath("s.py").write_text("x = 1\n")
-    r = verify.score_file(tmp_path / "s.py", "A2", cfg, tmp_path / "w")
+    r = grade.score_file(tmp_path / "s.py", "A2", cfg, tmp_path / "w")
     assert not r["valid"] and r["confirmation"]["ran"] and not r["confirmation"]["passed"]
     assert str(cfg["confirmation_seed"]) in r["error"] and "gaussian_illcond" in r["error"]
     assert r["soft_min_eff"] == 0.0 and r["per_repeat_soft_min"][0] == 0.0 and r["per_repeat_soft_min"][1] > 0
@@ -322,18 +374,18 @@ def test_non_statistical_failures_are_invalid_at_once(verify, judge_stub, tmp_pa
     cfg = _cfg(verify)
     script[cfg["seed"]] = (GOOD[0], reasons)
     tmp_path.joinpath("s.py").write_text("x = 1\n")
-    r = verify.score_file(tmp_path / "s.py", "A2", cfg, tmp_path / "w")
+    r = grade.score_file(tmp_path / "s.py", "A2", cfg, tmp_path / "w")
     assert not r["valid"] and calls == [cfg["seed"]] and not r["confirmation"]["ran"]
 
 
 def test_tier0_failure_gets_no_tier1_and_no_confirmation(verify, judge_stub, tmp_path, monkeypatch):
     _script, calls = judge_stub
-    monkeypatch.setattr(verify.autoresearch, "_eval_tier0",
+    monkeypatch.setattr(grade, "eval_tier0",
                         lambda *a, **k: (False, {"stage": "invariance_smoke", "error": "rejected"}))
     tmp_path.joinpath("s.py").write_text("x = 1\n")
-    r = verify.score_file(tmp_path / "s.py", "A2", _cfg(verify), tmp_path / "w")
+    r = grade.score_file(tmp_path / "s.py", "A2", _cfg(verify), tmp_path / "w")
     assert not r["valid"] and calls == [] and r["confirmation"] == {"ran": False}
-    assert not verify.score_file(tmp_path / "missing.py", "A2", _cfg(verify), tmp_path / "w")["valid"]
+    assert not grade.score_file(tmp_path / "missing.py", "A2", _cfg(verify), tmp_path / "w")["valid"]
 
 
 def test_no_ratio_when_the_first_run_has_no_usable_numbers(verify, judge_stub, tmp_path):
@@ -342,7 +394,7 @@ def test_no_ratio_when_the_first_run_has_no_usable_numbers(verify, judge_stub, t
     script[cfg["seed"]] = ([[1e-3, 0.0, 3e-3], [1e-3, 2e-3, 3e-3]], [["", REJECT, ""], ["", "", ""]])
     script[cfg["confirmation_seed"]] = ([[4e-3, 4e-3, 4e-3]] * 2, GOOD[1])
     tmp_path.joinpath("s.py").write_text("x = 1\n")
-    r = verify.score_file(tmp_path / "s.py", "A2", cfg, tmp_path / "w")
+    r = grade.score_file(tmp_path / "s.py", "A2", cfg, tmp_path / "w")
     # A score from the confirmation seed is never divided by primary-seed denominators.
     assert r["valid"] and r["unpaired"] and r["confirmation"]["efficiency_source"] == "none"
     # No efficiency survives, so the file cannot serve as a denominator either, live or frozen.
@@ -355,8 +407,8 @@ def test_confirmed_pass_in_the_verifier_output(verify, judge_stub, tmp_path, mon
     script[cfg["seed"]] = ([[3e-4, 3e-4, 3e-4]] * cfg["repeats"], [["", REJECT, ""]] + [["", "", ""]] * (cfg["repeats"] - 1))
     script[cfg["confirmation_seed"]] = ([[3e-4, 3e-4, 3e-4]] * cfg["repeats"], [["", "", ""]] * cfg["repeats"])
     tests = _tests_dir(tmp_path, "a2-funnel-dynamics")
-    real = verify.score_file
-    monkeypatch.setattr(verify, "score_file", lambda path, lane, cfg, work_dir, **k: (
+    real = grade.score_file
+    monkeypatch.setattr(grade, "score_file", lambda path, lane, cfg, work_dir, **k: (
         real(path, lane, cfg, work_dir, **k) if Path(path).name == "submission.py"
         else _stub_score({"baseline.py": 1e-4, "reference.py": 2e-4, "frontier.py": 4e-4})(path, lane, cfg, work_dir)))
     sub = tmp_path / "cand.py"
@@ -366,14 +418,8 @@ def test_confirmed_pass_in_the_verifier_output(verify, judge_stub, tmp_path, mon
     details = json.loads((tmp_path / "out" / "details.json").read_text())
     assert reward["confirmed"] == 1 and reward["passed"] == 1 and details["outcome"] == "solved"
     c = details["confirmation"]
-    assert c["ran"] and c["passed"] and c["seed"] == verify.CONFIRMATION_SEED and c["failed_targets_first_run"]
+    assert c["ran"] and c["passed"] and c["seed"] == verify.HIDDEN_CONFIRMATION_SEED and c["failed_targets_first_run"]
     assert reward["start_speedup"] == pytest.approx(3.0, rel=1e-4)
-
-
-def test_confirmation_seed_is_disjoint_from_the_verifier_seeds(verify):
-    used = verify.HIDDEN_VERIFIER_SEED + 7919 * verify.VERIFIER_REPEATS + 100_000
-    assert abs(verify.CONFIRMATION_SEED - verify.HIDDEN_VERIFIER_SEED) > used - verify.HIDDEN_VERIFIER_SEED
-    assert verify.scoring_config()["confirmation_seed"] == verify.CONFIRMATION_SEED
 
 
 # --------------------------------------------------------------------------- real verifier
@@ -395,22 +441,6 @@ def test_biased_sampler_is_invalid(verify, tmp_path):
     assert all(d["source"] == "frozen" for d in details["denominators"].values()), details["denominators"]
 
 
-def test_rewind_reports_outcome(verify, tmp_path):
-    """The reference fix is solved; each of the three buggy starting files stays invalid. The
-    rewind check is one target on a fixed seed, so it gets no confirmation run (README)."""
-    fixtures = ROOT / "autoresearch" / "lanes" / "S3" / "fixtures"
-    cases = [("s3-missing-jacobian-a4", fixtures / "missing_jacobian_a4_ref.py", "solved")]
-    cases += [(t, TASKS / t / "environment" / "baseline.py", "invalid")
-              for t in ("s3-missing-jacobian-a4", "s3-position-gated-mh", "s3-unadjusted-ula")]
-    for task, sub, want in cases:
-        out = tmp_path / f"{task}-{want}"
-        verify.verify_rewind(task, sub, out, TASKS / task / "tests" / "tasks.json")
-        reward = json.loads((out / "reward.json").read_text())
-        details = json.loads((out / "details.json").read_text())
-        assert details["outcome"] == want, (task, details.get("reason"))
-        assert reward["solved"] == int(want == "solved") == reward["passed"]
-
-
 @pytest.mark.slow
 def test_unchanged_starting_code_gives_no_gain_and_matches_its_frozen_score(verify, tmp_path):
     """The real verifier on lane A3's own starting code: outcome no_gain, and the live candidate
@@ -427,5 +457,5 @@ def test_a_statistical_rejection_does_not_hide_a_stuck_kernel(verify):
     # The judge joins every failed gate of one target with "; ".
     both = {"per_target": [{"passed": False, "reason": REJECT + "; " + STUCK}]}
     only = {"per_target": [{"passed": False, "reason": REJECT}, {"passed": True, "reason": ""}]}
-    assert not verify._only_statistical(both)
-    assert verify._only_statistical(only)
+    assert not grade.only_statistical(both)
+    assert grade.only_statistical(only)

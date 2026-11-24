@@ -25,15 +25,16 @@ ENV_URL = "APIN_FLYWHEEL_URL"
 ENV_TOKEN = "APIN_FLYWHEEL_TOKEN"
 ENV_TOKEN_FILE = "APIN_FLYWHEEL_TOKEN_FILE"
 DEFAULT_PUBLIC_URL = "https://apin-flywheel.m0hawk.workers.dev"
-KEPT_DECISIONS = {"keep", "keep_baseline", "keep_simpler", "keep_incumbent_failed"}
+KEPT_DECISIONS = {"keep", "keep_baseline", "keep_simpler"}
 #: The Worker refuses sources above this size; the client skips the upload instead.
 MAX_SOURCE_BYTES = 256 * 1024
 PARENT_RELATIONS = ("incumbent", "combines", "fork")
 
 _METRIC_KEYS = (
     "loc", "magic_constants", "wall_s", "queue_wait_s", "archive_cells",
-    "tier0_ok", "tier1_ok", "tier0_info", "incumbent_soft_min",
-    "median_adapt_cost", "judge_digest", "seed", "repeats", "by_class",
+    "tier0_ok", "tier1_ok", "tier0_info", "confirmed", "exploratory", "graded_from",
+    "best_speedup", "best_trial", "median_adapt_cost", "judge_digest", "seed", "repeats",
+    "n_chains", "k_steps", "adapt_draws", "horizon_steps", "by_class", "error",
 )
 
 
@@ -656,8 +657,14 @@ def trial_payload(
         "title": title,
         "hypothesis": hypothesis,
         "decision": str(row.get("decision") or "unknown"),
+        # Times the lane's starting code, on the public seed. Null when the trial failed a check
+        # or ran at a non-standard (exploratory) configuration.
+        "speedup": row.get("speedup") if row.get("yardstick") else None,
+        # The yardstick the speed-up is measured against (harness/grade.py::yardstick_id). Null
+        # for an exploratory trial. Speed-ups compare only under the same yardstick.
+        "yardstick": row.get("yardstick"),
         "soft_min_eff": row.get("soft_min_eff"),
-        "ratio_vs_incumbent": row.get("ratio_vs_incumbent"),
+        "ratio_vs_incumbent": row.get("ratio_vs_best"),
         "short_horizon_eff": row.get("short_horizon_soft_min"),
         "long_horizon_eff": row.get("long_horizon_soft_min"),
         "overhead_ratio": row.get("overhead_ratio"),

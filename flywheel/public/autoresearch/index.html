@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Autoresearch | apin</title>
-    <meta name="description" content="Autoresearch trials on apin by lane, with each trial and the best efficiency so far." />
+    <meta name="description" content="Autoresearch trials on apin by lane, with each trial and the best speed-up so far." />
     <link rel="stylesheet" href="/assets/site.css" />
     <style>
       /* This page is a chart with a side rail, so it uses more of a wide screen than the others. */
@@ -95,6 +95,12 @@
         font-weight: 700;
         line-height: 1;
         font-variant-numeric: lining-nums tabular-nums;
+      }
+      .best .over {
+        margin-top: 4px;
+        font-family: var(--sans);
+        font-size: 0.86rem;
+        color: var(--ink-3);
       }
       .best .who {
         margin-top: 8px;
@@ -200,6 +206,14 @@
         font-weight: 700;
         fill: var(--ink);
       }
+      #plot .ref {
+        stroke: var(--ink-3);
+        stroke-width: 1;
+        stroke-dasharray: 3 4;
+      }
+      #plot .ref-label {
+        font-size: 11.5px;
+      }
       .reading {
         margin-top: 8px;
         max-width: 92ch;
@@ -272,7 +286,7 @@
               <select id="f-agent"><option value="">All agents</option></select>
             </div>
           </div>
-          <div id="plot-box"><canvas id="plot-dots" aria-hidden="true"></canvas><svg class="chart" id="plot" role="group" aria-label="Trials in this lane and the best efficiency so far"></svg></div>
+          <div id="plot-box"><canvas id="plot-dots" aria-hidden="true"></canvas><svg class="chart" id="plot" role="group" aria-label="Trials in this lane and the best speed-up so far"></svg></div>
           <figcaption class="reading" id="reading"></figcaption>
         </figure>
       </div>

@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from . import (
-    autoresearch, cost, flywheel, grid, invariance, models, queue, records, reference,
+    autoresearch, cost, flywheel, grade, grid, invariance, models, queue, records, reference,
     rewind, sampler, score, shapes, systems_lanes, tracks,
 )
 from .models import ROOT
@@ -295,7 +295,8 @@ def _ar_verify_next(a: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"Cannot rerun {node_id}: {exc}. The lease expires on its own.", file=sys.stderr)
         return 1
-    print(f"Leased {node_id} (lane {lane}, claimed soft_min={node.get('soft_min_eff')}) until {lease.get('lease_expires_at')}.")
+    print(f"Leased {node_id} (lane {lane}, posted speedup={node.get('speedup')}, yardstick={node.get('yardstick')}) "
+          f"until {lease.get('lease_expires_at')}.")
     try:
         _, source = _fetch_source(node_id)
     except flywheel.FlywheelError as exc:
@@ -305,14 +306,18 @@ def _ar_verify_next(a: argparse.Namespace) -> int:
     work.mkdir(parents=True, exist_ok=True)
     cand = work / "candidate.py"
     cand.write_text(source, encoding="utf-8")
-    dims = tuple(int(x) for x in (node.get("dims") or [])) or (6, 20)
     try:
         outcome = autoresearch.rerun_for_verification(
-            cand, lane, claimed_soft_min=node.get("soft_min_eff"), dims=dims, repeats=a.repeats,
+            cand, lane, claimed_speedup=node.get("speedup"), claimed_yardstick=node.get("yardstick"),
             tolerance=a.tolerance, work_dir=work / "work", use_queue=not a.no_queue,
         )
     except Exception as exc:  # an evaluator crash is not evidence against the trial
         print(f"The rerun crashed ({type(exc).__name__}: {exc}); no result posted. "
+              f"The lease expires at {lease.get('lease_expires_at')}.", file=sys.stderr)
+        return 1
+    if not outcome.get("comparable", True):
+        # Not evidence for or against the trial: post nothing and let the lease expire.
+        print(f"{node_id}: {outcome.get('reason')}; no result posted. "
               f"The lease expires at {lease.get('lease_expires_at')}.", file=sys.stderr)
         return 1
     try:
@@ -416,17 +421,17 @@ def main(argv: list[str] | None = None) -> int:
 
     ar = sub.add_parser("autoresearch", help="run Karpathy-ratchet + MAP-Elites autoresearch trials")
     ar_sub = ar.add_subparsers(dest="ar_cmd", required=True)
-    ae = ar_sub.add_parser("eval", help="evaluate current lane submission.py through Tier 0 + Tier 1")
+    ae = ar_sub.add_parser("eval", help="grade the lane submission.py and print its speed-up over the starting code")
     ae.add_argument("--lane", default="A1")
     ae.add_argument("--hypothesis", required=True)
     ae.add_argument("--codex-ref", action="append", default=[])
     ae.add_argument("--run-id", default="default")
-    ae.add_argument("--seed", type=int)
-    ae.add_argument("--dim", type=int, help="single-dimension override (e.g. --dim 16)")
-    ae.add_argument("--dims", default="6,20", help="comma-separated Tier 1 dimension ladder (default: 6,20)")
-    ae.add_argument("--repeats", type=int, default=2, help="paired Tier 1 suites per trial (default: 2)")
-    ae.add_argument("--horizon-steps", type=int, default=500,
-                    help="sampling horizon for amortizing adapt_cost in Tier 1 (default: 500)")
+    ae.add_argument("--seed", type=int, help="exploratory: score on another seed")
+    ae.add_argument("--dim", type=int, help="exploratory: a single Tier 1 dimension (e.g. --dim 16)")
+    ae.add_argument("--dims", help="exploratory: comma-separated Tier 1 dimension ladder (standard: 6,20)")
+    ae.add_argument("--repeats", type=int, help="exploratory: Tier 1 suites per trial (standard: 8)")
+    ae.add_argument("--horizon-steps", type=int,
+                    help="exploratory: sampling horizon for amortizing adapt cost (standard: 500)")
     ae.add_argument("--submission", type=Path, help="override submission file path")
     ae.add_argument("--allow-duplicate", action="store_true")
     ae.add_argument("--dry-run", action="store_true", help="lint & check duplicates without writing a ledger row")
@@ -502,11 +507,11 @@ def main(argv: list[str] | None = None) -> int:
     asr.add_argument("--offset", type=int, default=0)
     asr.add_argument("--json", action="store_true", dest="json_output")
 
-    avn = ar_sub.add_parser("verify-next", help="lease the next queued trial, rerun it on fresh seeds, post the result")
+    avn = ar_sub.add_parser("verify-next", help="lease the next queued trial, rerun it through the grader, post the result")
     avn.add_argument("--lane")
-    avn.add_argument("--repeats", type=int, default=2)
     avn.add_argument("--tolerance", type=float, default=autoresearch.REPLICATION_TOLERANCE,
-                     help="pass when the rerun reaches (1 - tolerance) x the claimed soft_min_eff (default: 0.25)")
+                     help="pass when the rerun's speed-up is within this relative difference of the posted one "
+                          f"(default: {autoresearch.REPLICATION_TOLERANCE})")
     avn.add_argument("--ttl-minutes", type=int, default=120, help="lease length")
     avn.add_argument("--run-id", default="verify", help="run directory for candidates and work files")
     avn.add_argument("--no-queue", action="store_true", help="bypass the host FIFO evaluation lock")
@@ -668,14 +673,24 @@ def main(argv: list[str] | None = None) -> int:
             for r in rep["results"]:
                 print(f"  {'PASS' if r['passed'] else 'FAIL'} {r['task_id']:32s} eff={r['emp_eff']:.3g} ({r['reason']})")
             return 0 if (rep["passed"] == rep["total"] if a.mode == "reference" else True) else 1
-        dims_tuple = (a.dim,) if a.dim is not None else tuple(int(x.strip()) for x in a.dims.split(",") if x.strip())
-        row = autoresearch.evaluate_lane_trial(
-            a.lane, a.hypothesis, codex_refs=a.codex_ref, seed=a.seed,
-            dim=dims_tuple[0], dims=dims_tuple, repeats=a.repeats, horizon_steps=a.horizon_steps,
-            run_id=a.run_id, allow_duplicate=a.allow_duplicate,
-            submission_path=a.submission, dry_run=a.dry_run, use_queue=not a.no_queue,
-            combines=_split_ids(a.combines), fork_of=_split_ids(a.fork_of),
-        )
+        overrides: dict = {}
+        if a.dim is not None:
+            overrides["dims"] = (a.dim,)
+        elif a.dims:
+            overrides["dims"] = tuple(int(x.strip()) for x in a.dims.split(",") if x.strip())
+        for key in ("seed", "repeats", "horizon_steps"):
+            if getattr(a, key) is not None:
+                overrides[key] = getattr(a, key)
+        try:
+            row = autoresearch.evaluate_lane_trial(
+                a.lane, a.hypothesis, cfg=grade.config(**overrides), codex_refs=a.codex_ref,
+                run_id=a.run_id, allow_duplicate=a.allow_duplicate,
+                submission_path=a.submission, dry_run=a.dry_run, use_queue=not a.no_queue,
+                combines=_split_ids(a.combines), fork_of=_split_ids(a.fork_of),
+            )
+        except autoresearch.YardstickError as exc:
+            print(f"Cannot grade this trial: {exc}", file=sys.stderr)
+            return 2
         if a.json_output:
             print(json.dumps(autoresearch.format_evaluator_json(row, run_id=a.run_id)))
             if a.dry_run:
@@ -686,27 +701,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"dup={row['is_duplicate']} lint_ok={row['lint_ok']} loc={row['loc']} "
                   f"consts={row['magic_constants']}")
             return 0 if row["decision"] == "dry_run_ok" else 2
-        inc_note = " [WARNING: paired incumbent failed Tier 1 on fresh seeds — UNPAIRED keep; re-verify]" if row.get("incumbent_ok") is False else ""
-        print(f"{row['trial_id']} [{row['lane']}] decision={row['decision']} "
-              f"tier0={row['tier0_ok']} tier1={row['tier1_ok']} "
-              f"soft_min={row.get('soft_min_eff')} inc={row.get('incumbent_soft_min')} ratio={row.get('ratio_vs_incumbent')} "
-              f"dims={','.join(str(x) for x in (row.get('dims') or []))} repeats={row.get('repeats')} "
-              f"qwait={row.get('queue_wait_s')}s wall={row['wall_s']}s{inc_note}")
-        # pi-autoresearch / external-harness compatible METRIC lines
-        for mkey, rkey in (
-            ("soft_min_eff", "soft_min_eff"),
-            ("ratio_vs_incumbent", "ratio_vs_incumbent"),
-            ("short_horizon_soft_min", "short_horizon_soft_min"),
-            ("long_horizon_soft_min", "long_horizon_soft_min"),
-            ("median_adapt_cost", "median_adapt_cost"),
-            ("overhead_ratio", "overhead_ratio"),
-            ("b2_max", "b2_max"),
-        ):
-            val = row.get(rkey)
-            if val is not None:
-                print(f"METRIC {mkey}={val}")
-        for cls_name, cls_val in sorted((row.get("by_class") or {}).items()):
-            print(f"CLASS_METRIC {cls_name}={cls_val}")
+        print("\n".join(autoresearch.trial_report(row, a.run_id)))
         return 0 if row["tier0_ok"] else 1
     return 2
 

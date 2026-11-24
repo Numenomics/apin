@@ -15,7 +15,7 @@ Discover an `adapt()` preconditioning and metric-estimation strategy that minimi
 2. **Respect the capability allowlist:** `requires = ["grad"]` only. Do not call unpriced `hvp`/`hess` or inspect `oracle` internals, filenames, or model metadata (`RULINGS.md` R-001..R-006).
 3. **Freeze everything after `adapt()`:** Return a canonical, finite `metric_tuning` tree (`dict`/`list`/`ndarray`/scalars) within the 16 MB state cap. `transition()` runs in a clean child process—no module globals or caches survive.
 4. **Never repeat falsified ideas without a stated new condition:** Read `NEGATIVE_MEMORY.md` before every proposal.
-5. **Simplicity regularizer:** If a candidate ties the incumbent within the noise margin ($\pm 2\%$ paired cost ratio), **keep the simpler diff** (fewer LOC, fewer magic constants, lower `overhead_s / eval_s`).
+5. **Simplicity rule:** A candidate within 2% of the run's best speed-up is kept as `keep_simpler` when it has fewer lines, fewer magic constants or at least 15% lower `overhead_ratio` than the incumbent.
 6. **Never stop** until the trial/token/wall-clock budget is exhausted; on crash or Tier 0 fail, log the row, reset the worktree, and move immediately to the next hypothesis.
 
 ## 3. Research Loop (Per Trial)
@@ -29,10 +29,10 @@ Discover an `adapt()` preconditioning and metric-estimation strategy that minimi
    - `codex_refs`: card IDs cited
    - `assumption`: what geometry/regime this improves and why it will not harm funnels or isotropic targets
    - `falsification_test`: which check or model will refute it if wrong
-3. **Edit `submission.py`** and run `apin autoresearch eval --lane A1 --run-id <run_id> --repeats 2 --hypothesis "..."` (use `--dry-run` first to lint/check duplicates without writing a ledger row). The runner snapshots `submission.py` at start, acquires the host FIFO evaluation lock (`harness/queue.py`), isolates `incumbent.py` and `archive/` per `--run-id`, amortizes `adapt_cost` to a 500-step sampling horizon (`--horizon-steps 500`) so warmup starvation cannot game Tier 1, and runs paired multi-seed Tier 1 evaluation.
+3. **Edit `submission.py`** and run `apin autoresearch eval --lane A1 --run-id <run_id> --hypothesis "..."` (use `--dry-run` first to lint and check for duplicates without writing a ledger row). It prints `METRIC speedup=<x>`, the speed-up over the lane's starting code (`start.py`) on the public seeds, and keeps the change when it beats the run's best by at least 5%. The runner snapshots `submission.py` at start, acquires the host FIFO evaluation lock (`harness/queue.py`), isolates `incumbent.py` and `archive/` per `--run-id`, amortizes `adapt_cost` to a 500-step sampling horizon so warmup starvation cannot game Tier 1, and grades the snapshot once with `harness/grade.py` at the standard configuration (dims 6 and 20, 8 repeats).
 4. **Ratchet & Archive decision (enforced by runner):**
    - **Fail Tier 0 or any Tier 1 accuracy/replay gate:** restore from `autoresearch/lanes/A1/runs/<run_id>/incumbent.py` (or `git checkout -- autoresearch/lanes/A1/submission.py` if working solo on a branch), keeping the immutable `ledger.jsonl` row. If a general mechanism fails cleanly across $\ge 2$ disciplined variants, append a scoped entry to `NEGATIVE_MEMORY.md`.
-   - **Pass + beats incumbent by $\ge \delta_{\text{noise}}$ (or simpler within $\delta_{\text{noise}}$: fewer LOC, fewer magic constants, or $\ge 15\%$ lower overhead):** runner promotes the snapshot to `runs/<run_id>/incumbent.py`.
+   - **Pass + speed-up at least 1.05 times the run's best (or within 2% of it and simpler):** runner promotes the snapshot to `runs/<run_id>/incumbent.py`.
    - **Pass + new best in a MAP-Elites cell:** runner saves patch to `runs/<run_id>/archive/<cell>/` automatically.
 5. **Real-posterior verification (recommended before declaring a breakthrough):**
    ```bash
