@@ -59,7 +59,7 @@
     if (st === "none") return "not run";
     if (st === "unfinished") return "did not finish";
     const many = cell.attempts > 1 ? `, mean of ${cell.attempts} attempts` : "";
-    if (st === "invalid") return "failed the checks" + many;
+    if (st === "invalid") return "failed" + many;
     return `${fmt.times(cell.speedup)} the starting code${many}`;
   }
   /* One attempt, in words. */

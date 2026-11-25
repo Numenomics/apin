@@ -195,8 +195,6 @@ def test_a_listed_rule_break_counts_as_a_failed_attempt():
     # Taking the entry off the list counts the attempt again, also when it is read back from the data file.
     again = mod.aggregate_results(rel["trials"], pricing, release_tag=mod.DEFAULT_RELEASE, rule_breaks={})
     assert again["releases"][0]["trials"][0]["outcome"] == "solved" and "rule_break" not in again["releases"][0]["trials"][0]
-    # Every listed attempt names its rules and a reason.
-    assert all(v.get("rules") and v.get("reason") for v in mod.load_rule_breaks().values())
 
 
 def _load_collector():

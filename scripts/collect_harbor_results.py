@@ -648,7 +648,7 @@ def _release_order(tag: str) -> tuple[int, ...]:
 
 def load_rule_breaks(path: Path = RULE_BREAKS) -> dict[str, dict[str, str]]:
     """Attempts a maintainer found to break a rule the verifier cannot check, by `<release>/<trial id>`."""
-    return json.loads(path.read_text(encoding="utf-8")).get("attempts", {}) if path.is_file() else {}
+    return json.loads(path.read_text(encoding="utf-8"))["attempts"]
 
 
 def aggregate_results(trials: list[dict[str, Any]], pricing: dict[str, Any], *, release_tag: str,

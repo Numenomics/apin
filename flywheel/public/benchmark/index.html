@@ -173,7 +173,7 @@
         </div>
         <div class="table-scroll"><table class="data" id="board"></table></div>
         <p class="caption">
-          Speed-up is the geometric mean, over the tasks a row finished, of the sampler's efficiency relative to the starting code. Each block is one task. A filled block is at least 5% faster than the starting code, an outlined one is valid but no faster, a red one failed the checks and a hatched one did not finish. Select a block to open its runs.
+          Speed-up is the geometric mean, over the tasks a row finished, of the sampler's efficiency relative to the starting code. Each block is one task. A filled block is at least 5% faster than the starting code, an outlined one is valid but no faster, a red one failed and a hatched one did not finish. Select a block to open its runs.
         </p>
       </section>
 
@@ -217,7 +217,7 @@
             <h2 id="score-h" style="font-size:1.6rem">Scoring</h2>
             <ul class="rules">
               <li>The verifier runs the agent's file on hidden seeds and divides its efficiency by the efficiency of the starting code. That ratio is the speed-up.</li>
-              <li>A model's score is the geometric mean of its speed-ups over the tasks it finished. A result that fails the validity checks counts as 0.1×, so a broken sampler costs more than an unchanged one. No task counts for less than 0.1×.</li>
+              <li>A model's score is the geometric mean of its speed-ups over the tasks it finished. A result that fails the validity checks counts as 0.1×, so a broken sampler costs more than an unchanged one. So does a result that passes them and breaks a rule they cannot check, which a maintainer finds by reading the submission. No task counts for less than 0.1×.</li>
               <li>Efficiency is accuracy per unit of cost. It is a soft minimum over six classes of target shape, so a gain on easy Gaussians cannot offset a loss on funnels.</li>
               <li>A difference under 5% is noise. When copies of one sampler that differ only in their random draws were scored at eight repeats, none came out more than 3% above the original.</li>
               <li>Each task row also shows a Stan-style reference. It is Stan's NUTS with step-size and diagonal mass-matrix adaptation, rewritten for this harness and checked against CmdStan. In the two lanes where the judge fixes the kernel, it is Stan's warmup alone. The judge measures short runs from scattered starting points and charges double for gradients, which does not suit NUTS, so on some tasks the reference scores below the starting code.</li>
