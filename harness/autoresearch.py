@@ -666,6 +666,32 @@ def _local_yardstick_id(lane: str | None, autoresearch_dir: Path) -> str | None:
         return None
 
 
+def _node_by_class(node: dict) -> dict[str, float]:
+    """Extract numeric `by_class` map from a Flywheel node's `metrics` or `metrics_json`."""
+    metrics = node.get("metrics")
+    if not isinstance(metrics, dict) and isinstance(node.get("metrics_json"), str):
+        try:
+            metrics = json.loads(node["metrics_json"])
+        except ValueError:
+            metrics = None
+    by_cls = metrics.get("by_class") if isinstance(metrics, dict) else None
+    if not isinstance(by_cls, dict):
+        return {}
+    return {
+        str(k): float(v)
+        for k, v in by_cls.items()
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    }
+
+
+def _weakest_classes(by_cls: dict[str, float], limit: int = 3) -> str:
+    ranked = sorted(
+        ((k, float(v)) for k, v in by_cls.items() if isinstance(v, (int, float)) and math.isfinite(v)),
+        key=lambda kv: kv[1],
+    )
+    return ", ".join(f"{k}={v:.4g}" for k, v in ranked[:limit])
+
+
 def build_research_brief(
     lane: str = "all",
     *,
@@ -678,7 +704,7 @@ def build_research_brief(
 ) -> str:
     """Assemble a compact, zero-synthesis verbatim brief for starting or flushing a research session.
 
-    Combines live public Flywheel frontier/claims/dead-ends (read-only, no token needed)
+    Combines live public Flywheel frontier/kept-trials/claims/dead-ends (read-only, no token needed)
     with local lane `NEGATIVE_MEMORY.md`, run `RESEARCH_HANDOFF.md`, and stall/bottleneck
     diagnostics from `ledger.jsonl`. Pass `lane='all'` for a cross-lane overview.
     """
@@ -699,9 +725,12 @@ def build_research_brief(
             local_digest = judge.judge_digest()
             local_yd = _local_yardstick_id(None if all_lanes else lane, autoresearch_dir)
             lines.append(f"## Live Flywheel Frontier (`{flywheel_url}` | local judge_digest=`{local_digest}`)")
+            lane_frontier: dict | None = None
             if frontier:
                 for row in frontier:
                     rlane = row.get("lane") or "?"
+                    if rlane == lane:
+                        lane_frontier = row
                     sp = row.get("speedup")
                     sp_s = f"{float(sp):.4g}x" if isinstance(sp, (int, float)) else "n/a"
                     ver = "verified" if row.get("verified") else "unverified"
@@ -716,6 +745,72 @@ def build_research_brief(
                     )
             else:
                 lines.append("- (no frontier nodes yet)")
+            lines.append("")
+
+            if not all_lanes and lane not in ("S2", "S3"):
+                lines.append(f"## Starting Point on {lane} (build on the live frontier)")
+                ryd = lane_frontier.get("yardstick") if lane_frontier else None
+                compatible = bool(lane_frontier and (not ryd or not local_yd or ryd == local_yd))
+                if compatible and lane_frontier and lane_frontier.get("id"):
+                    fid = str(lane_frontier["id"])
+                    sp = lane_frontier.get("speedup")
+                    sp_s = f"{float(sp):.4g}x" if isinstance(sp, (int, float)) else "n/a"
+                    who = lane_frontier.get("author") or lane_frontier.get("agent_model") or "unknown"
+                    hyp = _clip(str(lane_frontier.get("hypothesis") or lane_frontier.get("title") or ""), 240)
+                    lines.append(f"- Current compatible frontier: `{fid}` ({sp_s}) by `{who}` — {hyp}")
+                    weak = _weakest_classes(_node_by_class(lane_frontier))
+                    if weak:
+                        lines.append(f"- Frontier weakest target classes (attack these first): {weak}")
+                    local_sub = lane_dir / "submission.py" if lane_dir is not None else None
+                    local_sha = _submission_stats(local_sub)[0] if (local_sub and local_sub.is_file()) else None
+                    f_sha = lane_frontier.get("code_sha")
+                    if f_sha and local_sha and f_sha == local_sha:
+                        lines.append(
+                            f"- Local `submission.py` already matches `{fid}` (sha `{local_sha}`). "
+                            f"Pass `--fork-of {fid}` on your first edit if starting a new run."
+                        )
+                    else:
+                        lines.append(
+                            f"- **Pick up from `{fid}` instead of starting from scratch** (unless testing a "
+                            f"deliberately clean-slate architecture):"
+                        )
+                        lines.append(
+                            f"  - `uv run apin autoresearch fetch --node {fid} "
+                            f"--out autoresearch/lanes/{lane}/submission.py --force`"
+                        )
+                        lines.append(
+                            f"  - Then pass `--fork-of {fid}` on your first `eval` in this run so lineage is recorded."
+                        )
+                else:
+                    lines.append(
+                        f"- No compatible live frontier posted for {lane} yet; start from "
+                        f"`autoresearch/lanes/{lane}/submission.py`."
+                    )
+                lines.append("")
+
+            kept_nodes = [
+                n for n in nodes
+                if (n.get("decision") in flywheel.KEPT_DECISIONS or n.get("decision") == "archive_only")
+                and (not local_yd or not n.get("yardstick") or n.get("yardstick") == local_yd)
+            ]
+            kept_nodes.sort(
+                key=lambda n: (
+                    float(n["speedup"]) if isinstance(n.get("speedup"), (int, float)) else -1.0,
+                    str(n.get("created_at") or ""),
+                ),
+                reverse=True,
+            )
+            lines.append(f"## Top Recent Kept Trials on {lane} (build on or combine these)")
+            if kept_nodes:
+                for n in kept_nodes[:6]:
+                    sp = n.get("speedup")
+                    sp_s = f"{float(sp):.4g}x" if isinstance(sp, (int, float)) else "n/a"
+                    who = n.get("author") or n.get("agent_model") or "?"
+                    src_tag = " [source]" if n.get("has_source") else ""
+                    hyp = _clip(str(n.get("hypothesis") or n.get("title") or ""), 240)
+                    lines.append(f"- `{n.get('id', '?')}` [{n.get('decision')}, {sp_s}, by `{who}`]{src_tag}: {hyp}")
+            else:
+                lines.append("- (none recorded on Flywheel)")
             lines.append("")
 
             active_claims = [c for c in claims if (c.get("status") or "active") == "active"]
@@ -795,11 +890,29 @@ def build_research_brief(
                 lines.append(f"... ({len(h_lines) - 25} more lines in `{handoff}`)")
         lines.append("")
 
-    lines += [
-        "## Action Checklist",
-        "- Prefer **composing** compatible verified ideas across lanes before inventing complex heuristics.",
-        "- Score each edit with `uv run apin autoresearch eval --lane " + lane + " --run-id <RUN_ID> --hypothesis \"...\"`. "
-        "It prints the speed-up over the starting code. A difference under 5% is noise.",
-        "- Freeze `submission.py` before running full real-Stan verification (`apin run logdensity` + `apin score --submission`).",
-    ]
+    if lane == "S2":
+        lines += [
+            "## Action Checklist (Lane S2 — Systems)",
+            "- Read `autoresearch/lanes/S2/program.md` and `upstream/STATUS.md` before editing.",
+            "- Initialize the target upstream submodule first if empty (e.g. `git submodule update --init upstream/math`).",
+            "- Score each clean-rebuilt change with `uv run apin autoresearch eval-s2 --upstream <name> --allowed-path <prefix> ...` (use `--dry-run` first).",
+            "- Share reusable findings and hypotheses on Flywheel via `uv run apin autoresearch note add --kind insight --lane S2 --title \"...\" --body \"...\"`.",
+        ]
+    elif lane == "S3":
+        lines += [
+            "## Action Checklist (Lane S3 — Rewind Calibration)",
+            "- Read `autoresearch/lanes/S3/program.md` and `autoresearch/lanes/S3/tasks.json`.",
+            "- Verify calibration with `uv run apin autoresearch eval-s3 --mode base` and `--mode reference`.",
+            "- Grade custom fixes with `uv run apin autoresearch eval-s3 --mode custom --submission <task_id>=<path/to/fix.py>`.",
+            "- Share findings, new rewind bug candidates, or AUARC results on Flywheel via `uv run apin autoresearch note add --kind insight --lane S3 --title \"...\" --body \"...\"`.",
+        ]
+    else:
+        lines += [
+            "## Action Checklist",
+            "- Start from the live Flywheel frontier when one exists (`fetch --node <id>` + `--fork-of <id>`), and prefer **composing** compatible verified ideas across lanes (`--combines <id>`) before inventing complex heuristics.",
+            "- Score each edit with `uv run apin autoresearch eval --lane " + lane + " --run-id <RUN_ID> --hypothesis \"...\"`. "
+            "It prints the speed-up over the starting code. A difference under 5% is noise.",
+            "- Record reusable learnings via `uv run apin autoresearch note add --kind insight --lane " + lane + " --title \"...\" --body \"...\"`.",
+            "- Freeze `submission.py` before running full real-Stan verification (`apin run logdensity` + `apin score --submission`).",
+        ]
     return "\n".join(lines) + "\n"

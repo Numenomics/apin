@@ -47,22 +47,22 @@ def test_normal_submission_runs_under_strict_sandbox(tmp_path, monkeypatch):
 
 
 def test_sandbox_blocks_secret_file_read_file_write_and_network_bypass(tmp_path, monkeypatch):
-    """Even if a submission bypasses AST import lint via getattr/__builtins__, Landlock + seccomp block it."""
+    """Even when a submission passes AST import lint (e.g. pure NumPy file I/O) or bypasses it,
+    Landlock + seccomp block secret file reads, file writes, and network sockets."""
     if not _linux_sandbox_available():
         pytest.skip("Linux Landlock/seccomp unavailable in this environment")
     monkeypatch.setenv(sandbox.ENV_SANDBOX, "strict")
 
     secret = tmp_path / "secret.txt"
-    secret.write_text("TOP_SECRET_DATA")
-    smuggle = tmp_path / "smuggled.txt"
+    secret.write_text("1.0 2.0\n")
+    smuggle = tmp_path / "smuggled.npy"
 
-    # 1. File read outside allowed roots is blocked by Landlock
+    # 1. File read outside allowed roots is blocked by Landlock even via allowed numpy I/O
     sub_read = tmp_path / "evil_read.py"
     sub_read.write_text(
         "import numpy as np\n"
         "def adapt(oracle, budget, rng):\n"
-        f"    fn = getattr(__builtins__, 'open', None) or __builtins__['op' + 'en']\n"
-        f"    fn({str(secret)!r}, 'r').read()\n"
+        f"    np.loadtxt({str(secret)!r})\n"
         "    x = np.zeros(oracle.dim)\n"
         "    oracle.log_density(x)\n"
         "    return {}, (x, None), [1.0], 'none'\n"
@@ -75,13 +75,12 @@ def test_sandbox_blocks_secret_file_read_file_write_and_network_bypass(tmp_path,
     with pytest.raises(RuntimeError, match="Permission"):
         ipc.run_isolated_adapt(counter, sub_read, budget, run_seed=1)
 
-    # 2. File write to /tmp or tmp_path is blocked by Landlock
+    # 2. File write to /tmp or tmp_path is blocked by Landlock even via allowed numpy I/O
     sub_write = tmp_path / "evil_write.py"
     sub_write.write_text(
         "import numpy as np\n"
         "def adapt(oracle, budget, rng):\n"
-        f"    fn = getattr(__builtins__, 'open', None) or __builtins__['op' + 'en']\n"
-        f"    fn({str(smuggle)!r}, 'w').write('leak')\n"
+        f"    np.save({str(smuggle)!r}, np.zeros(2))\n"
         "    x = np.zeros(oracle.dim)\n"
         "    oracle.log_density(x)\n"
         "    return {}, (x, None), [1.0], 'none'\n"
@@ -92,19 +91,18 @@ def test_sandbox_blocks_secret_file_read_file_write_and_network_bypass(tmp_path,
         ipc.run_isolated_adapt(counter, sub_write, budget, run_seed=2)
     assert not smuggle.exists()
 
-    # 3. IPv4 / IPv6 network socket creation is blocked by seccomp-BPF
-    sub_net = tmp_path / "evil_net.py"
-    sub_net.write_text(
-        "import numpy as np\n"
-        "def adapt(oracle, budget, rng):\n"
-        "    imp = getattr(__builtins__, '__im' + 'port__', None) or __builtins__['__im' + 'port__']\n"
-        "    s = imp('socket')\n"
-        "    s.socket(s.AF_INET, s.SOCK_STREAM)\n"
-        "    x = np.zeros(oracle.dim)\n"
-        "    oracle.log_density(x)\n"
-        "    return {}, (x, None), [1.0], 'none'\n"
-        "def transition(tuning, chain, oracle, rng):\n"
-        "    return chain.position, None\n"
+    # 3. IPv4 / IPv6 network socket creation is blocked by seccomp-BPF even if AST lint is bypassed
+    net_probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import socket; from pathlib import Path; from harness import sandbox; "
+            f"sandbox.confine_worker(Path({str(sub_read)!r}), mode='strict'); "
+            "socket.socket(socket.AF_INET, socket.SOCK_STREAM)",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
     )
-    with pytest.raises(RuntimeError, match="Operation not permitted|Permission"):
-        ipc.run_isolated_adapt(counter, sub_net, budget, run_seed=3)
+    assert net_probe.returncode != 0
+    assert "Operation not permitted" in net_probe.stderr or "Permission" in net_probe.stderr

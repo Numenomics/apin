@@ -30,6 +30,7 @@ import hashlib
 import json
 import math
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -293,9 +294,27 @@ def _summary(d: dict) -> dict:
     return out
 
 
+def _runtime_provenance(submission: Path | None = None, preflight: dict | None = None) -> dict:
+    """Capture Python/NumPy/SciPy/platform provenance (and full submission SHA-256) for details.json."""
+    if preflight is not None:
+        info = dict(preflight)
+    else:
+        import numpy as np
+        import scipy
+        info = {
+            "python": platform.python_version(),
+            "numpy": np.__version__,
+            "scipy": scipy.__version__,
+            "platform": platform.platform(),
+        }
+    if submission is not None and submission.is_file():
+        info["submission_sha256"] = grade.sha256(submission)
+    return info
+
+
 def verify_optimize(lane: str, submission: Path, out_dir: Path, *, tests_dir: Path | None = None,
                     overrides: dict[str, Path] | None = None, cfg: dict | None = None,
-                    margin: float = IMPROVEMENT_MARGIN) -> int:
+                    margin: float = IMPROVEMENT_MARGIN, runtime_info: dict | None = None) -> int:
     t_start = time.perf_counter()
     cfg = cfg or scoring_config()
     lane = lane.upper()
@@ -305,7 +324,8 @@ def verify_optimize(lane: str, submission: Path, out_dir: Path, *, tests_dir: Pa
     sub = Path(submission)
     digest = judge.judge_digest()
     base_payload = {"lane": lane, "task": LANE_TASKS.get(lane), "config": cfg, "repeats": cfg["repeats"],
-                    "improvement_margin": margin, "judge_digest": digest}
+                    "improvement_margin": margin, "judge_digest": digest,
+                    "runtime": _runtime_provenance(sub if sub.is_file() else None, runtime_info)}
     if not sub.is_file():
         _write_rewards(out_dir, 0.0, {**base_payload, "passed": 0, "solved": 0, "improved": 0, "unscorable": 0,
                                       "confirmed": 0, "confirmation": {"ran": False},
@@ -389,6 +409,38 @@ _CONFINEMENT_PROBE = (
     "sandbox.confine_worker(Path(sys.argv[1]), mode='strict')"
 )
 
+_ENV_PREFLIGHT_PROBE = (
+    "import json, platform, numpy as np, scipy; "
+    "from scipy.linalg import solve_triangular; "
+    "a = np.array([[4.0, 2.0], [2.0, 3.0]]); "
+    "l = np.linalg.cholesky(a); "
+    "b = np.array([1.0, 2.0]); "
+    "x = solve_triangular(l, b, lower=True); "
+    "assert np.allclose(l @ l.T, a) and np.allclose(l @ x, b); "
+    "print(json.dumps({'python': platform.python_version(), 'numpy': np.__version__, "
+    "'scipy': scipy.__version__, 'platform': platform.platform()}))"
+)
+
+
+def environment_preflight() -> dict:
+    """Trusted runtime sanity check before any grading (no candidate code is imported).
+
+    Verifies Python/NumPy/SciPy linear algebra in an isolated subprocess so broken BLAS/container
+    state surfaces as a verifier setup failure (no reward written) rather than reward 0.
+    """
+    res = subprocess.run([sys.executable, "-I", "-c", _ENV_PREFLIGHT_PROBE],
+                         capture_output=True, text=True, timeout=60, cwd=str(ROOT))
+    if res.returncode != 0:
+        lines = [ln for ln in (res.stderr or res.stdout).strip().splitlines() if ln.strip()]
+        raise SystemExit("verifier setup failure, no reward written: environment preflight failed "
+                         f"({lines[-1] if lines else f'exit {res.returncode}'})")
+    try:
+        info = json.loads(res.stdout.strip().splitlines()[-1])
+        assert isinstance(info, dict) and info.get("numpy") and info.get("scipy")
+        return info
+    except Exception as e:
+        raise SystemExit(f"verifier setup failure, no reward written: invalid preflight output ({e})") from None
+
 
 def require_confinement() -> None:
     """Stop before any grading when this machine cannot confine agent code.
@@ -439,8 +491,10 @@ def main(argv: list[str] | None = None) -> int:
     # code must not run here unless both confinement layers are active, so a layer that fails to
     # install fails the run instead of being skipped.
     os.environ[sandbox.ENV_SANDBOX] = "strict"
+    runtime_info = environment_preflight()
     require_confinement()
-    return verify_optimize(a.lane, a.submission, out_dir, tests_dir=a.tests_dir, overrides=overrides, cfg=cfg)
+    return verify_optimize(a.lane, a.submission, out_dir, tests_dir=a.tests_dir, overrides=overrides, cfg=cfg,
+                           runtime_info=runtime_info)
 
 
 if __name__ == "__main__":

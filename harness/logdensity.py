@@ -49,8 +49,16 @@ ALLOWED_IMPORTS = {
 }
 FORBIDDEN_NAMES = {
     "open", "exec", "eval", "compile", "__import__", "breakpoint",
-    "input", "globals", "vars",
+    "input", "globals", "vars", "locals", "dir", "setattr", "delattr",
+    "__builtins__", "__loader__", "__spec__",
 }
+FORBIDDEN_ATTRS = frozenset({
+    "__globals__", "__closure__", "__code__", "__builtins__", "__subclasses__",
+    "__bases__", "__mro__", "__dict__", "__class__", "__import__", "__loader__",
+    "__spec__", "__file__", "__reduce__", "__reduce_ex__", "__getattribute__",
+    "__setattr__", "__delattr__",
+})
+MAX_SOURCE_BYTES = 256 * 1024  # 256 KiB submission source cap (matches Flywheel)
 ALLOWED_AUX_KINDS = ("none", "normal", "unit_sphere", "uniform_discrete", "product")
 MAX_TUNING_BYTES = 16 * 1024 * 1024  # 16 MiB serialized tuning cap
 REPLAY_STEPS = 20
@@ -565,6 +573,7 @@ class Counter:
         self.exceeded = ""
         self.t0 = _now() if started is None else started
         self.step_seen: set[bytes] = set()
+        self._step_start = (0, 0, 0, 0)
 
     @property
     def total_calls(self) -> int:
@@ -572,6 +581,12 @@ class Counter:
 
     def reset_step(self) -> None:
         self.step_seen.clear()
+        self._step_start = (self.density, self.gradient, self.hvp_calls, self.hess_calls)
+
+    def step_counts(self) -> list[int]:
+        """Per-step oracle call counts `[density, gradient, hvp, hess]` since last `reset_step()`."""
+        d0, g0, hvp0, hess0 = self._step_start
+        return [self.density - d0, self.gradient - g0, self.hvp_calls - hvp0, self.hess_calls - hess0]
 
     def oracle(self) -> Oracle:
         """Return an input-blind Oracle whose callables expose no Counter or model attributes."""
@@ -697,10 +712,27 @@ class Counter:
 # ---------------------------------------------------------------------------
 
 def check_imports(source: str) -> None:
-    """Reject imports outside ALLOWED_IMPORTS and builtins in FORBIDDEN_NAMES. A lint, not a sandbox."""
+    """Reject oversized files, imports outside ALLOWED_IMPORTS, forbidden builtins, and reflection dunders.
+
+    A static lint, not a sandbox (runtime isolation is enforced by harness.ipc and harness.sandbox).
+    """
+    nbytes = len(source.encode("utf-8"))
+    if nbytes > MAX_SOURCE_BYTES:
+        raise ImportError(f"submission is {nbytes} bytes, exceeding cap {MAX_SOURCE_BYTES}")
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
             raise ImportError(f"line {node.lineno}: {node.id!r} is not allowed")
+        if isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_ATTRS:
+            raise ImportError(f"line {node.lineno}: access to {node.attr!r} is not allowed")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr":
+            if len(node.args) < 2 or not (
+                isinstance(node.args[1], ast.Constant)
+                and isinstance(node.args[1].value, str)
+                and not node.args[1].value.startswith("__")
+            ):
+                raise ImportError(
+                    f"line {node.lineno}: getattr() requires a plain non-dunder string attribute name"
+                )
         if isinstance(node, ast.Import):
             roots = [a.name.split(".")[0] for a in node.names]
         elif isinstance(node, ast.ImportFrom):
@@ -861,6 +893,7 @@ def run_sample_phase(model, submission: Path | str | tuple[Callable, Callable], 
     saved_singles: list[dict] = []
     win_start_saved = False
     win_out_digests: list[tuple[str, str]] = []
+    win_call_counts: list[list[int]] = []
 
     for step in range(limits.draws):
         if step in need_single:
@@ -875,6 +908,7 @@ def run_sample_phase(model, submission: Path | str | tuple[Callable, Callable], 
         next_pos, next_aux, _ = normalize_chain(raw_next, counter.dim, expected_walkers=walkers, expected_is_1d=is_1d)
         validate_aux(aux_spec, next_aux, walkers, counter.dim, is_1d)
         counter.check_step_provenance(prev_pos, next_pos)
+        step_calls = counter.step_counts()
         draws[:, step, :] = next_pos
         pos_2d, aux = next_pos, next_aux
         if step in need_single:
@@ -882,9 +916,11 @@ def run_sample_phase(model, submission: Path | str | tuple[Callable, Callable], 
                 "step": step,
                 "pos_sha": canonical_digest(pos_2d),
                 "aux_sha": canonical_digest(aux),
+                "calls": step_calls,
             })
         if win_start <= step <= win_end:
             win_out_digests.append((canonical_digest(pos_2d), canonical_digest(aux)))
+            win_call_counts.append(step_calls)
 
     if canonical_digest(tuning) != adapt_meta["tuning_sha256"]:
         raise ContractError("tuning was mutated during transition() (SHA-256 mismatch)")
@@ -903,7 +939,7 @@ def run_sample_phase(model, submission: Path | str | tuple[Callable, Callable], 
         "seconds": seconds,
         "eval_s": counter.eval_s,
         "replay_singles": saved_singles,
-        "replay_window": {"steps": win_steps, "digests": win_out_digests},
+        "replay_window": {"steps": win_steps, "digests": win_out_digests, "call_counts": win_call_counts},
     }
     (bundle_dir / "sample_meta.json").write_text(json.dumps(meta, indent=1))
     return draws, meta
@@ -926,7 +962,8 @@ def run_replay_phase(model, submission: Path | str | tuple[Callable, Callable], 
     counter = Counter(model, max_evaluations=10**9, max_seconds=1e9, capabilities=capabilities)
     oracle = counter.oracle()
 
-    for rec in sample_meta["replay_singles"]:
+    # Replay singles in reverse step order so adjacent selected steps cannot warm-hit a hidden cache.
+    for rec in reversed(sample_meta["replay_singles"]):
         step = int(rec["step"])
         c_in = deserialize_tree(ckpt_dir / f"in_{step}")
         pos_in = np.array(c_in["position"], dtype=np.float64)
@@ -937,14 +974,20 @@ def run_replay_phase(model, submission: Path | str | tuple[Callable, Callable], 
         validate_aux(aux_spec, aux_out, walkers, counter.dim, is_1d)
         if canonical_digest(pos_out) != rec["pos_sha"] or canonical_digest(aux_out) != rec["aux_sha"]:
             raise ContractError(f"replay mismatch at step {step}: transition() is not deterministic/stateless")
+        if "calls" in rec and counter.step_counts() != list(rec["calls"]):
+            raise ContractError(
+                f"replay oracle call-count mismatch at step {step}: got {counter.step_counts()}, "
+                f"recorded {rec['calls']} (hidden cache or state across transition() calls)"
+            )
 
     win = sample_meta.get("replay_window") or {}
     win_steps = win.get("steps") or []
+    win_calls = win.get("call_counts")
     if win_steps:
         c_in = deserialize_tree(ckpt_dir / f"win_in_{win_steps[0]}")
         pos_cur = np.array(c_in["position"], dtype=np.float64)
         aux_cur = c_in["aux"]
-        for step, (want_pos, want_aux) in zip(win_steps, win["digests"]):
+        for idx, (step, (want_pos, want_aux)) in enumerate(zip(win_steps, win["digests"])):
             counter.reset_step()
             raw_next = transition_fn(tuning, _make_chain_arg(pos_cur, aux_cur, is_1d), oracle, step_rng(run_seed, step))
             pos_cur, aux_cur, _ = normalize_chain(
@@ -952,6 +995,11 @@ def run_replay_phase(model, submission: Path | str | tuple[Callable, Callable], 
             )
             if canonical_digest(pos_cur) != want_pos or canonical_digest(aux_cur) != want_aux:
                 raise ContractError(f"replay window mismatch at step {step}: hidden state across steps")
+            if win_calls is not None and idx < len(win_calls) and counter.step_counts() != list(win_calls[idx]):
+                raise ContractError(
+                    f"replay window oracle call-count mismatch at step {step}: got {counter.step_counts()}, "
+                    f"recorded {win_calls[idx]} (hidden cache or state across transition() calls)"
+                )
 
     if canonical_digest(tuning) != adapt_meta["tuning_sha256"]:
         raise ContractError("replay: tuning was mutated during replay")

@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
+import scipy
 from scipy.linalg import solve_triangular
 
 from . import logdensity
@@ -56,6 +57,7 @@ def judge_digest() -> str:
       - invariance.py: the invariance, rank and mixing checks and the efficiency measure
       - judge.py: the lane seams and the fixed kernels of lanes A1 and A4
       - grade.py: the suites, the seeds, the scoring configuration and the confirmation rule
+      - numpy and scipy versions (changes to RNG or BLAS/LAPACK routines can shift numbers)
     The lane loop (autoresearch.py: ledger, decisions, archive, output) is left out. Its
     bookkeeping never changes a score, and hashing it would void every frozen score on each edit.
     """
@@ -64,6 +66,7 @@ def judge_digest() -> str:
     h = hashlib.sha256()
     for mod in (logdensity, ipc, sandbox, shapes, invariance, sys.modules[__name__], grade):
         h.update(Path(mod.__file__).read_bytes())
+    h.update(f"numpy={np.__version__};scipy={scipy.__version__}\n".encode("utf-8"))
     return h.hexdigest()[:16]
 
 

@@ -488,3 +488,44 @@ def test_submission_is_never_imported_in_the_judging_process(tmp_path):
     broken.write_text("def adapt(oracle, budget, rng):\n    return None\n")
     with pytest.raises(RuntimeError, match="must define both adapt"):
         grade.load_check(broken, None)
+
+
+def test_research_brief_shows_live_frontier_pickup_and_systems_checklists(tmp_path, monkeypatch):
+    from harness import flywheel
+
+    lane_dir = tmp_path / "lanes" / "A1"
+    lane_dir.mkdir(parents=True)
+    (lane_dir / "submission.py").write_text("# local start\n")
+    (lane_dir / "yardstick.json").write_text(json.dumps({"id": "A1-yd1"}))
+
+    monkeypatch.setattr(flywheel, "get_frontier", lambda **kw: {
+        "frontier": [{
+            "id": "A1:r0:T0004", "lane": "A1", "speedup": 2.35, "yardstick": "A1-yd1",
+            "author": "alice", "code_sha": "deadbeef12345678", "verified": 0,
+            "hypothesis": "shrunk diagonal metric with dual averaging",
+            "metrics_json": json.dumps({"by_class": {"funnel": 0.01, "banana": 0.05, "gaussian": 0.2}}),
+        }]
+    })
+    monkeypatch.setattr(flywheel, "get_nodes", lambda **kw: {
+        "nodes": [
+            {"id": "A1:r0:T0004", "decision": "keep", "speedup": 2.35, "yardstick": "A1-yd1",
+             "author": "alice", "has_source": True, "hypothesis": "shrunk diagonal metric"},
+            {"id": "A1:r0:T0003", "decision": "discard_no_gain", "speedup": 0.9, "yardstick": "A1-yd1",
+             "author": "alice", "hypothesis": "tiny step size"},
+        ]
+    })
+    monkeypatch.setattr(flywheel, "get_claims", lambda **kw: {"claims": []})
+    monkeypatch.setattr(flywheel, "list_notes", lambda **kw: {"notes": []})
+
+    brief_a1 = autoresearch.build_research_brief("A1", autoresearch_dir=tmp_path, flywheel_url="http://mock")
+    assert "Starting Point on A1" in brief_a1
+    assert "fetch --node A1:r0:T0004 --out autoresearch/lanes/A1/submission.py --force" in brief_a1
+    assert "--fork-of A1:r0:T0004" in brief_a1
+    assert "funnel=0.01" in brief_a1
+    assert "Top Recent Kept Trials on A1" in brief_a1
+    assert "shrunk diagonal metric" in brief_a1
+
+    brief_s2 = autoresearch.build_research_brief("S2", autoresearch_dir=tmp_path, offline=True)
+    assert "eval-s2" in brief_s2 and "apin autoresearch eval --lane S2" not in brief_s2
+    brief_s3 = autoresearch.build_research_brief("S3", autoresearch_dir=tmp_path, offline=True)
+    assert "eval-s3" in brief_s3 and "apin autoresearch eval --lane S3" not in brief_s3

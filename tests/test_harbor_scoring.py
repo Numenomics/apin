@@ -181,6 +181,16 @@ def test_the_verifier_requires_both_confinement_layers(verify, tmp_path, monkeyp
     assert not seen and not (tmp_path / "o").exists()
 
 
+def test_verifier_environment_preflight_and_runtime_provenance(verify, tmp_path, monkeypatch):
+    info = verify.environment_preflight()
+    assert info["python"] and info["numpy"] and info["scipy"] and info["platform"]
+
+    monkeypatch.setattr(verify, "_ENV_PREFLIGHT_PROBE", "raise RuntimeError('broken blas')")
+    with pytest.raises(SystemExit, match="verifier setup failure.*environment preflight"):
+        verify.main(["optimize", "--lane", "A2", "--submission", str(tmp_path / "s.py"), "--out-dir", str(tmp_path / "o2")])
+    assert not (tmp_path / "o2").exists()
+
+
 def test_denominators_never_ship_in_the_agent_image():
     for task in TASKS.iterdir():
         for name in ("reference.py", "frontier.py", "frozen_scores.json"):
@@ -229,6 +239,8 @@ def test_optimize_output_shape(verify, tmp_path, monkeypatch):
     assert details["outcome"] == "solved" and details["lane"] == "A2" and details["task"] == "a2-funnel-dynamics"
     assert details["reference"] == {"name": "stan-nuts-diag-2.37", "file": "reference.py", "source": "live", "valid": True}
     assert details["judge_digest"] == judge.judge_digest()
+    assert details["runtime"]["numpy"] and details["runtime"]["scipy"]
+    assert details["runtime"]["submission_sha256"] == grade.sha256(sub)
     assert set(details["denominators"]) == {"start", "reference", "frontier"}
     assert details["denominators"]["start"]["source"] == "live" and details["by_class"]["funnel"] == 9.0e-4
     assert details["config"] == verify.scoring_config() and details["improvement_margin"] == verify.IMPROVEMENT_MARGIN
