@@ -25,6 +25,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PRICING = ROOT / "benchmarks" / "pricing.json"
+RULE_BREAKS = ROOT / "benchmarks" / "rule_breaks.json"
 DEFAULT_OUT_JSON = ROOT / "flywheel" / "public" / "data" / "benchmark.json"
 TASKS_DIR = ROOT / "harbor" / "tasks"
 DEFAULT_RELEASE = "bench-v0.3.0"  # the current release. A job is never assigned to it by default.
@@ -645,11 +646,25 @@ def _release_order(tag: str) -> tuple[int, ...]:
     return tuple(int(x) for x in re.findall(r"\d+", tag))
 
 
-def aggregate_results(trials: list[dict[str, Any]], pricing: dict[str, Any], *, release_tag: str) -> dict[str, Any]:
+def load_rule_breaks(path: Path = RULE_BREAKS) -> dict[str, dict[str, str]]:
+    """Attempts a maintainer found to break a rule the verifier cannot check, by `<release>/<trial id>`."""
+    return json.loads(path.read_text(encoding="utf-8")).get("attempts", {}) if path.is_file() else {}
+
+
+def aggregate_results(trials: list[dict[str, Any]], pricing: dict[str, Any], *, release_tag: str,
+                      rule_breaks: dict[str, dict[str, str]] | None = None) -> dict[str, Any]:
     """Site data: one self-contained block per release, newest first. Releases are never pooled."""
+    breaks = load_rule_breaks() if rule_breaks is None else rule_breaks
     by_release: dict[str, list[dict[str, Any]]] = {}
     for t in map(classify_attempt, trials):
-        by_release.setdefault(str(t.get("release") or release_tag), []).append(t)
+        release = str(t.get("release") or release_tag)
+        t.pop("rule_break", None)
+        ruling = breaks.get(f"{release}/{t['trial_id']}")
+        if ruling and t["outcome"] not in NOT_SCORED:
+            # The verifier passed it and a reader of the submission did not. It counts like any
+            # attempt that failed a check, and keeps its measured numbers as a record.
+            t.update(outcome="invalid", rule_break=ruling)
+        by_release.setdefault(release, []).append(t)
     releases = [summarise_release(tag, rows, pricing) for tag, rows in sorted(by_release.items(), key=lambda kv: _release_order(kv[0]), reverse=True)]
     return {
         "schema_version": 3,

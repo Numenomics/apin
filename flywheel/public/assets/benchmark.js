@@ -66,7 +66,7 @@
   function attemptLabel(t) {
     const ends = { provider_limit: "the model provider cut it off", infrastructure: "the infrastructure failed", agent_crash: "the agent never started" };
     if (t.outcome === "interrupted") return `did not finish: ${ends[t.termination] || "interrupted"}`;
-    if (t.outcome === "invalid") return "failed the checks";
+    if (t.outcome === "invalid") return t.rule_break ? `broke a rule (${t.rule_break.rules})` : "failed the checks";
     if (t.outcome === "unscorable") return "could not be scored";
     if (!isNum(t.start_speedup)) return "no ratio recorded";
     return `${fmt.times(t.start_speedup)} the starting code`;
@@ -306,7 +306,7 @@
     const ended = { finished: "the agent finished", time_limit: "reached the time limit", agent_error: "the agent exited with an error", provider_limit: "the model provider cut it off", infrastructure: "the infrastructure failed", agent_crash: "the agent never started" };
     const facts = [];
     if (t.outcome !== "interrupted") {
-      facts.push(pair("Against the starting code", fmt.times(t.start_speedup)));
+      facts.push(pair(t.rule_break ? "Measured against the starting code, not counted" : "Against the starting code", fmt.times(t.start_speedup)));
       if (isNum(t.ref_speedup)) facts.push(pair("Against the Stan-style reference", fmt.times(t.ref_speedup)));
       if (isNum(t.frontier_speedup)) facts.push(pair("Against the best autoresearch sampler", fmt.times(t.frontier_speedup)));
       facts.push(pair("Efficiency", fmt.eff(t.soft_min_eff)), pair("Starting code", fmt.eff(t.start_soft_min)));
@@ -344,13 +344,14 @@
     const failed = (t.failed_targets || []).length ? `<div><h4>Failed targets</h4>${t.failed_targets.map((x) => `<p class="quote">${esc(x)}</p>`).join("")}</div>` : "";
     const note = t.approach_summary ? `<div><h4>The agent's closing note</h4><pre class="log">${esc(t.approach_summary)}</pre></div>` : "";
     const error = t.error ? `<div><h4>Run error</h4><pre class="log">${esc(t.error)}</pre></div>` : "";
+    const ruling = t.rule_break ? `<div><h4>Why it does not count</h4><p class="quote">${esc(t.rule_break.reason)}</p></div>` : "";
 
     document.querySelectorAll(".heat.is-open").forEach((n) => n.classList.remove("is-open"));
     document.querySelectorAll(`.heat[data-run="${CSS.escape(key)}"]`).forEach((n) => n.classList.add("is-open"));
     apin.drawer.open({
       title: meta(rel, taskId).title,
       sub: `${taskId} · ${row.label || t.model} at ${t.effort} effort · ${t.agent || "unknown agent"} · ${t.trial_id}`,
-      body: `<div>${status(tone, attemptLabel(t))}</div>${chips}<div class="kv">${facts.join("")}</div>${classHtml}${failed}${note}${error}`,
+      body: `<div>${status(tone, attemptLabel(t))}</div>${ruling}${chips}<div class="kv">${facts.join("")}</div>${classHtml}${failed}${note}${error}`,
     });
   }
 

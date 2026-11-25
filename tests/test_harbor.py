@@ -175,6 +175,30 @@ def test_collector_reaggregates_the_published_benchmark_file(tmp_path):
     assert earlier and all(r["task_meta"] == before[r["release"]]["task_meta"] for r in earlier)
 
 
+def test_a_listed_rule_break_counts_as_a_failed_attempt():
+    """An attempt the verifier passed and a reader of its submission did not."""
+    mod = _load_collector()
+    trial = {"trial_id": "a3__x", "task_id": "a3-integrator-trajectory", "category": "optimize", "release": mod.DEFAULT_RELEASE,
+             "config_key": "m#default", "model": "m", "effort": "default", "termination": "finished",
+             "verifier_outcome": "solved", "passed": True, "start_speedup": 1737.0, "ref_speedup": 1222.0}
+    ruling = {"rules": "R-003", "reason": "identifies the target"}
+    pricing = {"models": {}}
+    clean = mod.aggregate_results([trial], pricing, release_tag=mod.DEFAULT_RELEASE, rule_breaks={})
+    assert clean["releases"][0]["trials"][0]["outcome"] == "solved"
+    data = mod.aggregate_results([trial], pricing, release_tag=mod.DEFAULT_RELEASE,
+                                 rule_breaks={f"{mod.DEFAULT_RELEASE}/a3__x": ruling})
+    rel = data["releases"][0]
+    got = rel["trials"][0]
+    assert got["outcome"] == "invalid" and got["rule_break"] == ruling and got["start_speedup"] == 1737.0
+    cell = rel["leaderboard"][0]["tasks"]["a3-integrator-trajectory"]
+    assert cell["valid"] == 0 and cell["speedup"] == mod.INVALID_FLOOR
+    # Taking the entry off the list counts the attempt again, also when it is read back from the data file.
+    again = mod.aggregate_results(rel["trials"], pricing, release_tag=mod.DEFAULT_RELEASE, rule_breaks={})
+    assert again["releases"][0]["trials"][0]["outcome"] == "solved" and "rule_break" not in again["releases"][0]["trials"][0]
+    # Every listed attempt names its rules and a reason.
+    assert all(v.get("rules") and v.get("reason") for v in mod.load_rule_breaks().values())
+
+
 def _load_collector():
     import importlib.util
 
