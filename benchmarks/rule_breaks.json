@@ -1,0 +1,9 @@
+{
+  "_comment": "Attempts that pass the verifier and still break a rule it cannot check, found by reading the submission. Key: <release>/<trial id>. A listed attempt counts as failed. Remove the entry to count it again.",
+  "attempts": {
+    "bench-v0.3.0/a3-integrator-trajectory__DicUhQY": {
+      "rules": "R-002, R-003",
+      "reason": "The sampler identifies the target. It fits a Gaussian, a two-mode mixture, a Student-t, a funnel and a banana, which are the benchmark's own target shapes, and then draws from the fit. It also keeps a density cache in a module global between transition() calls, so it is billed for fewer evaluations than it uses."
+    }
+  }
+}
