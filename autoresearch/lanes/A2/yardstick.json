@@ -4,7 +4,7 @@
   "role": "start",
   "file": "start.py",
   "sha256": "48738f78c2fe557b19d65633e6db379673b5a2e814852e9b52f0a24c2707bb27",
-  "judge_digest": "c4ee69e1a8771dd4",
+  "judge_digest": "2bb9bf0226c00176",
   "config": {
     "seed": 15800004,
     "dims": [
@@ -26,7 +26,7 @@
   "long_horizon_soft_min": 0.00035340075123152195,
   "median_adapt_cost": 1607.0,
   "b2_max": 0.140625,
-  "overhead_ratio": 4.899729507623665,
+  "overhead_ratio": 3.415124698138249,
   "by_class": {
     "banana": 0.0019813603073168774,
     "funnel": 0.0020164882409090716,
@@ -115,7 +115,7 @@
   "confirmation": {
     "ran": false
   },
-  "wall_s": 327.8,
-  "id": "A2-2d1d93ca843f",
-  "frozen_at": "2026-11-24T02:27:27+00:00"
+  "wall_s": 378.0,
+  "id": "A2-ea658f29ed0d",
+  "frozen_at": "2026-11-25T23:42:26+00:00"
 }

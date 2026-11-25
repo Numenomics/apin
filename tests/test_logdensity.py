@@ -129,9 +129,27 @@ def test_canonical_serialization_and_digest_sensitivity(tmp_path):
 
 
 def test_import_lint_and_examples():
-    for src in ("import os", "from subprocess import run", "from . import helper", "eval('1')", "open('x')"):
+    for src in (
+        "import os",
+        "from subprocess import run",
+        "from . import helper",
+        "eval('1')",
+        "open('x')",
+        "locals()",
+        "dir()",
+        "setattr(x, 'a', 1)",
+        "x.__globals__",
+        "x.__subclasses__()",
+        "getattr(x, '__globals__')",
+        "getattr(x, name)",
+    ):
         with pytest.raises(ImportError):
             check_imports(src)
+    # Non-dunder constant getattr (e.g. getattr(budget, 'draws', 100)) remains allowed
+    check_imports("getattr(budget, 'draws', 100)\n")
+    # Oversized submission rejected
+    with pytest.raises(ImportError, match="exceeding cap"):
+        check_imports("# " + ("a" * (logdensity.MAX_SOURCE_BYTES + 10)))
     for f in EXAMPLES.glob("*.py"):
         check_imports(f.read_text())
 
@@ -189,6 +207,39 @@ def test_hidden_global_state_in_transition_fails_replay(tmp_path):
     )
     with pytest.raises(ContractError, match="replay"):
         execute_run(FakeModel(), sub, Budget(1, 10, 500, 60.0), run_seed=7, work_dir=tmp_path)
+
+
+def test_cross_step_gradient_cache_fails_replay_call_count_parity(tmp_path):
+    """R-011: caching log_density_gradient across transition() calls in a module dict produces
+    identical (pos, aux) outputs on replay, but fails per-step oracle call-count parity."""
+    sub = tmp_path / "cached_grad.py"
+    sub.write_text(
+        "import numpy as np\n"
+        "_CACHE = {}\n"
+        "def _cached_grad(oracle, x):\n"
+        "    k = np.ascontiguousarray(x, dtype=np.float64).tobytes()\n"
+        "    if k not in _CACHE:\n"
+        "        _CACHE[k] = oracle.log_density_gradient(x)\n"
+        "    return _CACHE[k]\n"
+        "def adapt(oracle, budget, rng):\n"
+        "    x = np.zeros(oracle.dim)\n"
+        "    oracle.log_density_gradient(x)\n"
+        "    return {'step': 0.25}, (x, None), [1.0], 'none'\n"
+        "def transition(tuning, chain, oracle, rng):\n"
+        "    x = chain.position\n"
+        "    lp0, g0 = _cached_grad(oracle, x)\n"
+        "    prop = x + tuning['step'] * rng.standard_normal(oracle.dim)\n"
+        "    lp1, g1 = _cached_grad(oracle, prop)\n"
+        "    if np.isfinite(lp1) and rng.uniform() < np.exp(min(0.0, lp1 - lp0)):\n"
+        "        return prop, None\n"
+        "    return x, None\n"
+    )
+    with pytest.raises(ContractError, match="call-count mismatch"):
+        execute_run(FakeModel(), sub, Budget(1, 15, 500, 60.0), run_seed=19, work_dir=tmp_path / "inproc", replay_count=6)
+    with pytest.raises(ContractError, match="call-count mismatch"):
+        ipc.execute_run_isolated(
+            FakeModel(), sub, Budget(1, 15, 500, 60.0), run_seed=19, work_dir=tmp_path / "ipc", replay_count=6
+        )
 
 
 def test_clean_post_adapt_subprocess_blocks_adapt_global_smuggling(tmp_path):

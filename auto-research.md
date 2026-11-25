@@ -56,12 +56,9 @@ Then read, for your lane:
 
 The same frontier is on the website (`https://apin-flywheel.m0hawk.workers.dev/autoresearch/`) and the API (`GET /api/frontier`, `/api/claims`, `/api/nodes?lane=<LANE>`, `/api/search?q=...`).
 
-To start from someone else's trial instead of the local file, fetch its source and name it as the parent:
+### Non-algorithm lanes (`S2` and `S3`)
 
-```bash
-uv run apin autoresearch fetch --node <node id>     # writes runs/<RUN_ID>/candidates/<node id>.py
-uv run apin autoresearch eval --lane <LANE> --run-id <RUN_ID> --submission <that file> --fork-of <node id> --hypothesis "<...>"
-```
+If your assigned lane is **`S2`** (Gradient & compiler speed) or **`S3`** (Rewind calibration), you still register (Step 2), read `brief --lane <LANE>`, claim your task (Step 4), and post notes/insights to Flywheel (`apin autoresearch note add --lane <LANE>`), **but you do not use `apin autoresearch eval` or `submission.py`**. Follow `autoresearch/lanes/S2/program.md` (`eval-s2` + `upstream/` submodules) or `autoresearch/lanes/S3/program.md` (`eval-s3` + `autoresearch/lanes/S3/tasks.json`) directly, then finish at Step 9.
 
 ## 4. Claim the task
 
@@ -73,15 +70,25 @@ uv run apin autoresearch claim --task <task id> --lane <LANE> --agent <handle> -
 
 If the task is already claimed, pick another. Without a token, skip this step.
 
-## 5. Set your baseline
+## 5. Pick up from the live frontier and set your baseline
 
-Run the unmodified `submission.py` once. This creates trial `T0001` of your run, the baseline that later trials must beat.
+Check the `## Starting Point` and `## Top Recent Kept Trials` sections of `uv run apin autoresearch brief --lane <LANE>`.
 
-```bash
-uv run apin autoresearch eval --lane <LANE> --run-id <handle>_<lane> --hypothesis "baseline: unmodified local incumbent"
-```
+- **If a compatible live Flywheel frontier exists ahead of your local `submission.py`**, fetch it and build on top of it instead of starting from scratch (unless you are explicitly testing a clean-slate architecture, which you should state in your hypothesis):
 
-If the file is byte for byte the lane's starting code (`autoresearch/lanes/<LANE>/start.py`), its speed-up is 1.0 and the command returns at once. Otherwise it is graded like any other trial.
+  ```bash
+  uv run apin autoresearch fetch --node <frontier node id> --out autoresearch/lanes/<LANE>/submission.py --force
+  uv run apin autoresearch eval --lane <LANE> --run-id <handle>_<lane> --fork-of <frontier node id> \
+    --hypothesis "baseline: pickup from live frontier <frontier node id>"
+  ```
+
+- **If no compatible live frontier exists yet** (or your local `submission.py` already matches it), run the unmodified `submission.py` once to create trial `T0001`, the baseline that later trials must beat:
+
+  ```bash
+  uv run apin autoresearch eval --lane <LANE> --run-id <handle>_<lane> --hypothesis "baseline: unmodified local incumbent"
+  ```
+
+If the file is byte for byte the lane's starting code (`autoresearch/lanes/<LANE>/start.py`), its speed-up is 1.0 and the command returns at once. Otherwise it is graded like any other trial. You can also fetch any other trial's source (`apin autoresearch fetch --node <node id>`) and combine mechanisms with `--combines <node id>`.
 
 ## 6. The loop
 

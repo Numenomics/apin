@@ -2,7 +2,7 @@
   "schema": 2,
   "lane": "A4",
   "task": "a4-nonlinear-transport",
-  "judge_digest": "c4ee69e1a8771dd4",
+  "judge_digest": "2bb9bf0226c00176",
   "config": {
     "seed": 72432996,
     "dims": [
@@ -16,7 +16,7 @@
     "horizon_steps": 500,
     "confirmation_seed": 75713498
   },
-  "frozen_at": "2026-11-24T02:52:30+00:00",
+  "frozen_at": "2026-11-25T23:42:26+00:00",
   "reference_name": "stan-windowed-diag-affine-2.37",
   "scores": {
     "start": {
@@ -24,7 +24,7 @@
       "role": "start",
       "file": "baseline.py",
       "sha256": "232805dbfcd36b75f4a97e63b0e751b1e3ec1c93b6bcb3c6e77febdb82c62bd6",
-      "judge_digest": "c4ee69e1a8771dd4",
+      "judge_digest": "2bb9bf0226c00176",
       "config": {
         "seed": 72432996,
         "dims": [
@@ -46,7 +46,7 @@
       "long_horizon_soft_min": 0.0005130867471159447,
       "median_adapt_cost": 662.0,
       "b2_max": 0.1957442242717266,
-      "overhead_ratio": 5.843640362030035,
+      "overhead_ratio": 4.152273100813966,
       "by_class": {
         "banana": 0.0015675040893481438,
         "funnel": 0.002020850680360777,
@@ -135,14 +135,14 @@
       "confirmation": {
         "ran": false
       },
-      "wall_s": 333.5
+      "wall_s": 351.1
     },
     "reference": {
       "lane": "A4",
       "role": "reference",
       "file": "reference.py",
       "sha256": "1a260ce42a4a98828725c4f850d08324b1410bd5fe510e3f68e45a5ff723367e",
-      "judge_digest": "c4ee69e1a8771dd4",
+      "judge_digest": "2bb9bf0226c00176",
       "config": {
         "seed": 72432996,
         "dims": [
@@ -164,7 +164,7 @@
       "long_horizon_soft_min": 0.0004749334059644389,
       "median_adapt_cost": 3087.0,
       "b2_max": 0.16166160499579224,
-      "overhead_ratio": 5.206410152672172,
+      "overhead_ratio": 3.747705283451737,
       "by_class": {
         "banana": 0.0008444274679675203,
         "funnel": 0.0016132736970883702,
@@ -253,7 +253,7 @@
       "confirmation": {
         "ran": false
       },
-      "wall_s": 398.1,
+      "wall_s": 416.1,
       "name": "stan-windowed-diag-affine-2.37"
     },
     "frontier": {
@@ -261,7 +261,7 @@
       "role": "frontier",
       "file": "frontier.py",
       "sha256": "6153621d6ebcab4340893392a23a58e2f35858c4caab5d176395c2a7c4ea6404",
-      "judge_digest": "c4ee69e1a8771dd4",
+      "judge_digest": "2bb9bf0226c00176",
       "config": {
         "seed": 72432996,
         "dims": [
@@ -282,88 +282,88 @@
       "short_horizon_soft_min": 0.0,
       "long_horizon_soft_min": 0.0,
       "median_adapt_cost": 886.0,
-      "b2_max": 0.20991993829411254,
-      "overhead_ratio": 11.01408836293248,
+      "b2_max": 0.2099199382920348,
+      "overhead_ratio": 10.047179822523695,
       "by_class": {
-        "banana": 0.000709794291987162,
-        "funnel": 0.002138317658350497,
-        "gaussian_illcond": 0.005124078107247331,
-        "hybrid_rosenbrock": 0.00047794098823949484,
-        "mixture_crossable": 0.022084363694690613,
-        "student_t": 0.005468219394251448
+        "banana": 0.0007097942862607304,
+        "funnel": 0.002138317661435494,
+        "gaussian_illcond": 0.005092781916598606,
+        "hybrid_rosenbrock": 0.0004779409882644506,
+        "mixture_crossable": 0.0220843636946983,
+        "student_t": 0.005468219390611127
       },
       "per_repeat_soft_min": [
-        0.0007574622099055864,
+        0.0007574622099005812,
         0.0,
         0.0,
-        0.0007922671844744543,
-        0.0006004279123746451,
-        0.0009472327459935847,
-        0.0007400003886039143,
+        0.0007922671844781564,
+        0.000600427918629967,
+        0.0009472284281562581,
+        0.0007400003883642128,
         0.0
       ],
       "per_repeat_by_class": [
         {
-          "gaussian_illcond": 0.01081454560886004,
-          "funnel": 0.0022587215300804496,
-          "banana": 0.0006702419984574413,
-          "hybrid_rosenbrock": 0.0005243442203556311,
+          "gaussian_illcond": 0.010814545609062058,
+          "funnel": 0.0022587215300801785,
+          "banana": 0.0006702419984381204,
+          "hybrid_rosenbrock": 0.0005243442203565193,
           "student_t": 0.0040771421959619955,
           "mixture_crossable": 0.020310341237915804
         },
         {
-          "gaussian_illcond": 0.001124435099001387,
-          "funnel": 0.0008902850182539615,
-          "banana": 0.0005142827215631942,
-          "hybrid_rosenbrock": 0.0005301432522597197,
-          "student_t": 0.002940321691907144,
+          "gaussian_illcond": 0.0011244350990009804,
+          "funnel": 0.0008902850185190908,
+          "banana": 0.0005142827215848965,
+          "hybrid_rosenbrock": 0.0005301432522590751,
+          "student_t": 0.0029403216919843696,
           "mixture_crossable": 0.03908660119073113
         },
         {
-          "gaussian_illcond": 0.0035442744448913365,
-          "funnel": 0.0028782809248985766,
-          "banana": 0.0006160893977735532,
-          "hybrid_rosenbrock": 0.00024280579981357793,
+          "gaussian_illcond": 0.003544274444821647,
+          "funnel": 0.0028782809248987886,
+          "banana": 0.0006160893980082374,
+          "hybrid_rosenbrock": 0.00024280579972771194,
           "student_t": 0.008262269387965595,
           "mixture_crossable": 0.015947293336151788
         },
         {
-          "gaussian_illcond": 0.0035908936407351697,
-          "funnel": 0.0017512961133630284,
-          "banana": 0.0007240917919575429,
-          "hybrid_rosenbrock": 0.0005434392002994915,
+          "gaussian_illcond": 0.0035908936407889835,
+          "funnel": 0.0017512961141878162,
+          "banana": 0.0007240917919632481,
+          "hybrid_rosenbrock": 0.0005434392002991286,
           "student_t": 0.0029520841738921123,
           "mixture_crossable": 0.02930633387233988
         },
         {
-          "gaussian_illcond": 0.003382210925686105,
-          "funnel": 0.0024906353373210072,
-          "banana": 0.0006915674610234829,
-          "hybrid_rosenbrock": 0.0003933804448142424,
-          "student_t": 0.009618578324150064,
-          "mixture_crossable": 0.01776127889220644
+          "gaussian_illcond": 0.0033822109256885086,
+          "funnel": 0.002490635337387265,
+          "banana": 0.000691567414550673,
+          "hybrid_rosenbrock": 0.0003933804521124003,
+          "student_t": 0.009618578324146365,
+          "mixture_crossable": 0.017761278892261746
         },
         {
-          "gaussian_illcond": 0.006318377630660836,
-          "funnel": 0.002184308252987246,
-          "banana": 0.0010330964779146949,
-          "hybrid_rosenbrock": 0.0006256367942188817,
-          "student_t": 0.004116635887182159,
-          "mixture_crossable": 0.020148152551251308
+          "gaussian_illcond": 0.006016172541304264,
+          "funnel": 0.002184308255014864,
+          "banana": 0.0010330964779150912,
+          "hybrid_rosenbrock": 0.0006256367942163434,
+          "student_t": 0.004116635865151285,
+          "mixture_crossable": 0.02014815255124831
         },
         {
-          "gaussian_illcond": 0.011187855515420491,
-          "funnel": 0.003384818706414228,
-          "banana": 0.0006794060016176946,
-          "hybrid_rosenbrock": 0.0005055664345505987,
+          "gaussian_illcond": 0.011187855515395162,
+          "funnel": 0.003384818706399034,
+          "banana": 0.0006794060025084648,
+          "hybrid_rosenbrock": 0.0005055664341332906,
           "student_t": 0.005683662146030086,
-          "mixture_crossable": 0.013290817861985701
+          "mixture_crossable": 0.013290817861983375
         },
         {
-          "gaussian_illcond": 0.01284399884435842,
-          "funnel": 0.0023417135793255043,
-          "banana": 0.0008631460315780778,
-          "hybrid_rosenbrock": 0.0005965697031870479,
+          "gaussian_illcond": 0.012843998844194675,
+          "funnel": 0.0023417136023273855,
+          "banana": 0.0008631460323926412,
+          "hybrid_rosenbrock": 0.0005965696930743646,
           "student_t": 0.012148063618373065,
           "mixture_crossable": 0.03206449107670448
         }
@@ -378,7 +378,7 @@
         "ran": false,
         "reason": "a Tier 1 failure that is not a statistical rejection"
       },
-      "wall_s": 430.9,
+      "wall_s": 510.5,
       "source": "autoresearch/lanes/A4/submission.py",
       "git_commit": "83de6399a088f9e3c4d20b19679666c77ed6f60c",
       "copied_from_source": true

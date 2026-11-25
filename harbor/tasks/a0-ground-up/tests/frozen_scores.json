@@ -2,7 +2,7 @@
   "schema": 2,
   "lane": "A0",
   "task": "a0-ground-up",
-  "judge_digest": "c4ee69e1a8771dd4",
+  "judge_digest": "2bb9bf0226c00176",
   "config": {
     "seed": 72432996,
     "dims": [
@@ -16,7 +16,7 @@
     "horizon_steps": 500,
     "confirmation_seed": 75713498
   },
-  "frozen_at": "2026-11-24T02:52:30+00:00",
+  "frozen_at": "2026-11-25T23:42:26+00:00",
   "reference_name": "stan-nuts-diag-2.37",
   "scores": {
     "start": {
@@ -24,7 +24,7 @@
       "role": "start",
       "file": "baseline.py",
       "sha256": "6d8140568e3e55965acf225a8baabf4f5c85aa39fc8b02999784ad53ed655652",
-      "judge_digest": "c4ee69e1a8771dd4",
+      "judge_digest": "2bb9bf0226c00176",
       "config": {
         "seed": 72432996,
         "dims": [
@@ -46,7 +46,7 @@
       "long_horizon_soft_min": 0.0004072053235438056,
       "median_adapt_cost": 101.0,
       "b2_max": 0.2865497076023388,
-      "overhead_ratio": 9.392086126823635,
+      "overhead_ratio": 7.900237179369126,
       "by_class": {
         "banana": 0.0034392750529699703,
         "funnel": 0.016943260446043197,
@@ -135,14 +135,14 @@
       "confirmation": {
         "ran": false
       },
-      "wall_s": 116.3
+      "wall_s": 163.0
     },
     "reference": {
       "lane": "A0",
       "role": "reference",
       "file": "reference.py",
       "sha256": "c4658816acb20403ac7ce874ffd57ddbd35a28b57d446286607670399445c2e4",
-      "judge_digest": "c4ee69e1a8771dd4",
+      "judge_digest": "2bb9bf0226c00176",
       "config": {
         "seed": 72432996,
         "dims": [
@@ -164,7 +164,7 @@
       "long_horizon_soft_min": 0.0005289319037963683,
       "median_adapt_cost": 3087.0,
       "b2_max": 0.44444444444444453,
-      "overhead_ratio": 4.45231509869929,
+      "overhead_ratio": 3.1694684229542016,
       "by_class": {
         "banana": 0.0009229140978950337,
         "funnel": 0.0006018283801414589,
@@ -258,10 +258,10 @@
           "student_t(d=20, rot=True): rank test rejected on z0_mean:rank_loc: |z|=3.78 > 3.48"
         ],
         "failed_targets": [],
-        "wall_s": 635.5,
+        "wall_s": 656.7,
         "efficiency_source": "first_run_paired"
       },
-      "wall_s": 1234.4,
+      "wall_s": 1307.1,
       "name": "stan-nuts-diag-2.37"
     },
     "frontier": {
@@ -269,7 +269,7 @@
       "role": "frontier",
       "file": "frontier.py",
       "sha256": "57ae25a93e97f7d229f5838c00a5382e37bc531177baa02a7e92e81994943810",
-      "judge_digest": "c4ee69e1a8771dd4",
+      "judge_digest": "2bb9bf0226c00176",
       "config": {
         "seed": 72432996,
         "dims": [
@@ -291,7 +291,7 @@
       "long_horizon_soft_min": 0.0014342919954864297,
       "median_adapt_cost": 746.0,
       "b2_max": 0.21006944444444436,
-      "overhead_ratio": 7.893804881227403,
+      "overhead_ratio": 6.719070978412048,
       "by_class": {
         "banana": 0.0009179869748425949,
         "funnel": 0.003871826931260511,
@@ -380,7 +380,7 @@
       "confirmation": {
         "ran": false
       },
-      "wall_s": 224.0,
+      "wall_s": 291.2,
       "source": "autoresearch/lanes/A0/submission.py",
       "git_commit": "b85c6e71898c1036023102c5b5969396475ef48c",
       "copied_from_source": true

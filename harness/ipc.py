@@ -462,6 +462,7 @@ def run_sample_phase_isolated(
     saved_singles: list[dict] = []
     win_start_saved = False
     win_out_digests: list[tuple[str, str]] = []
+    win_call_counts: list[list[int]] = []
 
     with IsolatedTransitionSession(
         counter, submission_path, tuning, adapt_meta["tuning_sha256"],
@@ -474,6 +475,7 @@ def run_sample_phase_isolated(
                 serialize_tree({"position": pos_2d, "aux": aux}, ckpt_dir / f"win_in_{step}")
                 win_start_saved = True
             next_pos, next_aux = sess.step(pos_2d, aux, [int(run_seed), 1, int(step)])
+            step_calls = counter.step_counts()
             draws[:, step, :] = next_pos
             pos_2d, aux = next_pos, next_aux
             if step in need_single:
@@ -481,9 +483,11 @@ def run_sample_phase_isolated(
                     "step": step,
                     "pos_sha": canonical_digest(pos_2d),
                     "aux_sha": canonical_digest(aux),
+                    "calls": step_calls,
                 })
             if win_start <= step <= win_end:
                 win_out_digests.append((canonical_digest(pos_2d), canonical_digest(aux)))
+                win_call_counts.append(step_calls)
         sess.verify_tuning_frozen()
 
     seconds = logdensity._now() - started
@@ -501,7 +505,7 @@ def run_sample_phase_isolated(
         "seconds": seconds,
         "eval_s": counter.eval_s,
         "replay_singles": saved_singles,
-        "replay_window": {"steps": win_steps, "digests": win_out_digests},
+        "replay_window": {"steps": win_steps, "digests": win_out_digests, "call_counts": win_call_counts},
     }
     (bundle_dir / "sample_meta.json").write_text(json.dumps(meta, indent=1))
     return draws, meta
@@ -533,7 +537,8 @@ def run_replay_phase_isolated(
         counter, submission_path, tuning, adapt_meta["tuning_sha256"],
         walkers, is_1d, aux_spec, lane=lane, timeout_s=300.0,
     ) as sess:
-        for rec in sample_meta["replay_singles"]:
+        # Replay singles in reverse step order so adjacent selected steps cannot warm-hit a hidden cache.
+        for rec in reversed(sample_meta["replay_singles"]):
             step = int(rec["step"])
             c_in = deserialize_tree(ckpt_dir / f"in_{step}")
             pos_in = np.array(c_in["position"], dtype=np.float64)
@@ -541,17 +546,28 @@ def run_replay_phase_isolated(
             pos_out, aux_out = sess.step(pos_in, aux_in, [int(run_seed), 1, step], check_provenance=False)
             if canonical_digest(pos_out) != rec["pos_sha"] or canonical_digest(aux_out) != rec["aux_sha"]:
                 raise ContractError(f"replay mismatch at step {step}: transition() is not deterministic/stateless")
+            if "calls" in rec and counter.step_counts() != list(rec["calls"]):
+                raise ContractError(
+                    f"replay oracle call-count mismatch at step {step}: got {counter.step_counts()}, "
+                    f"recorded {rec['calls']} (hidden cache or state across transition() calls)"
+                )
 
         win = sample_meta.get("replay_window") or {}
         win_steps = win.get("steps") or []
+        win_calls = win.get("call_counts")
         if win_steps:
             c_in = deserialize_tree(ckpt_dir / f"win_in_{win_steps[0]}")
             pos_cur = np.array(c_in["position"], dtype=np.float64)
             aux_cur = c_in["aux"]
-            for step, (want_pos, want_aux) in zip(win_steps, win["digests"]):
+            for idx, (step, (want_pos, want_aux)) in enumerate(zip(win_steps, win["digests"])):
                 pos_cur, aux_cur = sess.step(pos_cur, aux_cur, [int(run_seed), 1, int(step)], check_provenance=False)
                 if canonical_digest(pos_cur) != want_pos or canonical_digest(aux_cur) != want_aux:
                     raise ContractError(f"replay window mismatch at step {step}: hidden state across steps")
+                if win_calls is not None and idx < len(win_calls) and counter.step_counts() != list(win_calls[idx]):
+                    raise ContractError(
+                        f"replay window oracle call-count mismatch at step {step}: got {counter.step_counts()}, "
+                        f"recorded {win_calls[idx]} (hidden cache or state across transition() calls)"
+                    )
         sess.verify_tuning_frozen()
 
     return {"replayed_singles": len(sample_meta["replay_singles"]), "replayed_window": len(win_steps)}
