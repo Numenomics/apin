@@ -458,7 +458,8 @@ DUPLICATE_HINT = ("The same code was already tried in this run (comments and whi
 def trial_report(row: dict, run_id: str) -> list[str]:
     """The lines `apin autoresearch eval` prints for one trial row."""
     dims = ",".join(str(x) for x in (row.get("dims") or []))
-    lines = [f"{row['trial_id']} [{row['lane']}] decision={row['decision']} speedup={row.get('speedup')} "
+    node_id = f"{row['lane']}:{run_id}:{row['trial_id']}"
+    lines = [f"{row['trial_id']} [{row['lane']}] node={node_id} decision={row['decision']} speedup={row.get('speedup')} "
              f"tier0={row.get('tier0_ok')} tier1={row.get('tier1_ok')} dims={dims} repeats={row.get('repeats')} "
              f"seed={row.get('seed')} yardstick={row.get('yardstick')} qwait={row.get('queue_wait_s')}s "
              f"wall={row.get('wall_s')}s"]

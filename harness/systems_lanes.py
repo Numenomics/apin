@@ -180,7 +180,13 @@ def _append_systems_ledger(run_dir: Path, row: dict[str, Any]) -> dict[str, Any]
 
 
 def _run_shell(cmd: str, cwd: Path, timeout_s: float = 600.0) -> tuple[bool, str]:
-    r = subprocess.run(cmd, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=timeout_s)
+    try:
+        r = subprocess.run(cmd, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        out = (exc.stdout or "") if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", errors="replace")
+        err = (exc.stderr or "") if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", errors="replace")
+        tail = (out + "\n" + err).strip()[-1800:]
+        return False, f"command timed out after {timeout_s:.0f}s\n{tail}".strip()
     tail = (r.stdout + "\n" + r.stderr).strip()[-2000:]
     return r.returncode == 0, tail
 
