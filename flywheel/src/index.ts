@@ -500,8 +500,9 @@ function utf8Length(s: string): number {
 }
 
 function sanitizeHandle(raw: unknown): string | null {
-  const s = toNullableString(raw);
-  if (!s) return null;
+  const s0 = toNullableString(raw);
+  if (!s0) return null;
+  const s = s0.startsWith("@") ? s0.slice(1) : s0;
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,39}$/.test(s)) return null;
   return s;
 }
@@ -2101,13 +2102,42 @@ const opPatchClaim: Op = async (ctx, payload) => {
   const principal = ctx.principal as AuthPrincipal;
   const claimId = toNullableString(payload.id) ?? "";
   const statusVal = toNullableString(payload.status);
+  const hasTtl = payload.ttl_minutes !== undefined && payload.ttl_minutes !== null;
+  const own = claimOwnerSql(principal);
+  const hasSummary = payload.summary !== undefined;
+
+  // In-place TTL renewal for an active claim owned by the caller.
+  if (hasTtl && (!statusVal || statusVal === "active")) {
+    const ttlRaw = Number(payload.ttl_minutes);
+    if (!Number.isFinite(ttlRaw) || ttlRaw <= 0) {
+      return out(400, { error: "invalid_ttl_minutes" });
+    }
+    const ttlMinutes = Math.min(ttlRaw, principal.role === "admin" ? 1440 : 240);
+    const expiresAt = new Date(Date.now() + ttlMinutes * 60_000).toISOString();
+    const res = await db
+      .prepare(
+        `UPDATE claims SET expires_at = ?, summary = CASE WHEN ? THEN ? ELSE summary END WHERE id = ? AND status = 'active' AND ${own.sql}`
+      )
+      .bind(expiresAt, hasSummary ? 1 : 0, hasSummary ? toNullableString(payload.summary) : null, claimId, ...own.params)
+      .run();
+    if (changesOf(res) === 0) {
+      const existing = await db
+        .prepare("SELECT agent, status FROM claims WHERE id = ?")
+        .bind(claimId)
+        .first<{ agent: string; status: string }>();
+      if (!existing) return out(404, { error: "not_found" });
+      if (existing.status !== "active") return out(409, { error: "claim_not_active", status: existing.status });
+      return out(403, { error: "forbidden_claim_owner", owner: existing.agent });
+    }
+    const updated = await db.prepare("SELECT * FROM claims WHERE id = ?").bind(claimId).first<ClaimRow>();
+    return out(200, { ok: true, claim: updated });
+  }
+
   if (!statusVal || !VALID_CLAIM_PATCH_STATUSES.has(statusVal)) {
     return out(400, { error: "invalid_status", allowed: ["done", "abandoned"] });
   }
 
   // Guarded by owner in the statement itself.
-  const own = claimOwnerSql(principal);
-  const hasSummary = payload.summary !== undefined;
   const res = await db
     .prepare(`UPDATE claims SET status = ?, summary = CASE WHEN ? THEN ? ELSE summary END WHERE id = ? AND ${own.sql}`)
     .bind(statusVal, hasSummary ? 1 : 0, hasSummary ? toNullableString(payload.summary) : null, claimId, ...own.params)

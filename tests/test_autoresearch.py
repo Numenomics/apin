@@ -529,3 +529,71 @@ def test_research_brief_shows_live_frontier_pickup_and_systems_checklists(tmp_pa
     assert "eval-s2" in brief_s2 and "apin autoresearch eval --lane S2" not in brief_s2
     brief_s3 = autoresearch.build_research_brief("S3", autoresearch_dir=tmp_path, offline=True)
     assert "eval-s3" in brief_s3 and "apin autoresearch eval --lane S3" not in brief_s3
+
+
+def test_concurrent_evals_assign_unique_trial_ids_and_pass_agent_model(lane, monkeypatch):
+    """Two overlapping eval calls on the same run_id serialize cleanly and never collide on trial_id."""
+    import concurrent.futures
+    import time
+
+    ar_dir, lane_dir, _calls, _posted = lane
+    posted_calls: list[dict] = []
+    monkeypatch.setattr(
+        flywheel, "post_trial_row",
+        lambda row, **kw: posted_calls.append({"trial_id": row["trial_id"], "agent_model": kw.get("agent_model")}),
+    )
+
+    real_score = grade.score_file
+
+    def slow_score(path, lane_name, cfg, work_dir, **kw):
+        time.sleep(0.05)
+        return real_score(path, lane_name, cfg, work_dir, **kw)
+
+    monkeypatch.setattr(grade, "score_file", slow_score)
+    sub1 = ar_dir / "cand1.py"
+    sub2 = ar_dir / "cand2.py"
+    sub1.write_text(_long(1.2))
+    sub2.write_text(_long(1.5))
+
+    def run_one(path: Path, model: str) -> dict:
+        return autoresearch.evaluate_lane_trial(
+            "A2", f"cand {model}", autoresearch_dir=ar_dir, run_id="shared_run",
+            submission_path=path, use_queue=False, agent_model=model,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        f1 = ex.submit(run_one, sub1, "model-a")
+        f2 = ex.submit(run_one, sub2, "model-b")
+        r1, r2 = f1.result(), f2.result()
+
+    assert {r1["trial_id"], r2["trial_id"]} == {"T0001", "T0002"}
+    assert {c["agent_model"] for c in posted_calls} == {"model-a", "model-b"}
+
+
+def test_brief_surfaces_higher_kept_trial_inside_frontier_margin(tmp_path, monkeypatch):
+    lane_dir = tmp_path / "lanes" / "A4"
+    lane_dir.mkdir(parents=True)
+    (lane_dir / "submission.py").write_text("# local\n")
+    (lane_dir / "yardstick.json").write_text(json.dumps({"id": "A4-yd1"}))
+
+    monkeypatch.setattr(flywheel, "get_frontier", lambda **kw: {
+        "frontier": [{
+            "id": "A4:r0:T0011", "lane": "A4", "speedup": 2.61, "yardstick": "A4-yd1",
+            "author": "alice", "code_sha": "1111111111111111", "verified": 0,
+            "hypothesis": "frontier step",
+        }]
+    })
+    monkeypatch.setattr(flywheel, "get_nodes", lambda **kw: {
+        "nodes": [
+            {"id": "A4:r0:T0012", "decision": "keep_simpler", "speedup": 2.74, "yardstick": "A4-yd1",
+             "author": "alice", "has_source": True, "hypothesis": "simpler faster within 5% band"},
+            {"id": "A4:r0:T0011", "decision": "keep", "speedup": 2.61, "yardstick": "A4-yd1",
+             "author": "alice", "has_source": True, "hypothesis": "frontier step"},
+        ]
+    })
+    monkeypatch.setattr(flywheel, "get_claims", lambda **kw: {"claims": []})
+    monkeypatch.setattr(flywheel, "list_notes", lambda **kw: {"notes": []})
+
+    brief = autoresearch.build_research_brief("A4", autoresearch_dir=tmp_path, flywheel_url="http://mock")
+    assert "A4:r0:T0012" in brief
+    assert "within the 5% frontier-step band" in brief

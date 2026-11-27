@@ -92,3 +92,49 @@ def test_s3_auarc_and_rewind_calibration(tmp_path):
     assert rep_ref["total"] == 3
     assert rep_ref["passed"] == 3, rep_ref["results"]
     assert rep_ref["auarc"] == 1.0
+
+
+def test_s2_directory_draws_timing_override_and_s3_cli_exit_code(tmp_path, monkeypatch):
+    from harness import cli
+
+    repo = tmp_path / "bs_repo"
+    _init_git_repo(repo)
+    ar_dir = tmp_path / "ar"
+    (repo / "src" / "a.cpp").write_text("// tuned\nint f() { return 1; }\n")
+
+    b_dir = tmp_path / "base_draws"
+    c_dir = tmp_path / "cand_draws"
+    b_dir.mkdir()
+    c_dir.mkdir()
+    (b_dir / "chain_0.csv").write_text("x\n1.0\n2.0\n")
+    (c_dir / "chain_0.csv").write_text("x\n1.0\n2.0\n")
+
+    # Directory inputs expand cleanly and timing_override drives keep/discard
+    r_keep = systems_lanes.evaluate_s2_trial(
+        "bridgestan", "dir draws + timing", allowed_paths=["src/"],
+        baseline_draws=[b_dir], candidate_draws=[c_dir],
+        timing_override={"fd_ok": True, "baseline_median_us": 100.0, "candidate_median_us": 90.0},
+        min_speedup=1.05, upstream_dir=repo, autoresearch_dir=ar_dir, run_id="t_dir",
+    )
+    assert r_keep["decision"] == "keep"
+    assert r_keep["fd_ok"] is True
+    assert r_keep["byte_identical"] is True
+    assert r_keep["speedup_ratio"] == round(100.0 / 90.0, 4)
+
+    r_fd_fail = systems_lanes.evaluate_s2_trial(
+        "bridgestan", "fd fail", allowed_paths=["src/"],
+        timing_override={"fd_ok": False, "speedup_ratio": 2.0},
+        upstream_dir=repo, autoresearch_dir=ar_dir, run_id="t_dir",
+    )
+    assert r_fd_fail["decision"] == "discard_fd_fail"
+
+    # CLI eval-s3 custom mode must return non-zero when any task fails
+    monkeypatch.setattr(
+        rewind, "evaluate_s3_suite",
+        lambda *a, **kw: {
+            "passed": 1, "total": 3, "pass_rate": 0.333, "auarc": 0.333,
+            "results": [{"task_id": "t1", "passed": False, "emp_eff": 0.0, "reason": "fail"}],
+        },
+    )
+    assert cli.main(["autoresearch", "eval-s3", "--mode", "custom"]) == 1
+    assert cli.main(["autoresearch", "eval-s3", "--mode", "base"]) == 1

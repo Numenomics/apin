@@ -14,6 +14,7 @@ import json
 import math
 import os
 import platform
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,24 @@ def machine_fingerprint() -> dict[str, Any]:
     }
 
 
+def _write_track_outputs(report: dict[str, Any], out_path: Path, track: str) -> None:
+    """Write track JSON and Markdown outputs, accepting either a directory or a `.json`/`.md` file path."""
+    p = Path(out_path)
+    suf = p.suffix.lower()
+    if suf == ".json" and not p.is_dir():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(report, indent=2))
+        p.with_suffix(".md").write_text(format_track_markdown(report))
+    elif suf == ".md" and not p.is_dir():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(format_track_markdown(report))
+        p.with_suffix(".json").write_text(json.dumps(report, indent=2))
+    else:
+        p.mkdir(parents=True, exist_ok=True)
+        (p / f"track_{track}.json").write_text(json.dumps(report, indent=2))
+        (p / f"track_{track}.md").write_text(format_track_markdown(report))
+
+
 def _check_unadjusted_target(
     target: shapes.AnalyticTarget,
     submission_path: Path,
@@ -65,72 +84,72 @@ def _check_unadjusted_target(
     and measures cost units required to reach b^2_max < bias_threshold from dispersed starts.
     """
     max_k = max(checkpoints)
-    work_dir = ROOT / ".cache" / "track_l4" / f"{target.family}_{target.dim}_{seed}"
-    work_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f"apin_track_l4_{target.family}_{target.dim}_") as tmp_dir:
+        work_dir = Path(tmp_dir)
 
-    # 1. Run adapt once in isolated worker
-    adapt_budget = Budget(1, adapt_draws, 200_000, 60.0)
-    adapt_meta = ipc.run_adapt_phase_isolated(
-        target, submission_path, adapt_budget, seed + 1, work_dir, lane=lane,
-    )
-    adapt_cost = float(adapt_meta["density_evals"] + 2.0 * adapt_meta["gradient_evals"])
+        # 1. Run adapt once in isolated worker
+        adapt_budget = Budget(1, adapt_draws, 200_000, 60.0)
+        adapt_meta = ipc.run_adapt_phase_isolated(
+            target, submission_path, adapt_budget, seed + 1, work_dir, lane=lane,
+        )
+        adapt_cost = float(adapt_meta["density_evals"] + 2.0 * adapt_meta["gradient_evals"])
 
-    # 2. Check exact-draw invariance & record measured bias (do not reject on invariance failure)
-    inv_res = invariance.check_target_invariance(
-        target, submission_path, seed=seed + 10, n_chains=n_chains, k_steps=min(20, max_k),
-        adapt_draws=adapt_draws, lane=lane, isolated=True,
-    )
+        # 2. Check exact-draw invariance & record measured bias (do not reject on invariance failure)
+        inv_res = invariance.check_target_invariance(
+            target, submission_path, seed=seed + 10, n_chains=n_chains, k_steps=min(20, max_k),
+            adapt_draws=adapt_draws, lane=lane, isolated=True,
+        )
 
-    # 3. Run dispersed-start chains up to max_k and compute b^2_max at each checkpoint
-    rng = np.random.default_rng(np.random.SeedSequence([seed, 4242]))
-    x_starts = target.dispersed_starts(n_chains, rng)
-    truth = target.exact_truth()
-    walkers = int(adapt_meta["walkers"])
-    is_1d = bool(adapt_meta["is_1d"])
-    aux_spec = adapt_meta["aux_spec"]
-    tuning = logdensity.deserialize_tree(work_dir / "tuning")
+        # 3. Run dispersed-start chains up to max_k and compute b^2_max at each checkpoint
+        rng = np.random.default_rng(np.random.SeedSequence([seed, 4242]))
+        x_starts = target.dispersed_starts(n_chains, rng)
+        truth = target.exact_truth()
+        walkers = int(adapt_meta["walkers"])
+        is_1d = bool(adapt_meta["is_1d"])
+        aux_spec = adapt_meta["aux_spec"]
+        tuning = logdensity.deserialize_tree(work_dir / "tuning")
 
-    counter = logdensity.Counter(target, max_evaluations=2_000_000, max_seconds=120.0)
-    worker = ipc.IsolatedTransitionSession(
-        counter, submission_path, tuning, adapt_meta["tuning_sha256"],
-        walkers, is_1d, aux_spec, lane=lane,
-    )
-    checkpoint_set = set(checkpoints)
-    checkpoint_stats: list[dict[str, Any]] = []
-    cost_to_thresh: float | None = None
-    try:
-        states = []
-        for c in range(n_chains):
-            pos = x_starts[c : c + 1] if walkers == 1 else np.repeat(x_starts[c : c + 1], walkers, axis=0)
-            aux = invariance.sample_aux(aux_spec, walkers, target.dim, is_1d, rng)
-            states.append([pos, aux])
-        for step in range(1, max_k + 1):
+        counter = logdensity.Counter(target, max_evaluations=2_000_000, max_seconds=120.0)
+        worker = ipc.IsolatedTransitionSession(
+            counter, submission_path, tuning, adapt_meta["tuning_sha256"],
+            walkers, is_1d, aux_spec, lane=lane,
+        )
+        checkpoint_set = set(checkpoints)
+        checkpoint_stats: list[dict[str, Any]] = []
+        cost_to_thresh: float | None = None
+        try:
+            states = []
             for c in range(n_chains):
-                pos_next, aux_next = worker.step(states[c][0], states[c][1], [seed, 9001, c, step], check_provenance=True)
-                states[c][0] = pos_next
-                states[c][1] = aux_next
-            if step in checkpoint_set:
-                xs = np.array([s[0][0] for s in states], dtype=float)
-                z = target.to_latent(xs)
-                funcs = target.latent_functionals(z)
-                b2_max = 0.0
-                for fname, (mu, sd) in truth.items():
-                    if sd <= 0:
-                        continue
-                    err = float(np.mean(funcs[fname]) - mu) / sd
-                    b2_val = (err * err) if (math.isfinite(err) and abs(err) < 1e150) else math.inf
-                    b2_max = max(b2_max, b2_val)
-                step_cost_per_chain = float(counter.density + 2.0 * counter.gradient) / float(n_chains)
-                total_cost = adapt_cost + step_cost_per_chain
-                checkpoint_stats.append({
-                    "step": step,
-                    "b2_max": round(b2_max, 6),
-                    "cost_per_chain": round(total_cost, 2),
-                })
-                if cost_to_thresh is None and b2_max < bias_threshold:
-                    cost_to_thresh = total_cost
-    finally:
-        worker.close()
+                pos = x_starts[c : c + 1] if walkers == 1 else np.repeat(x_starts[c : c + 1], walkers, axis=0)
+                aux = invariance.sample_aux(aux_spec, walkers, target.dim, is_1d, rng)
+                states.append([pos, aux])
+            for step in range(1, max_k + 1):
+                for c in range(n_chains):
+                    pos_next, aux_next = worker.step(states[c][0], states[c][1], [seed, 9001, c, step], check_provenance=True)
+                    states[c][0] = pos_next
+                    states[c][1] = aux_next
+                if step in checkpoint_set:
+                    xs = np.array([s[0][0] for s in states], dtype=float)
+                    z = target.to_latent(xs)
+                    funcs = target.latent_functionals(z)
+                    b2_max = 0.0
+                    for fname, (mu, sd) in truth.items():
+                        if sd <= 0:
+                            continue
+                        err = float(np.mean(funcs[fname]) - mu) / sd
+                        b2_val = (err * err) if (math.isfinite(err) and abs(err) < 1e150) else math.inf
+                        b2_max = max(b2_max, b2_val)
+                    step_cost_per_chain = float(counter.density + 2.0 * counter.gradient) / float(n_chains)
+                    total_cost = adapt_cost + step_cost_per_chain
+                    checkpoint_stats.append({
+                        "step": step,
+                        "b2_max": round(b2_max, 6),
+                        "cost_per_chain": round(total_cost, 2),
+                    })
+                    if cost_to_thresh is None and b2_max < bias_threshold:
+                        cost_to_thresh = total_cost
+        finally:
+            worker.close()
 
     return {
         "family": target.family,
@@ -234,10 +253,7 @@ def run_track_l3(
         "targets": rows,
     }
     if out_dir is not None:
-        out_dir = Path(out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "track_L3.json").write_text(json.dumps(report, indent=2))
-        (out_dir / "track_L3.md").write_text(format_track_markdown(report))
+        _write_track_outputs(report, out_dir, "L3")
     return report
 
 
@@ -298,10 +314,7 @@ def run_track_l4(
         "targets": rows,
     }
     if out_dir is not None:
-        out_dir = Path(out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "track_L4.json").write_text(json.dumps(report, indent=2))
-        (out_dir / "track_L4.md").write_text(format_track_markdown(report))
+        _write_track_outputs(report, out_dir, "L4")
     return report
 
 
@@ -321,12 +334,12 @@ def run_track_l5(
 
     # Enforce density-only capability via isolated ABI check first (capabilities=set())
     g_check = shapes.IllCondGaussian(dim=4, seed=seed + 3, rotated=True, kappa=25.0)
-    work_dir = ROOT / ".cache" / "track_l5" / f"capcheck_{seed}"
     try:
-        _, abi_sum = ipc.execute_run_isolated(
-            g_check, sub_path, Budget(1, 20, 100_000, 30.0),
-            run_seed=seed + 5, work_dir=work_dir, capabilities={"density_only"}, replay_count=5,
-        )
+        with tempfile.TemporaryDirectory(prefix=f"apin_track_l5_capcheck_{seed}_") as tmp_dir:
+            _, abi_sum = ipc.execute_run_isolated(
+                g_check, sub_path, Budget(1, 20, 100_000, 30.0),
+                run_seed=seed + 5, work_dir=Path(tmp_dir), capabilities={"density_only"}, replay_count=5,
+            )
     except Exception as e:
         report = {
             "track": "L5",
@@ -338,10 +351,7 @@ def run_track_l5(
             "wall_s": round(time.perf_counter() - t0, 2),
         }
         if out_dir is not None:
-            out_dir = Path(out_dir)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "track_L5.json").write_text(json.dumps(report, indent=2))
-            (out_dir / "track_L5.md").write_text(format_track_markdown(report))
+            _write_track_outputs(report, out_dir, "L5")
         return report
 
     if int(abi_sum.get("gradient_evals", 0)) > 0:
@@ -410,10 +420,7 @@ def run_track_l5(
         "targets": rows,
     }
     if out_dir is not None:
-        out_dir = Path(out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "track_L5.json").write_text(json.dumps(report, indent=2))
-        (out_dir / "track_L5.md").write_text(format_track_markdown(report))
+        _write_track_outputs(report, out_dir, "L5")
     return report
 
 
@@ -427,11 +434,11 @@ def format_track_markdown(report: dict[str, Any]) -> str:
     lines.append(f"- **Submission:** `{report.get('submission')}`")
     if track == "L3":
         lines.append(f"- **Passed all invariance checks:** `{report.get('passed_all_invariance')}`")
-        lines.append(f"- **Overall soft-min efficiency:** `{report.get('soft_min_eff')}`")
+        lines.append(f"- **Overall soft-min efficiency (dual-horizon):** `{report.get('soft_min_eff')}`")
         lines.append(f"- **Scale-invariance ratio (extreme / unit):** `{report.get('scale_invariance_ratio')}`")
         lines.append(f"- **Worst b2_max:** `{report.get('worst_b2_max')}`")
         lines.append("")
-        lines.append("| scale | dim | family | passed | emp_eff | b2_max | max_z / thresh |")
+        lines.append("| scale | dim | family | passed | dual_eff | b2_max | max_z / thresh |")
         lines.append("|---|---|---|---|---|---|---|")
         for r in report.get("targets", []):
             lines.append(

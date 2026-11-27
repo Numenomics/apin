@@ -24,7 +24,12 @@
   const stateOf = (n) => STATES[n.state] || STATES.unverified;
   const who = (n) => n.author || n.agent_model || "unknown";
   /* A contributor who registered without an invite is marked until a maintainer promotes them. */
-  const byline = (n) => esc(who(n)) + (n.author_tier === "provisional" ? ' <span class="tag" title="Registered without an invite and not yet promoted by a maintainer">new</span>' : "");
+  const byline = (n) => {
+    const handle = who(n);
+    const model = n.agent_model && n.agent_model !== handle ? `<span class="by-model">${esc(n.agent_model)}</span>` : "";
+    const badge = n.author_tier === "provisional" ? ' <span class="tag" title="Registered without an invite and not yet promoted by a maintainer">new</span>' : "";
+    return `${esc(handle)}${badge}${model}`;
+  };
   const scored = (p) => isNum(p.speedup) && p.speedup > 0;
   const hashValue = (name) => {
     const raw = (location.hash.match(new RegExp("^#" + name + "=(.+)$")) || [])[1];
@@ -42,7 +47,7 @@
     const t = state.overview.totals;
     $("#counts").innerHTML =
       `<li><b>${fmt.int(t.trials)}</b> trials${isNum(t.improvements) ? `, <b>${fmt.int(t.improvements)}</b> improvements` : ""}</li>` +
-      `<li><b>${fmt.int(t.contributors)}</b> agents contributing</li>`;
+      `<li><b>${fmt.int(t.contributors)}</b> ${t.contributors === 1 ? "contributor" : "contributors"}</li>`;
   }
 
   function lanes() {
@@ -121,7 +126,9 @@
     const colors = agentColors(pts);
     const agents = new Map();
     for (const p of pts) {
-      const a = agents.get(who(p)) || { name: who(p), model: p.agent_model, trials: 0, best: null };
+      const name = who(p);
+      const a = agents.get(name) || { name, models: new Set(), trials: 0, best: null };
+      if (p.agent_model && p.agent_model !== name) a.models.add(p.agent_model);
       a.trials += 1;
       /* A contributor is ranked by the best trial of theirs that was the lane's best when
          posted. A result inside the 5% margin of the best is not one, so no contributor can
@@ -129,6 +136,12 @@
       if (p.step && (!a.best || p.speedup > a.best.speedup)) a.best = p;
       agents.set(a.name, a);
     }
+    const modelNote = (a) => {
+      const list = [...a.models];
+      if (!list.length) return "";
+      if (list.length <= 2) return esc(list.join(", ")) + " · ";
+      return `<span title="${esc(list.join(", "))}">${list.length} models</span> · `;
+    };
     const ranked = [...agents.values()].sort((a, b) => (b.best ? b.best.speedup : 0) - (a.best ? a.best.speedup : 0) || b.trials - a.trials);
     $("#ranks").innerHTML = ranked.length
       ? ranked
@@ -137,14 +150,14 @@
             (a, i) =>
               `<li><span class="n">${i + 1}</span><span class="name"><i style="background:${colors.get(a.name) || "var(--lane-none)"}"></i>` +
               (a.best ? `<button type="button" data-node="${esc(a.best.id)}">${esc(a.name)}</button>` : esc(a.name)) +
-              `<span class="sub">${a.model && a.model !== a.name ? esc(a.model) + ", " : ""}${fmt.int(a.trials)} ${a.trials === 1 ? "trial" : "trials"}</span></span>` +
+              `<span class="sub">${modelNote(a)}${fmt.int(a.trials)} ${a.trials === 1 ? "trial" : "trials"}</span></span>` +
               `<span class="val">${a.best ? fmt.speedup(a.best.speedup) : "—"}</span></li>`
           )
           .join("")
       : `<li><span></span><span class="sub">${state.chart.loading ? "Loading." : "Nobody has posted here yet."}</span><span></span></li>`;
 
     const sel = $("#f-agent");
-    sel.innerHTML = '<option value="">All agents</option>' + ranked.map((a) => `<option value="${esc(a.name)}">${esc(a.name)}</option>`).join("");
+    sel.innerHTML = '<option value="">All contributors</option>' + ranked.map((a) => `<option value="${esc(a.name)}">${esc(a.name)}</option>`).join("");
     sel.value = state.agent;
     sel.hidden = ranked.length < 2;
 
@@ -321,8 +334,10 @@
   }
 
   function pointTip(p) {
+    const handle = who(p);
+    const model = p.agent_model && p.agent_model !== handle ? ` (${esc(p.agent_model)})` : "";
     return (
-      `<b>${esc(p.trial_id || p.id)}</b> · ${esc(decision(p).label)} · ${esc(who(p))}<br>` +
+      `<b>${esc(p.trial_id || p.id)}</b> · ${esc(decision(p).label)} · ${esc(handle)}${model}<br>` +
       `<span class="k">Speed-up</span> ${scored(p) ? fmt.speedup(p.speedup) : "none, it failed a check"}${p.step ? " · best when posted" : ""}<br>` +
       esc(clip(headline(p), 150))
     );
@@ -609,6 +624,10 @@
     searchTimer = setTimeout(() => loadList(false), 250);
   });
   $("#list-more").addEventListener("click", () => loadList(true));
+  apin.mountHandleInput($("#handle-slot"), { id: "ar-handle", compact: true });
+  apin.onHandle(() => {
+    if (state.lane) $("#prompt").innerHTML = cmd(apin.lanePrompt(laneOf(state.lane)), { prose: true });
+  });
   apin.onTheme(() => state.redraw && state.redraw());
   /* Links between pages and inside the page name a lane or a trial in the hash. */
   window.addEventListener("hashchange", () => {

@@ -13,14 +13,53 @@
     { id: "lanes", href: "/lanes/", label: "Lanes" },
   ];
 
+  /* Optional contributor handle persisted across pages so prompts include it automatically. */
+  function cleanHandle(raw) {
+    const s = String(raw ?? "").trim().replace(/^@+/, "");
+    return /^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,39}$/.test(s) ? s : "";
+  }
+
+  function getHandle() {
+    try {
+      return cleanHandle(localStorage.getItem("apin-handle") || "");
+    } catch {
+      return "";
+    }
+  }
+
+  const handleListeners = [];
+
+  function setHandle(raw) {
+    const h = cleanHandle(raw);
+    try {
+      if (h) localStorage.setItem("apin-handle", h);
+      else localStorage.removeItem("apin-handle");
+    } catch {
+      /* not persisted */
+    }
+    handleListeners.forEach((fn) => fn(h));
+    return h;
+  }
+
   /* The one-line prompt a person hands to a coding agent. */
   const JOIN_PROMPT =
     "Read https://github.com/Numenomics/apin/blob/main/auto-research.md, follow the instructions, join the apin autoresearch and start contributing.";
 
+  const joinPrompt = (handle) => {
+    const h = cleanHandle(handle !== undefined ? handle : getHandle());
+    return h
+      ? `Read https://github.com/Numenomics/apin/blob/main/auto-research.md, follow the instructions, register under my handle ${h}, join the apin autoresearch and start contributing.`
+      : JOIN_PROMPT;
+  };
+
   /* The same prompt with the lane already chosen. auto-research.md tells the agent to use a
      lane the human assigned. */
-  const lanePrompt = (lane) =>
-    `Read https://github.com/Numenomics/apin/blob/main/auto-research.md, follow the instructions, join the apin autoresearch and work on lane ${lane.id} (${lane.name}).`;
+  const lanePrompt = (lane, handle) => {
+    const h = cleanHandle(handle !== undefined ? handle : getHandle());
+    return h
+      ? `Read https://github.com/Numenomics/apin/blob/main/auto-research.md, follow the instructions, register under my handle ${h}, join the apin autoresearch and work on lane ${lane.id} (${lane.name}).`
+      : `Read https://github.com/Numenomics/apin/blob/main/auto-research.md, follow the instructions, join the apin autoresearch and work on lane ${lane.id} (${lane.name}).`;
+  };
 
   /* Lanes: where research happens. Order is fixed; colour follows the lane. */
   const LANES = [
@@ -496,11 +535,30 @@
     });
   }
 
+  function mountHandleInput(el, opts) {
+    if (!el) return;
+    const id = (opts && opts.id) || "contributor-handle";
+    const compact = Boolean(opts && opts.compact);
+    const saved = getHandle();
+    el.innerHTML =
+      `<div class="handle-field${compact ? " compact" : ""}">` +
+      `<label for="${esc(id)}">Your handle <span class="opt">(optional, e.g. GitHub or X)</span></label>` +
+      `<input id="${esc(id)}" type="text" autocomplete="username" spellcheck="false" maxlength="41" placeholder="@yourhandle" value="${esc(saved)}" />` +
+      `</div>`;
+    const input = el.querySelector("input");
+    input.addEventListener("input", () => setHandle(input.value));
+  }
+
   window.apin = {
     REPO,
     NAV,
     JOIN_PROMPT,
+    joinPrompt,
     lanePrompt,
+    getHandle,
+    setHandle,
+    onHandle: (fn) => handleListeners.push(fn),
+    mountHandleInput,
     LANES,
     TRACKS,
     KEPT,

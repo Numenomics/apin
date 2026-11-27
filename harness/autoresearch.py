@@ -26,14 +26,18 @@ Every run keeps its own `incumbent.py`, `archive/`, `ledger.jsonl` and `results.
 from __future__ import annotations
 
 import ast
+import contextlib
 import csv
+import fcntl
 import hashlib
 import json
 import math
+import os
 import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
 
 from . import flywheel, grade, judge, logdensity, queue
 from .grade import IMPROVEMENT_MARGIN
@@ -115,14 +119,33 @@ def _write_results_tsv(ledger_path: Path, tsv_path: Path) -> None:
 
 def _append_row(ledger_path: Path, tsv_path: Path, row: dict, *, run_id: str | None = None,
                 parent_id: str | None = None, parents: list[dict] | None = None,
-                source: str | None = None) -> dict:
+                source: str | None = None, agent_model: str | None = None) -> dict:
     """Append to the ledger, then best-effort post the trial (with its source and parents) to Flywheel."""
     with open(ledger_path, "a") as fh:
         fh.write(json.dumps(row) + "\n")
     _write_results_tsv(ledger_path, tsv_path)
     if run_id is not None:
-        flywheel.post_trial_row(row, run_id=run_id, parent_id=parent_id, parents=parents, source=source)
+        extra = {"agent_model": agent_model} if agent_model is not None else {}
+        flywheel.post_trial_row(
+            row, run_id=run_id, parent_id=parent_id, parents=parents,
+            source=source, **extra,
+        )
     return row
+
+
+@contextlib.contextmanager
+def _run_lock(run_dir: Path) -> Iterator[None]:
+    """Serialize trial-id allocation and ledger/incumbent writes within one `--run-id`."""
+    lock_path = run_dir / ".run.lock"
+    fh = open(lock_path, "a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -263,6 +286,7 @@ def evaluate_lane_trial(
     use_queue: bool = True,
     combines: list[str] | None = None,
     fork_of: list[str] | None = None,
+    agent_model: str | None = None,
 ) -> dict:
     """Run one trial of `lane` and return its ledger row.
 
@@ -285,73 +309,49 @@ def evaluate_lane_trial(
     tsv_path = run_dir / "results.tsv"
     incumbent_path = run_dir / "incumbent.py"
     archive_dir = run_dir / "archive"
-
-    prior = _load_ledger(ledger_path)
-    last_kept = next((r for r in reversed(prior) if r.get("decision") in flywheel.KEPT_DECISIONS), None)
-    parent_node_id = (
-        f"{lane}:{run_id}:{last_kept['trial_id']}" if last_kept and last_kept.get("trial_id") else None
-    )
-    parent_links = flywheel.parent_links(parent_node_id, combines=combines, fork_of=fork_of)
-    extra_parents = [p for p in parent_links if p["relation"] != "incumbent"]
-    trial_id = f"T{len(prior) + 1:04d}"
     digest = judge.judge_digest()
     t0 = time.perf_counter()
 
-    # Snapshot submission.py before any read or eval, so a concurrent edit cannot race the trial.
+    # Snapshot submission.py immediately before waiting on any lock, so concurrent edits cannot race.
     raw = sub_path.read_bytes()
     raw_text = raw.decode("utf-8", errors="replace")
-    if dry_run:
-        snap_path = sub_path
-    else:
-        trial_work = run_dir / "trials" / trial_id
-        trial_work.mkdir(parents=True, exist_ok=True)
-        snap_path = trial_work / "submission_snapshot.py"
-        snap_path.write_bytes(raw)
-    cand_sha, cand_ast_sha, cand_loc, cand_consts = _submission_stats(snap_path)
-
-    base_meta = {
-        "trial_id": trial_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "lane": lane,
-        "candidate_sha": cand_sha,
-        "ast_sha": cand_ast_sha,
-        "loc": cand_loc,
-        "magic_constants": cand_consts,
-        "judge_digest": digest,
-        "dims": list(cfg["dims"]),
-        "seed": cfg["seed"],
-        "repeats": cfg["repeats"],
-        "n_chains": cfg["n_chains"],
-        "k_steps": cfg["k_steps"],
-        "adapt_draws": cfg["adapt_draws"],
-        "horizon_steps": cfg["horizon_steps"],
-        "exploratory": exploratory,
-        "yardstick": None,
-        "speedup": None,
-        "hypothesis": hypothesis,
-        "codex_refs": list(codex_refs or []),
-    }
-    if extra_parents:
-        base_meta["parents"] = extra_parents
-
-    # Novelty filter: reject an exact duplicate or an AST-equivalent (comment or whitespace) change.
-    # An exploratory trial does not count against a standard one: the report of an exploratory
-    # trial tells the agent to grade the same file again at the standard setup.
-    is_dup = any(
-        (r.get("candidate_sha") == cand_sha or (r.get("ast_sha") and r.get("ast_sha") == cand_ast_sha))
-        and (exploratory or not r.get("exploratory"))
-        for r in prior
-    )
 
     if dry_run:
+        prior = _load_ledger(ledger_path)
+        trial_id = f"T{len(prior) + 1:04d}"
+        cand_sha, cand_ast_sha, cand_loc, cand_consts = _submission_stats(sub_path)
+        is_dup = any(
+            (r.get("candidate_sha") == cand_sha or (r.get("ast_sha") and r.get("ast_sha") == cand_ast_sha))
+            and (exploratory or not r.get("exploratory"))
+            for r in prior
+        )
         lint_error = None
         try:
             logdensity.check_imports(raw_text)
-            grade.load_check(snap_path, lane)
+            grade.load_check(sub_path, lane)
         except Exception as e:
             lint_error = str(e)
         return {
-            **base_meta,
+            "trial_id": trial_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "lane": lane,
+            "candidate_sha": cand_sha,
+            "ast_sha": cand_ast_sha,
+            "loc": cand_loc,
+            "magic_constants": cand_consts,
+            "judge_digest": digest,
+            "dims": list(cfg["dims"]),
+            "seed": cfg["seed"],
+            "repeats": cfg["repeats"],
+            "n_chains": cfg["n_chains"],
+            "k_steps": cfg["k_steps"],
+            "adapt_draws": cfg["adapt_draws"],
+            "horizon_steps": cfg["horizon_steps"],
+            "exploratory": exploratory,
+            "yardstick": None,
+            "speedup": None,
+            "hypothesis": hypothesis,
+            "codex_refs": list(codex_refs or []),
             "dry_run": True,
             "is_duplicate": is_dup,
             "lint_ok": lint_error is None,
@@ -363,91 +363,150 @@ def evaluate_lane_trial(
             "wall_s": round(time.perf_counter() - t0, 3),
         }
 
-    def finish(row: dict) -> dict:
-        row["wall_s"] = round(time.perf_counter() - t0, 3)
-        return _append_row(ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id,
-                           parents=parent_links, source=raw_text)
+    pending_dir = run_dir / ".pending"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    pending_snap = pending_dir / f"snap_{os.getpid()}_{time.time_ns()}.py"
+    pending_snap.write_bytes(raw)
+    try:
+        # Allocate trial_id and read prior state only AFTER acquiring the host queue and per-run
+        # lock, so concurrent evals for the same --run-id never collide on T0001 or overwrite
+        # each other's Flywheel node or incumbent.py.
+        with queue.eval_slot(f"autoresearch:{lane}/{run_id}", enabled=use_queue) as queue_wait_s:
+            with _run_lock(run_dir):
+                prior = _load_ledger(ledger_path)
+                last_kept = next((r for r in reversed(prior) if r.get("decision") in flywheel.KEPT_DECISIONS), None)
+                parent_node_id = (
+                    f"{lane}:{run_id}:{last_kept['trial_id']}" if last_kept and last_kept.get("trial_id") else None
+                )
+                parent_links = flywheel.parent_links(parent_node_id, combines=combines, fork_of=fork_of)
+                extra_parents = [p for p in parent_links if p["relation"] != "incumbent"]
+                trial_id = f"T{len(prior) + 1:04d}"
 
-    if not allow_duplicate and is_dup:
-        return finish({**base_meta, "tier0_ok": False, "tier1_ok": False, "queue_wait_s": 0.0,
-                       "decision": "discard_duplicate"})
+                trial_work = run_dir / "trials" / trial_id
+                trial_work.mkdir(parents=True, exist_ok=True)
+                snap_path = trial_work / "submission_snapshot.py"
+                shutil.copy2(pending_snap, snap_path)
+                cand_sha, cand_ast_sha, cand_loc, cand_consts = _submission_stats(snap_path)
 
-    yd = None if exploratory else load_yardstick(lane, autoresearch_dir=autoresearch_dir, digest=digest)
-    best_row, inc_row = _run_state(prior, yd["id"] if yd else None)
-    best = float(best_row["speedup"]) if best_row else None
-    if yd is not None:
-        base_meta.update(yardstick=yd["id"], best_speedup=best,
-                         best_trial=best_row.get("trial_id") if best_row else None)
+                base_meta = {
+                    "trial_id": trial_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "lane": lane,
+                    "candidate_sha": cand_sha,
+                    "ast_sha": cand_ast_sha,
+                    "loc": cand_loc,
+                    "magic_constants": cand_consts,
+                    "judge_digest": digest,
+                    "dims": list(cfg["dims"]),
+                    "seed": cfg["seed"],
+                    "repeats": cfg["repeats"],
+                    "n_chains": cfg["n_chains"],
+                    "k_steps": cfg["k_steps"],
+                    "adapt_draws": cfg["adapt_draws"],
+                    "horizon_steps": cfg["horizon_steps"],
+                    "exploratory": exploratory,
+                    "yardstick": None,
+                    "speedup": None,
+                    "hypothesis": hypothesis,
+                    "codex_refs": list(codex_refs or []),
+                }
+                if extra_parents:
+                    base_meta["parents"] = extra_parents
 
-    with queue.eval_slot(f"autoresearch:{lane}/{run_id}/{trial_id}", enabled=use_queue) as queue_wait_s:
-        if yd is not None and grade.sha256(snap_path) == yd["sha256"]:
-            # The lane's own starting code: its score at this configuration is the yardstick.
-            score, graded_from = _yardstick_score(yd), "yardstick"
-        else:
-            graded_from = "grader"
-            try:
-                score = grade.score_file(snap_path, lane, cfg, trial_work / "grade")
-            except Exception as e:
-                return finish({**base_meta, "tier0_ok": False, "tier1_ok": False,
-                               "queue_wait_s": round(queue_wait_s, 3), "decision": "discard_error",
-                               "error": f"{type(e).__name__}: {e}"})
+                def finish(row: dict) -> dict:
+                    row["wall_s"] = round(time.perf_counter() - t0, 3)
+                    return _append_row(
+                        ledger_path, tsv_path, row, run_id=run_id, parent_id=parent_node_id,
+                        parents=parent_links, source=raw_text, agent_model=agent_model,
+                    )
 
-        sp = grade.speedup(score, yd) if yd is not None else None
-        if not score.get("tier0_ok"):
-            decision = "discard_tier0"
-        elif not score.get("valid") or score.get("unpaired") or (not exploratory and sp is None):
-            decision = "discard_tier1"
-        elif exploratory:
-            decision = "exploratory"
-        else:
-            simpler = inc_row is not None and _is_simpler(
-                cand_loc, int(inc_row.get("loc") or 0), cand_consts, int(inc_row.get("magic_constants") or 0),
-                float(score.get("overhead_ratio") or 0.0), float(inc_row.get("overhead_ratio") or 0.0))
-            decision = decide(sp, best, simpler)
+                is_dup = any(
+                    (r.get("candidate_sha") == cand_sha or (r.get("ast_sha") and r.get("ast_sha") == cand_ast_sha))
+                    and (exploratory or not r.get("exploratory"))
+                    for r in prior
+                )
+                if not allow_duplicate and is_dup:
+                    return finish({**base_meta, "tier0_ok": False, "tier1_ok": False,
+                                   "queue_wait_s": round(queue_wait_s, 3), "decision": "discard_duplicate"})
 
-        archived: list[str] = []
-        if sp is not None:
-            archived = _update_archive(archive_dir, snap_path, score, trial_id=trial_id, cand_sha=cand_sha,
-                                       yardstick=yd["id"], speedup=sp, hypothesis=hypothesis)
-            if decision == "discard_no_gain" and archived:
-                decision = "archive_only"
-        if decision in flywheel.KEPT_DECISIONS:
-            shutil.copy2(snap_path, incumbent_path)
+                yd = None if exploratory else load_yardstick(lane, autoresearch_dir=autoresearch_dir, digest=digest)
 
-    (trial_work / "metrics.json").write_text(json.dumps(
-        {"config": cfg, "yardstick": yd["id"] if yd else None, "graded_from": graded_from, "score": score},
-        indent=1, default=str))
-    shutil.copy2(snap_path, trial_work / "submission.py")
+                best_row, inc_row = _run_state(prior, yd["id"] if yd else None)
+                best = float(best_row["speedup"]) if best_row else None
+                if yd is not None:
+                    base_meta.update(yardstick=yd["id"], best_speedup=best,
+                                     best_trial=best_row.get("trial_id") if best_row else None)
 
-    row = {
-        **base_meta,
-        "tier0_ok": bool(score.get("tier0_ok")),
-        "tier1_ok": bool(score.get("valid")) and not score.get("unpaired"),
-        "confirmed": bool((score.get("confirmation") or {}).get("ran") and score["confirmation"].get("passed")),
-        "graded_from": graded_from,
-        "speedup": _sig(sp),
-        "ratio_vs_best": _sig(sp / best) if (sp is not None and best) else None,
-        "soft_min_eff": _sig(score.get("soft_min_eff", 0.0)),
-        "short_horizon_soft_min": _sig(score.get("short_horizon_soft_min", 0.0)),
-        "long_horizon_soft_min": _sig(score.get("long_horizon_soft_min", 0.0)),
-        "median_adapt_cost": round(float(score.get("median_adapt_cost") or 0.0), 1),
-        "b2_max": round(float(score.get("b2_max") or 0.0), 5),
-        "overhead_ratio": round(float(score.get("overhead_ratio") or 0.0), 3),
-        "by_class": {k: _sig(v) for k, v in (score.get("by_class") or {}).items()},
-        "queue_wait_s": round(queue_wait_s, 3),
-        "archive_cells": archived,
-        "decision": decision,
-    }
-    if decision in flywheel.KEPT_DECISIONS:
-        row["best_speedup_after"] = max(row["speedup"], best or 0.0)
-    if decision.startswith("discard_tier"):
-        row["error"] = score.get("error") or (
-            "passed only on the confirmation seed; the public seed left a target without an efficiency, "
-            "so there is no score to compare" if score.get("unpaired") else "failed")
-        row["failed_targets"] = score.get("failed_targets", [])
-        if not score.get("tier0_ok"):
-            row["tier0_info"] = score.get("tier0_info")
-    return finish(row)
+                if yd is not None and grade.sha256(snap_path) == yd["sha256"]:
+                    # The lane's own starting code: its score at this configuration is the yardstick.
+                    score, graded_from = _yardstick_score(yd), "yardstick"
+                else:
+                    graded_from = "grader"
+                    try:
+                        score = grade.score_file(snap_path, lane, cfg, trial_work / "grade")
+                    except Exception as e:
+                        return finish({**base_meta, "tier0_ok": False, "tier1_ok": False,
+                                       "queue_wait_s": round(queue_wait_s, 3), "decision": "discard_error",
+                                       "error": f"{type(e).__name__}: {e}"})
+
+                sp = grade.speedup(score, yd) if yd is not None else None
+                if not score.get("tier0_ok"):
+                    decision = "discard_tier0"
+                elif not score.get("valid") or score.get("unpaired") or (not exploratory and sp is None):
+                    decision = "discard_tier1"
+                elif exploratory:
+                    decision = "exploratory"
+                else:
+                    simpler = inc_row is not None and _is_simpler(
+                        cand_loc, int(inc_row.get("loc") or 0), cand_consts, int(inc_row.get("magic_constants") or 0),
+                        float(score.get("overhead_ratio") or 0.0), float(inc_row.get("overhead_ratio") or 0.0))
+                    decision = decide(sp, best, simpler)
+
+                archived: list[str] = []
+                if sp is not None:
+                    archived = _update_archive(archive_dir, snap_path, score, trial_id=trial_id, cand_sha=cand_sha,
+                                               yardstick=yd["id"], speedup=sp, hypothesis=hypothesis)
+                    if decision == "discard_no_gain" and archived:
+                        decision = "archive_only"
+                if decision in flywheel.KEPT_DECISIONS:
+                    shutil.copy2(snap_path, incumbent_path)
+
+                (trial_work / "metrics.json").write_text(json.dumps(
+                    {"config": cfg, "yardstick": yd["id"] if yd else None, "graded_from": graded_from, "score": score},
+                    indent=1, default=str))
+                shutil.copy2(snap_path, trial_work / "submission.py")
+
+                row = {
+                    **base_meta,
+                    "tier0_ok": bool(score.get("tier0_ok")),
+                    "tier1_ok": bool(score.get("valid")) and not score.get("unpaired"),
+                    "confirmed": bool((score.get("confirmation") or {}).get("ran") and score["confirmation"].get("passed")),
+                    "graded_from": graded_from,
+                    "speedup": _sig(sp),
+                    "ratio_vs_best": _sig(sp / best) if (sp is not None and best) else None,
+                    "soft_min_eff": _sig(score.get("soft_min_eff", 0.0)),
+                    "short_horizon_soft_min": _sig(score.get("short_horizon_soft_min", 0.0)),
+                    "long_horizon_soft_min": _sig(score.get("long_horizon_soft_min", 0.0)),
+                    "median_adapt_cost": round(float(score.get("median_adapt_cost") or 0.0), 1),
+                    "b2_max": round(float(score.get("b2_max") or 0.0), 5),
+                    "overhead_ratio": round(float(score.get("overhead_ratio") or 0.0), 3),
+                    "by_class": {k: _sig(v) for k, v in (score.get("by_class") or {}).items()},
+                    "queue_wait_s": round(queue_wait_s, 3),
+                    "archive_cells": archived,
+                    "decision": decision,
+                }
+                if decision in flywheel.KEPT_DECISIONS:
+                    row["best_speedup_after"] = max(row["speedup"], best or 0.0)
+                if decision.startswith("discard_tier"):
+                    row["error"] = score.get("error") or (
+                        "passed only on the confirmation seed; the public seed left a target without an efficiency, "
+                        "so there is no score to compare" if score.get("unpaired") else "failed")
+                    row["failed_targets"] = score.get("failed_targets", [])
+                    if not score.get("tier0_ok"):
+                        row["tier0_info"] = score.get("tier0_info")
+                return finish(row)
+    finally:
+        pending_snap.unlink(missing_ok=True)
 
 
 DUPLICATE_HINT = ("The same code was already tried in this run (comments and whitespace do not count), so it "
@@ -748,6 +807,19 @@ def build_research_brief(
                 lines.append("- (no frontier nodes yet)")
             lines.append("")
 
+            kept_nodes = [
+                n for n in nodes
+                if (n.get("decision") in flywheel.KEPT_DECISIONS or n.get("decision") == "archive_only")
+                and (not local_yd or not n.get("yardstick") or n.get("yardstick") == local_yd)
+            ]
+            kept_nodes.sort(
+                key=lambda n: (
+                    float(n["speedup"]) if isinstance(n.get("speedup"), (int, float)) else -1.0,
+                    str(n.get("created_at") or ""),
+                ),
+                reverse=True,
+            )
+
             if not all_lanes and lane not in ("S2", "S3"):
                 lines.append(f"## Starting Point on {lane} (build on the live frontier)")
                 ryd = lane_frontier.get("yardstick") if lane_frontier else None
@@ -759,6 +831,27 @@ def build_research_brief(
                     who = lane_frontier.get("author") or lane_frontier.get("agent_model") or "unknown"
                     hyp = _clip(str(lane_frontier.get("hypothesis") or lane_frontier.get("title") or ""), 240)
                     lines.append(f"- Current compatible frontier: `{fid}` ({sp_s}) by `{who}` — {hyp}")
+                    # Surface any kept trial (e.g. keep_simpler) within the 5% frontier-step band
+                    # that scored higher than the latest 5%-step frontier on the same yardstick.
+                    best_kept = next(
+                        (
+                            n for n in kept_nodes
+                            if n.get("decision") in flywheel.KEPT_DECISIONS
+                            and n.get("id") != fid
+                            and n.get("has_source")
+                            and isinstance(n.get("speedup"), (int, float))
+                            and isinstance(sp, (int, float))
+                            and float(n["speedup"]) > float(sp)
+                        ),
+                        None,
+                    )
+                    if best_kept is not None:
+                        bk_id = str(best_kept["id"])
+                        bk_sp = f"{float(best_kept['speedup']):.4g}x"
+                        lines.append(
+                            f"- Note: kept trial `{bk_id}` ({bk_sp}, `{best_kept.get('decision')}`) sits within "
+                            f"the 5% frontier-step band above `{fid}`; consider fetching `{bk_id}` as your starting code."
+                        )
                     weak = _weakest_classes(_node_by_class(lane_frontier))
                     if weak:
                         lines.append(f"- Frontier weakest target classes (attack these first): {weak}")
@@ -789,18 +882,6 @@ def build_research_brief(
                     )
                 lines.append("")
 
-            kept_nodes = [
-                n for n in nodes
-                if (n.get("decision") in flywheel.KEPT_DECISIONS or n.get("decision") == "archive_only")
-                and (not local_yd or not n.get("yardstick") or n.get("yardstick") == local_yd)
-            ]
-            kept_nodes.sort(
-                key=lambda n: (
-                    float(n["speedup"]) if isinstance(n.get("speedup"), (int, float)) else -1.0,
-                    str(n.get("created_at") or ""),
-                ),
-                reverse=True,
-            )
             lines.append(f"## Top Recent Kept Trials on {lane} (build on or combine these)")
             if kept_nodes:
                 for n in kept_nodes[:6]:

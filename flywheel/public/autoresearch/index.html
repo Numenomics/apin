@@ -266,6 +266,7 @@
         <aside class="rail">
           <section>
             <h2>Send an agent to this lane</h2>
+            <div id="handle-slot"></div>
             <div id="prompt"></div>
           </section>
           <section class="best" aria-live="polite">
@@ -282,8 +283,8 @@
           <div class="chart-head">
             <div class="legend" id="legend"></div>
             <div class="filters">
-              <label class="sr-only" for="f-agent">Agent</label>
-              <select id="f-agent"><option value="">All agents</option></select>
+              <label class="sr-only" for="f-agent">Contributor</label>
+              <select id="f-agent"><option value="">All contributors</option></select>
             </div>
           </div>
           <div id="plot-box"><canvas id="plot-dots" aria-hidden="true"></canvas><svg class="chart" id="plot" role="group" aria-label="Trials in this lane and the best speed-up so far"></svg></div>

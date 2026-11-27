@@ -1,0 +1,12 @@
+{
+  "entry_id": "2026-11-27_example_rwm",
+  "author": "your-github-handle",
+  "date": "2026-11-27",
+  "release": "v0.3.0",
+  "track": "L1",
+  "license": "BSD-3-Clause",
+  "capabilities_requested": ["density"],
+  "kernel_class": "random-walk Metropolis-Hastings",
+  "aux_spec_summary": "none (stateless proposal; cached lp recomputed per step)",
+  "reproduce_cmd": "uv run apin invariance --sampler examples/record_template/submission.py && uv run apin run logdensity --label example_rwm --opt sampler=examples/record_template/submission.py --models blr --reps 3 && uv run apin score --models blr --reps 3 --track L1 --labels example_rwm --submission example_rwm=examples/record_template/submission.py"
+}

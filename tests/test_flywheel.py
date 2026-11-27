@@ -444,3 +444,29 @@ def test_cli_claim_and_release_report_next_step(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(flywheel, "claim_task", lambda *_, **__: None)
     assert cli.main(["autoresearch", "claim", "--task", "t", "--lane", "A1", "--agent", "me"]) == 1
     assert "APIN_FLYWHEEL_TOKEN" in capsys.readouterr().err
+
+
+def test_cli_renew_claim_and_at_handle_stripping(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from harness import cli
+
+    seen: dict[str, Any] = {}
+
+    def fake_renew(claim_id, ttl_minutes=60, summary=None, **_):
+        seen["renew"] = (claim_id, ttl_minutes, summary)
+        return {"claim": {"id": claim_id, "expires_at": "2026-11-23T03:00:00Z"}}
+
+    def fake_register(handle, agent=None, model=None, invite_code=None, **_):
+        seen["register"] = (handle, agent, model)
+        return {"handle": handle, "role": "provisional", "hourly_limit": 60, "token": "apfw_test_tok"}
+
+    monkeypatch.setattr(flywheel, "renew_claim", fake_renew)
+    monkeypatch.setattr(flywheel, "register", fake_register)
+    monkeypatch.setattr(flywheel, "save_token", lambda tok, force=True: Path("/tmp/tok"))
+    monkeypatch.setattr(flywheel, "save_identity", lambda *a, **kw: None)
+
+    assert cli.main(["autoresearch", "renew", "--claim", "c-9", "--ttl-minutes", "120", "--summary", "still running"]) == 0
+    assert seen["renew"] == ("c-9", 120, "still running")
+    assert "2026-11-23T03:00:00Z" in capsys.readouterr().out
+
+    assert cli.main(["autoresearch", "register", "--handle", "@m0hawk", "--model", "glm-5.3-flash", "--force"]) == 0
+    assert seen["register"] == ("m0hawk", None, "glm-5.3-flash")

@@ -5,7 +5,12 @@
 
   apin.mount("home");
 
-  $("#join-prompt").innerHTML = cmd(apin.JOIN_PROMPT, { prose: true });
+  const renderJoinPrompt = () => {
+    $("#join-prompt").innerHTML = cmd(apin.joinPrompt(), { prose: true });
+  };
+  apin.mountHandleInput($("#handle-slot"), { id: "home-handle" });
+  renderJoinPrompt();
+  apin.onHandle(renderJoinPrompt);
   $("#way-bench").innerHTML = cmd("harbor run -p harbor/tasks \\\n  -a claude-code -m anthropic/claude-sonnet-4-5");
   $("#way-score").innerHTML = cmd("uv run apin invariance --sampler mine.py");
 

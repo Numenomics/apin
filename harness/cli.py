@@ -61,25 +61,37 @@ def _validate_codex(index_path: Path) -> int:
 
 
 def _claim_or_release(a: argparse.Namespace) -> int:
-    """Reserve or free a task on the Flywheel claim ledger; prints what to do next."""
+    """Reserve, renew, or free a task on the Flywheel claim ledger; prints what to do next."""
     try:
         if a.ar_cmd == "claim":
-            res = flywheel.claim_task(a.task, a.lane, a.agent, a.summary, a.ttl_minutes)
+            res = flywheel.claim_task(
+                a.task, a.lane, a.agent, a.summary, a.ttl_minutes,
+                force=bool(getattr(a, "renew", False)),
+            )
+        elif a.ar_cmd == "renew":
+            res = flywheel.renew_claim(a.claim, ttl_minutes=a.ttl_minutes, summary=a.summary)
         else:
             res = flywheel.release_claim(a.claim, a.status)
     except flywheel.FlywheelError as exc:
-        if exc.status == 409:
-            print(f"{a.task} is already claimed. Pick another task: uv run python scripts/choose_research_task.py --list", file=sys.stderr)
+        if exc.status == 409 and a.ar_cmd == "claim":
+            print(
+                f"{a.task} is already claimed. Pick another task (`uv run python scripts/choose_research_task.py --list`), "
+                "or pass `--renew` if it is your own active claim.",
+                file=sys.stderr,
+            )
         else:
-            print(f"The Flywheel refused the request: {exc}", file=sys.stderr)
+            print(f"The Flywheel refused the request: {_refusal(exc)}", file=sys.stderr)
         return 1
     if res is None:
-        print("Nothing was claimed. " + NO_TOKEN_HINT.format(path=flywheel.token_path()), file=sys.stderr)
+        print("Nothing was updated. " + NO_TOKEN_HINT.format(path=flywheel.token_path()), file=sys.stderr)
         return 1
     claim = res.get("claim") or res
     if a.ar_cmd == "claim":
         print(f"Claimed {a.task} in lane {a.lane} until {claim.get('expires_at', 'the TTL runs out')}.")
+        print(f"To extend:       uv run apin autoresearch renew --claim {claim.get('id', '<claim id>')}")
         print(f"When you finish: uv run apin autoresearch release --claim {claim.get('id', '<claim id>')}")
+    elif a.ar_cmd == "renew":
+        print(f"Renewed claim {a.claim} until {claim.get('expires_at', 'the new TTL runs out')}.")
     else:
         print(f"Claim {a.claim} marked {a.status}.")
     return 0
@@ -163,6 +175,7 @@ def _is_placeholder(value: str, *, model: bool = False) -> bool:
 
 
 def _ar_register(a: argparse.Namespace) -> int:
+    a.handle = a.handle.strip().lstrip("@")
     for flag, value in (("--handle", a.handle), ("--agent", a.agent), ("--model", a.model)):
         if value and _is_placeholder(value, model=flag == "--model"):
             print(f"`{value}` is a placeholder, not a value for {flag}. "
@@ -470,6 +483,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="Flywheel trial(s) whose mechanism this candidate reuses (posted as `combines` parents)")
     ae.add_argument("--fork-of", action="append", default=[], metavar="NODE_ID",
                     help="Flywheel trial whose source this candidate started from (see `apin autoresearch fetch`)")
+    ae.add_argument("--model", help="model name recorded on this trial (overrides APIN_AGENT_MODEL / saved identity)")
 
     ab = ar_sub.add_parser("brief", help="print a zero-synthesis verbatim brief (Flywheel frontier, claims, dead ends, stall check)")
     ab.add_argument("--lane", default="all", help="lane name (A0..A4) or 'all' for a cross-lane overview (default: all)")
@@ -483,12 +497,18 @@ def main(argv: list[str] | None = None) -> int:
     ac.add_argument("--agent", required=True, help="your handle, or the model doing the work")
     ac.add_argument("--summary", default="", help="one sentence on what you plan to try")
     ac.add_argument("--ttl-minutes", type=int, default=60, help="how long the claim holds before it expires on its own")
+    ac.add_argument("--renew", "--force", action="store_true", dest="renew",
+                    help="replace your own existing active claim on this task")
+    arn = ar_sub.add_parser("renew", help="extend an active claim's TTL in place")
+    arn.add_argument("--claim", required=True, help="claim id printed by `apin autoresearch claim`")
+    arn.add_argument("--ttl-minutes", type=int, default=60, help="new TTL in minutes from now")
+    arn.add_argument("--summary", help="optional updated summary")
     arl = ar_sub.add_parser("release", help="mark a claim done or abandoned so the task is free again")
     arl.add_argument("--claim", required=True, help="claim id printed by `apin autoresearch claim`")
     arl.add_argument("--status", choices=("done", "abandoned"), default="done")
 
     arg = ar_sub.add_parser("register", help="register a handle on the Flywheel and save your token (no invite needed)")
-    arg.add_argument("--handle", required=True, help="2-40 chars: letters, digits, _ . -")
+    arg.add_argument("--handle", required=True, help="your handle, e.g. GitHub or X name (leading @ stripped; 2-40 chars: letters, digits, _ . -)")
     arg.add_argument("--agent", help="the agent harness you run, e.g. claude-code")
     arg.add_argument("--model", help="the name of the model doing the work, e.g. glm-5.3-flash (shown on the site)")
     arg.add_argument("--invite-code", help="community invite code: contributor tier at once instead of provisional")
@@ -551,6 +571,14 @@ def main(argv: list[str] | None = None) -> int:
     as2.add_argument("--allowed-path", action="append", default=[], dest="allowed_paths")
     as2.add_argument("--clean-build-cmd")
     as2.add_argument("--test-cmd")
+    as2.add_argument("--baseline-draws", action="append", type=Path, default=[],
+                     help="baseline draw file or directory for byte-identical canary check (repeatable)")
+    as2.add_argument("--candidate-draws", action="append", type=Path, default=[],
+                     help="candidate draw file or directory for byte-identical canary check (repeatable)")
+    as2.add_argument("--timing-json", type=Path,
+                     help="JSON file with paired timing / FD check results (fd_ok, baseline_median_us, candidate_median_us, speedup_ratio)")
+    as2.add_argument("--min-speedup", type=float, default=1.02,
+                     help="minimum speedup_ratio required to keep when timing is provided (default: 1.02)")
     as2.add_argument("--run-id", default="default")
     as2.add_argument("--dry-run", action="store_true")
 
@@ -675,7 +703,7 @@ def main(argv: list[str] | None = None) -> int:
                 a.lane, run_id=a.run_id, offline=a.offline, max_failures=a.max_failures,
             ), end="")
             return 0
-        if a.ar_cmd in ("claim", "release"):
+        if a.ar_cmd in ("claim", "renew", "release"):
             return _claim_or_release(a)
         handlers = {
             "register": _ar_register, "fetch": _ar_fetch, "note": _ar_note, "set-state": _ar_set_state,
@@ -684,12 +712,24 @@ def main(argv: list[str] | None = None) -> int:
         if a.ar_cmd in handlers:
             return handlers[a.ar_cmd](a)
         if a.ar_cmd == "eval-s2":
+            timing_override = json.loads(a.timing_json.read_text(encoding="utf-8")) if a.timing_json else None
             row = systems_lanes.evaluate_s2_trial(
                 a.upstream, a.hypothesis, allowed_paths=a.allowed_paths,
                 clean_build_cmd=a.clean_build_cmd, test_cmd=a.test_cmd,
+                baseline_draws=a.baseline_draws or None,
+                candidate_draws=a.candidate_draws or None,
+                timing_override=timing_override,
+                min_speedup=a.min_speedup,
                 run_id=a.run_id, dry_run=a.dry_run,
             )
-            print(f"{row['trial_id']} [S2:{a.upstream}] decision={row['decision']} paths_ok={row.get('paths_ok')} wall={row['wall_s']}s")
+            extras = ""
+            if row.get("fd_ok") is not None:
+                extras += f" fd_ok={row['fd_ok']}"
+            if row.get("byte_identical") is not None:
+                extras += f" byte_identical={row['byte_identical']}"
+            if row.get("speedup_ratio") is not None:
+                extras += f" speedup={row['speedup_ratio']}x"
+            print(f"{row['trial_id']} [S2:{a.upstream}] decision={row['decision']} paths_ok={row.get('paths_ok')}{extras} wall={row['wall_s']}s")
             return 0 if row["decision"] in ("dry_run_ok", "keep", "keep_verified") else 1
         if a.ar_cmd == "eval-s3":
             custom = dict(x.split("=", 1) for x in a.submission)
@@ -700,7 +740,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[S3:{a.mode}] passed={rep['passed']}/{rep['total']} pass_rate={rep['pass_rate']} auarc={rep['auarc']}")
             for r in rep["results"]:
                 print(f"  {'PASS' if r['passed'] else 'FAIL'} {r['task_id']:32s} eff={r['emp_eff']:.3g} ({r['reason']})")
-            return 0 if (rep["passed"] == rep["total"] if a.mode == "reference" else True) else 1
+            if a.mode == "base":
+                return 0 if rep["passed"] == 0 else 1
+            return 0 if (rep["total"] > 0 and rep["passed"] == rep["total"]) else 1
         overrides: dict = {}
         if a.dim is not None:
             overrides["dims"] = (a.dim,)
@@ -715,6 +757,7 @@ def main(argv: list[str] | None = None) -> int:
                 run_id=a.run_id, allow_duplicate=a.allow_duplicate,
                 submission_path=a.submission, dry_run=a.dry_run, use_queue=not a.no_queue,
                 combines=_split_ids(a.combines), fork_of=_split_ids(a.fork_of),
+                agent_model=a.model,
             )
         except autoresearch.YardstickError as exc:
             print(f"Cannot grade this trial: {exc}", file=sys.stderr)
