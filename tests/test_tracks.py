@@ -83,3 +83,26 @@ def test_score_rank_track_l2_orders_by_wall_clock_ess_per_s():
     assert r_l2[0]["label"] == "fast_wall"
     tab_l2 = score.table(r_l2, models, "base", ["m1"], track="L2", machine=tracks.machine_fingerprint())
     assert "Track L2 (wall-clock ESS/s)" in tab_l2
+
+
+def test_track_out_json_file_writes_directly_and_l3_markdown_header(tmp_path):
+    ula = ROOT / "autoresearch" / "lanes" / "S3" / "fixtures" / "ula_base.py"
+    out_file = tmp_path / "custom_l4.json"
+    rep = tracks.run_track_l4(
+        ula, dims=(4,), seed=2026, n_chains=24, checkpoints=(5,),
+        adapt_draws=20, out_dir=out_file,
+    )
+    assert out_file.is_file()
+    assert (tmp_path / "custom_l4.md").is_file()
+    assert not out_file.is_dir()
+
+    md_l3 = tracks.format_track_markdown({
+        "track": "L3", "submission": "hmc.py", "passed_all_invariance": True,
+        "soft_min_eff": 0.123, "scale_invariance_ratio": 1.0, "worst_b2_max": 0.001,
+        "targets": [{
+            "scale_stress": 1.0, "dim": 6, "family": "gaussian", "passed": True,
+            "emp_eff": 0.123, "b2_max": 0.001, "max_z": 1.1, "z_threshold": 3.5, "reason": "ok",
+        }],
+    })
+    assert "dual_eff" in md_l3 and "emp_eff" not in md_l3
+    assert rep["track"] == "L4"

@@ -1,0 +1,8 @@
+[apin]
+harness_sha = "REPLACE_WITH_GIT_REV_PARSE_HEAD"
+release = "v0.3.0"
+
+[environment]
+python = "3.12"
+numpy = "2.x"
+scipy = "1.x"

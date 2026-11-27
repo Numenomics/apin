@@ -308,6 +308,10 @@ CmdStan's count is `n_leapfrog__`, plus one gradient at the start of every trans
 
 **Models without a reference.** The gate cannot check a model that has no reference, so such a model is not in the grid. Today this is kronecker_gp. It is not scored and has no rows.
 
+### Track L4: Unadjusted and approximate methods
+
+Unadjusted Markov chains (e.g., ULA, MALA without Metropolis correction, unadjusted Hamiltonian/underdamped Langevin), variational inference, Pathfinder, and Laplace approximations are evaluated on **Track L4** (`uv run apin track run --track L4 --sampler <file>`), which is **never ranked or pooled against Track L1**. Instead of applying the exact-invariance pass/fail gate, Track L4 records per-target maximum squared standardized bias `b2_max` across a ladder of checkpoint horizons (`checkpoints=(20, 50, 100)` by default) along with the evaluation cost required to bring `b2_max < 0.01` (`cost_to_b2_lt_0_01`). Note that at finite chain count `n_chains` (default 48), even an exact sampler has a Monte Carlo sampling floor on the empirical squared error of the chain mean/variance/tail summaries (`O(1 / n_chains)` across `O(d)` test functions), so `b2_max` curves at `n_chains=48` reflect both asymptotic bias and finite-chain variance; increase `--chains` when resolving small asymptotic biases near `0.01`.
+
 ## The split
 
 The 21 core models are split into 10 public and 11 held-out models. Each family is in both halves.

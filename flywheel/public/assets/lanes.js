@@ -60,9 +60,16 @@
     ).join("") +
     "</tbody>";
 
+  let latestByLane = null;
+  apin.mountHandleInput($("#handle-slot"), { id: "lanes-handle" });
+  apin.onHandle(() => render(latestByLane));
+
   render(null);
   apin.api
     .overview()
-    .then((overview) => render(new Map(overview.lanes.map((l) => [l.lane, l]))))
+    .then((overview) => {
+      latestByLane = new Map(overview.lanes.map((l) => [l.lane, l]));
+      render(latestByLane);
+    })
     .catch(() => {});
 })();

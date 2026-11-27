@@ -3005,3 +3005,47 @@ describe("frontier steps (migration 0005)", () => {
   });
 });
 
+describe("handle normalization and in-place claim renewal", () => {
+  it("strips a leading @ when registering a handle", async () => {
+    const { env } = makeEnv({ apiKey: "root-admin-secret" });
+    const res = await register(env, "@octocat", { model: "glm-5.3-flash" }, "192.0.2.77");
+    assert.equal(res.status, 201);
+    assert.equal(res.json.handle, "octocat");
+    const dup = await register(env, "octocat", {}, "192.0.2.78");
+    assert.equal(dup.status, 409);
+  });
+
+  it("renews an active claim in place via PATCH ttl_minutes and enforces owner and active status", async () => {
+    const { env } = makeEnv({ apiKey: "root-admin-secret" });
+    const a = await registerToken(env, "renew-a");
+    const b = await registerToken(env, "renew-b");
+    const created = await reqJson(env, "POST", "/api/claims", { task_id: "t-renew", lane: "A1", agent: "renew-a", ttl_minutes: 10 }, bearer(a));
+    assert.equal(created.status, 201);
+    const id = created.json.claim.id;
+    const oldExp = created.json.claim.expires_at;
+
+    // Non-owner cannot renew
+    const forbidden = await reqJson(env, "PATCH", `/api/claims/${encodeURIComponent(id)}`, { ttl_minutes: 120 }, bearer(b));
+    assert.equal(forbidden.status, 403);
+
+    // Invalid TTL rejected
+    const badTtl = await reqJson(env, "PATCH", `/api/claims/${encodeURIComponent(id)}`, { ttl_minutes: 0 }, bearer(a));
+    assert.equal(badTtl.status, 400);
+
+    // Owner renews in place
+    const renewed = await reqJson(env, "PATCH", `/api/claims/${encodeURIComponent(id)}`, { ttl_minutes: 120, summary: "still working" }, bearer(a));
+    assert.equal(renewed.status, 200);
+    assert.equal(renewed.json.claim.id, id);
+    assert.equal(renewed.json.claim.status, "active");
+    assert.equal(renewed.json.claim.summary, "still working");
+    assert.ok(renewed.json.claim.expires_at > oldExp);
+
+    // Done claim cannot be renewed
+    assert.equal((await reqJson(env, "PATCH", `/api/claims/${encodeURIComponent(id)}`, { status: "done" }, bearer(a))).status, 200);
+    const afterDone = await reqJson(env, "PATCH", `/api/claims/${encodeURIComponent(id)}`, { ttl_minutes: 60 }, bearer(a));
+    assert.equal(afterDone.status, 409);
+    assert.equal(afterDone.json.error, "claim_not_active");
+  });
+});
+
+

@@ -3,7 +3,7 @@
 > **Karpathy-style 3-file contract for `Numenomics/apin` — unlocked immediately after Slice 2.**
 > - **Read-only judge:** `harness/judge.py` (never edit; digest recorded on every trial)
 > - **Single writable file:** `autoresearch/lanes/A1/submission.py` (implements `adapt_metric(oracle, budget, rng) -> (metric_tuning, x0)`)
-> - **Fixed transition kernel:** Verified adjusted NUTS / HMC kernel provided by the harness (NOT editable in Lane A1)
+> - **Fixed transition kernel:** Verified adjusted NUTS / HMC kernel provided by the harness (NOT editable in Lane A1). Note that `x0` returned by `adapt_metric` is ABI-checked for finite provenance during `adapt()`, while Tier 1 mixing scores start from fresh dispersed initial states so `adapt_metric` is judged on the metric & step size it learns rather than warm-start placement (warm-start transport belongs in Lane A4).
 
 ## 1. Objective
 

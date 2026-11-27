@@ -260,7 +260,7 @@ def register(
 
     Without an invite code the token is ``provisional``; a valid invite code gives ``contributor``.
     """
-    payload: dict[str, Any] = {"handle": handle}
+    payload: dict[str, Any] = {"handle": handle.strip().lstrip("@")}
     for key, val in (("agent", agent), ("model", model), ("invite_code", invite_code)):
         if val:
             payload[key] = val
@@ -478,6 +478,22 @@ def release_claim(
 ) -> dict[str, Any] | None:
     """Mark an active claim as 'done' or 'abandoned'. Returns None if unconfigured."""
     payload: dict[str, Any] = {"status": status}
+    if summary is not None:
+        payload["summary"] = summary
+    return _request_json("PATCH", f"/api/claims/{_q(claim_id)}", payload, url=url, token=token, timeout=timeout)
+
+
+def renew_claim(
+    claim_id: str,
+    ttl_minutes: int = 60,
+    *,
+    summary: str | None = None,
+    url: str | None = None,
+    token: str | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any] | None:
+    """Extend an active claim's TTL in place without changing its claim id."""
+    payload: dict[str, Any] = {"ttl_minutes": int(ttl_minutes)}
     if summary is not None:
         payload["summary"] = summary
     return _request_json("PATCH", f"/api/claims/{_q(claim_id)}", payload, url=url, token=token, timeout=timeout)

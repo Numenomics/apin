@@ -95,10 +95,22 @@ def finite_diff_gradient_check(
     }
 
 
+def _expand_draw_paths(paths: list[Path]) -> list[Path]:
+    """Expand any directory entries into their sorted child files."""
+    out: list[Path] = []
+    for raw in paths:
+        p = Path(raw)
+        if p.is_dir():
+            out.extend(sorted(child for child in p.iterdir() if child.is_file()))
+        else:
+            out.append(p)
+    return out
+
+
 def check_byte_identical_draws(baseline_files: list[Path], candidate_files: list[Path]) -> dict[str, Any]:
     """Verify exact SHA-256 byte identity across paired draw CSV/binary outputs (R-008 waiver)."""
-    b_map = {p.name: p for p in sorted(baseline_files)}
-    c_map = {p.name: p for p in sorted(candidate_files)}
+    b_map = {p.name: p for p in sorted(_expand_draw_paths(baseline_files))}
+    c_map = {p.name: p for p in sorted(_expand_draw_paths(candidate_files))}
     if set(b_map) != set(c_map) or not b_map:
         return {
             "byte_identical": False,
@@ -211,6 +223,7 @@ def evaluate_s2_trial(
     baseline_grad_fn: Callable[[np.ndarray], tuple[float, np.ndarray]] | None = None,
     candidate_grad_fn: Callable[[np.ndarray], tuple[float, np.ndarray]] | None = None,
     probe_points: np.ndarray | None = None,
+    timing_override: dict[str, Any] | None = None,
     min_speedup: float = 1.02,
     base_ref: str = "HEAD",
     run_id: str = "default",
@@ -297,6 +310,13 @@ def evaluate_s2_trial(
         if not fd["passed"]:
             row.update(decision="discard_fd_fail", wall_s=round(time.perf_counter() - t0, 3))
             return _append_systems_ledger(run_dir, row)
+    elif timing_override is not None and "fd_ok" in timing_override:
+        row["fd_ok"] = bool(timing_override["fd_ok"])
+        if "fd_detail" in timing_override:
+            row["fd_detail"] = timing_override["fd_detail"]
+        if not row["fd_ok"]:
+            row.update(decision="discard_fd_fail", wall_s=round(time.perf_counter() - t0, 3))
+            return _append_systems_ledger(run_dir, row)
 
     if baseline_draws is not None and candidate_draws is not None:
         canary = check_byte_identical_draws(baseline_draws, candidate_draws)
@@ -316,6 +336,24 @@ def evaluate_s2_trial(
             row["decision"] = "keep"
         else:
             row["decision"] = "discard_no_gain"
+    elif timing_override is not None and any(
+        timing_override.get(k) is not None for k in ("speedup_ratio", "baseline_median_us", "candidate_median_us")
+    ):
+        b_med = timing_override.get("baseline_median_us")
+        c_med = timing_override.get("candidate_median_us")
+        sr = timing_override.get("speedup_ratio")
+        if b_med is not None:
+            row["baseline_median_us"] = round(float(b_med), 4)
+        if c_med is not None:
+            row["candidate_median_us"] = round(float(c_med), 4)
+        if sr is None and b_med is not None and c_med is not None and float(c_med) > 0:
+            sr = float(b_med) / float(c_med)
+        if sr is not None and math.isfinite(float(sr)):
+            sr_val = round(float(sr), 4)
+            row["speedup_ratio"] = sr_val
+            row["decision"] = "keep" if sr_val >= min_speedup else "discard_no_gain"
+        else:
+            row["decision"] = "keep_verified"
     else:
         row["decision"] = "keep_verified"
 

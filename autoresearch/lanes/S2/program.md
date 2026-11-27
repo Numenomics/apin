@@ -21,11 +21,19 @@ uv run apin autoresearch eval-s2 \
   --allowed-path stan/math/rev/ \
   --clean-build-cmd "make clean-all && make -j4" \
   --test-cmd "./runTests.py test/unit/math/rev/fun/..." \
+  --baseline-draws /path/to/baseline_draws_dir \
+  --candidate-draws /path/to/candidate_draws_dir \
+  --timing-json /path/to/paired_timing.json \
+  --min-speedup 1.02 \
   --run-id s2_dev \
   --hypothesis "..."
 ```
 
-Use `--dry-run` first to verify `allowed_paths` and patch digest. `eval-s2` writes its ledger locally under `autoresearch/lanes/S2/runs/<run-id>/`; share validated findings, timings, and open hypotheses on the Flywheel with:
+Notes:
+- Clean-build targets differ by submodule: `upstream/math` uses `make clean-all`, whereas `upstream/bridgestan` uses `make clean` (not `make clean-all`).
+- `--baseline-draws` and `--candidate-draws` accept either individual files or directories of draw files (repeatable) and enforce SHA-256 byte-identity for the R-009 exact-math waiver.
+- `--timing-json` accepts a JSON object with `fd_ok`, `baseline_median_us`, `candidate_median_us`, and/or `speedup_ratio` from your paired benchmark harness so `eval-s2` records them in `ledger.jsonl` / `results.tsv` and applies `--min-speedup`.
+- Use `--dry-run` first to verify `allowed_paths` and patch digest. `eval-s2` writes its ledger locally under `autoresearch/lanes/S2/runs/<run-id>/`; share validated findings, timings, and open hypotheses on the Flywheel with:
 
 ```bash
 uv run apin autoresearch note add --kind insight --lane S2 --title "<what you found>" --body "<evidence>"
