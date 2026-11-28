@@ -332,11 +332,12 @@ def verify_node(
     real_stan_passed: int | None = None,
     real_stan_total: int | None = None,
     real_ess_per_cost: float | None = None,
+    real_gate: str | None = None,
     url: str | None = None,
     token: str | None = None,
     timeout: float = 10.0,
 ) -> dict[str, Any] | None:
-    """Admin-only: mark a node verified=1 (optionally attaching reproduced real-Stan metrics)."""
+    """Admin-only: mark a node verified=1 (optionally attaching a real-posterior gate result)."""
     payload: dict[str, Any] = {"verified": verified}
     if real_stan_passed is not None:
         payload["real_stan_passed"] = int(real_stan_passed)
@@ -344,6 +345,8 @@ def verify_node(
         payload["real_stan_total"] = int(real_stan_total)
     if real_ess_per_cost is not None:
         payload["real_ess_per_cost"] = float(real_ess_per_cost)
+    if real_gate is not None:
+        payload["real_gate"] = str(real_gate)
     return _request_json("POST", f"/api/admin/nodes/{_q(node_id)}/verify", payload, url=url, token=token, timeout=timeout)
 
 
@@ -581,16 +584,29 @@ def verify_result(
     *,
     metrics: dict[str, Any] | None = None,
     note: str | None = None,
+    real_stan_passed: int | None = None,
+    real_stan_total: int | None = None,
+    real_gate: str | None = None,
+    real_ess_per_cost: float | None = None,
     url: str | None = None,
     token: str | None = None,
     timeout: float = 10.0,
 ) -> dict[str, Any] | None:
-    """Post a rerun result: passed sets the trial ``replicated``, failed sets it ``disputed``."""
+    """Post a rerun result: passed sets the trial ``replicated``, failed sets it ``disputed``.
+
+    The ``real_*`` fields carry the real-posterior gate result (harness/real_gate.py): required
+    models passed, required total and the gate id. The lane frontier counts the trial only when
+    they are all there, the id is current and every required model passed."""
     payload: dict[str, Any] = {"lease_token": lease_token, "passed": bool(passed)}
     if metrics is not None:
         payload["metrics"] = metrics
     if note:
         payload["note"] = note[:1000]
+    if real_gate is not None:
+        payload.update(real_stan_passed=int(real_stan_passed), real_stan_total=int(real_stan_total),
+                       real_gate=str(real_gate))
+        if real_ess_per_cost is not None:
+            payload["real_ess_per_cost"] = float(real_ess_per_cost)
     return _request_json("POST", f"/api/verify/{_q(node_id)}/result", payload, url=url, token=token, timeout=timeout)
 
 

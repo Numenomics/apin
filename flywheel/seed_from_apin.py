@@ -2,7 +2,7 @@
 """Seed apin Flywheel D1 SQL (`flywheel/seed.sql`) from local autoresearch ledgers and
 real-Stan score CSVs.
 
-With --backfill-sql PATH it writes only the flag backfill of migration 0005 to PATH, to
+With --backfill-sql PATH it writes only the flag backfill of migration 0006 to PATH, to
 recompute the frontier step flags of a database (README.md, "Frontier steps").
 """
 
@@ -18,14 +18,16 @@ from typing import Any
 
 KEPT_DECISIONS = {"keep", "keep_baseline", "keep_simpler"}
 
-# Migration 0005 holds the statements that set nodes.frontier_step from the rows. The Worker
-# sets it on every write, but seed.sql writes rows directly, so it ends with the same
-# statements, read from the migration so they are kept in one place.
-FLAG_MIGRATION = Path(__file__).resolve().parent / "migrations" / "0005_speedup.sql"
+# Migration 0006 holds the statements that set nodes.frontier_step from the rows (it supersedes
+# the block of 0005: a step must also have passed the real-posterior gate). The Worker sets the
+# flags on every write, but seed.sql writes rows directly, so it ends with the same statements,
+# read from the migration so they are kept in one place. Seeded real_stan_* values carry no gate
+# id (nodes.real_gate), so a seeded trial is never a frontier step.
+FLAG_MIGRATION = Path(__file__).resolve().parent / "migrations" / "0006_real_gate.sql"
 
 
 def flag_backfill_sql(migration: Path = FLAG_MIGRATION) -> str:
-    """The statements between BACKFILL BEGIN and BACKFILL END in migration 0005."""
+    """The statements between BACKFILL BEGIN and BACKFILL END in migration 0006."""
     text = migration.read_text(encoding="utf-8")
     _, _, rest = text.partition("-- BACKFILL BEGIN")
     block, found, _ = rest.partition("-- BACKFILL END")
@@ -447,7 +449,7 @@ def render_seed_sql(nodes: list[dict[str, Any]]) -> str:
                 "INSERT OR IGNORE INTO node_parents (child, parent, relation, created_at) VALUES "
                 f"({_sql_literal(n['id'])}, {_sql_literal(n['parent_id'])}, 'incumbent', {_sql_literal(n['created_at'])});"
             )
-    lines.append("-- Frontier steps (the BACKFILL block of migrations/0005_speedup.sql).")
+    lines.append(f"-- Frontier steps (the BACKFILL block of migrations/{FLAG_MIGRATION.name}).")
     lines.append(flag_backfill_sql())
     lines.append("")
     return "\n".join(lines)
@@ -471,9 +473,9 @@ def generate_seed_artifacts(repo_root: Path, flywheel_dir: Path | None = None) -
 
 
 def write_backfill_sql(path: Path) -> Path:
-    """Write the BACKFILL block of migration 0005 as a standalone SQL file."""
+    """Write the BACKFILL block of migration 0006 as a standalone SQL file."""
     path.write_text(
-        "-- The BACKFILL block of flywheel/migrations/0005_speedup.sql. Safe to re-run.\n"
+        f"-- The BACKFILL block of flywheel/migrations/{FLAG_MIGRATION.name}. Safe to re-run.\n"
         + flag_backfill_sql()
         + "\n",
         encoding="utf-8",
@@ -487,11 +489,11 @@ def main(argv: list[str] | None = None) -> None:
         "--backfill-sql",
         type=Path,
         metavar="PATH",
-        help="write only the flag backfill of migration 0005 to PATH, and do not seed",
+        help="write only the flag backfill of migration 0006 to PATH, and do not seed",
     )
     args = parser.parse_args(argv)
     if args.backfill_sql:
-        print(f"Wrote the 0005 flag backfill to {write_backfill_sql(args.backfill_sql)}")
+        print(f"Wrote the 0006 flag backfill to {write_backfill_sql(args.backfill_sql)}")
         return
     flywheel_dir = Path(__file__).resolve().parent
     repo_root = flywheel_dir.parent

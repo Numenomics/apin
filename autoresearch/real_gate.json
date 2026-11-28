@@ -1,0 +1,7 @@
+{
+  "id": "nuts-ref-v1",
+  "required": ["blr", "eight_schools_noncentered", "gp_regr", "garch11"],
+  "reported": ["eight_schools_centered"],
+  "reps": 3,
+  "reference": "Required: the models on which the Stan NUTS reference (harbor/references/stan_core.py + lane_nuts.py) passed the 0.1-SD bench gate at the step 8 budget (3 reps, manifest budgets), measured 2026-11-28. Plain HMC (examples/samplers/hmc.py) passed the same four. Both missed eight_schools_centered, so it is run and reported, not required. To change the set, re-measure the reference on the candidate models (uv run apin autoresearch gate --submission harbor/tasks/a2-funnel-dynamics/tests/reference.py --lane A2 --models <list>, the generated copy of stan_core.py + lane_nuts.py), then bump id here, REAL_GATE_ID in flywheel/src/index.ts and the BACKFILL block in a new Flywheel migration together."
+}

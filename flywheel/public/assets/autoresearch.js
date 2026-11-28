@@ -108,12 +108,12 @@
     $("#prompt").innerHTML = cmd(apin.lanePrompt(laneOf(state.lane)), { prose: true });
 
     if (!best) {
-      $("#best").innerHTML = `<p class="caption">${state.chart.loading ? "Loading." : state.chart.failed ? "Could not load this lane." : "No kept graded trial yet."}</p>`;
+      $("#best").innerHTML = `<p class="caption">${state.chart.loading ? "Loading." : state.chart.failed ? "Could not load this lane." : "No trial has passed the real-posterior gate yet. A kept trial counts once an independent verifier has run the gate on it."}</p>`;
     } else {
       const n = (isNum(summary.steps) ? summary.steps : steps.length) - 1;
       const gain = n > 0 ? `${n} ${n === 1 ? "improvement" : "improvements"}` : "No improvement yet";
       $("#best").innerHTML =
-        `<div class="value">${fmt.speedup(best.speedup)}</div><div class="over">over the starting code</div>` +
+        `<div class="value">${fmt.speedup(best.speedup)}</div><div class="over">over the starting code, and passed the real-posterior gate</div>` +
         `<div class="who"><button type="button" data-node="${esc(best.id)}">${esc(best.trial_id || best.id)} by ${esc(who(best))}</button>` +
         `${best.agent_model && best.agent_model !== best.author ? `, ${esc(best.agent_model)}` : ""}<br>${esc(fmt.day(best.created_at))}. ${esc(gain)}.</div>`;
     }
@@ -489,7 +489,7 @@
       pair("Against the best of its run", fmt.times(n.ratio_vs_incumbent, 3)),
       pair("Short budget", fmt.eff(n.short_horizon_eff)),
       pair("Long budget", fmt.eff(n.long_horizon_eff)),
-      pair("Real Stan models passed", n.real_stan_total > 0 ? `${n.real_stan_passed} of ${n.real_stan_total}` : "not run"),
+      pair("Real Stan models passed", n.real_stan_total > 0 ? `${n.real_stan_passed} of ${n.real_stan_total}${n.real_gate ? ` (gate ${n.real_gate})` : ", before the gate"}` : "not run"),
       pair("Overhead", fmt.times(n.overhead_ratio, 2)),
       pair("Worst squared bias", fmt.num(n.b2_max, 4)),
       pair("Dimensions", Array.isArray(n.dims) && n.dims.length ? n.dims.join(", ") : "—"),
@@ -517,7 +517,7 @@
       body:
         `<div>${apin.decisionMark(n.decision, n.lane)} &nbsp; ${status(st.tone, st.label)}` +
         `<p class="caption" style="margin-top:6px">${esc(d.note || "")}. ${esc(st.note)}${n.state_reason ? " Reason given: " + esc(n.state_reason) : ""}` +
-        `${n.frontier_step ? " It was the best in its lane when it was posted." : n.standard === false ? " It was not graded, so it is not on the chart." : ""}</p></div>` +
+        `${n.frontier_step ? " It passed the real-posterior gate and was the best in its lane when it was posted." : n.standard === false ? " It was not graded, so it is not on the chart." : ""}</p></div>` +
         `<div><h4>Hypothesis</h4><p class="quote">${esc(n.hypothesis || "No hypothesis was recorded for this trial.")}</p></div>` +
         `<div class="kv">${facts.join("")}</div>` +
         (refs ? `<div><h4>Technique cards cited</h4><div class="chips">${refs}</div></div>` : "") +

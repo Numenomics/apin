@@ -308,6 +308,8 @@ CmdStan's count is `n_leapfrog__`, plus one gradient at the start of every trans
 
 **Models without a reference.** The gate cannot check a model that has no reference, so such a model is not in the grid. Today this is kronecker_gp. It is not scored and has no rows.
 
+**The autoresearch frontier gate.** Autoresearch lanes keep trials on a synthetic grader, and on 2026-11-28 lane frontiers passed this gate on at most 1 of 5 public models where plain HMC and the Stan NUTS reference passed 4. So a lane's frontier on the Flywheel counts a trial only after an independent verifier has run the real-posterior gate on its source: this gate, at the development seeds and 3 reps, on the models that the Stan NUTS reference passes at that budget. `autoresearch/real_gate.json` lists them (`required`: blr, eight_schools_noncentered, gp_regr, garch11) with the models that are run but not required (`reported`: eight_schools_centered, which the reference misses too), under a gate `id`. The trial needs a result under the current `id` with every required model right. `uv run apin autoresearch gate --submission FILE --lane LANE` runs it. To change the lists, re-measure the reference at that budget and bump `id`.
+
 ## The split
 
 The 21 core models are split into 10 public and 11 held-out models. Each family is in both halves.

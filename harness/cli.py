@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from . import (
-    autoresearch, cost, flywheel, grade, grid, invariance, models, queue, records, reference,
+    autoresearch, cost, flywheel, grade, grid, invariance, models, queue, real_gate, records, reference,
     rewind, sampler, score, shapes, systems_lanes, tracks,
 )
 from .models import ROOT
@@ -338,6 +338,7 @@ def _ar_verify_next(a: argparse.Namespace) -> int:
         outcome = autoresearch.rerun_for_verification(
             cand, lane, claimed_speedup=node.get("speedup"), claimed_yardstick=node.get("yardstick"),
             tolerance=a.tolerance, work_dir=work / "work", use_queue=not a.no_queue,
+            run_gate=not a.no_real_gate,
         )
     except Exception as exc:  # an evaluator crash is not evidence against the trial
         print(f"The rerun crashed ({type(exc).__name__}: {exc}); no result posted. "
@@ -348,15 +349,51 @@ def _ar_verify_next(a: argparse.Namespace) -> int:
         print(f"{node_id}: {outcome.get('reason')}; no result posted. "
               f"The lease expires at {lease.get('lease_expires_at')}.", file=sys.stderr)
         return 1
+    gate, note = outcome.get("gate"), str(outcome.get("reason") or "")
+    if gate:
+        print(real_gate.table(gate))
+        print(real_gate.summary_line(gate))
+        note += f"; real-posterior gate {gate['gate_id']}: {gate['required_passed']} of {gate['required_total']} required"
+    elif outcome.get("gate_error"):
+        print(f"The real-posterior gate crashed ({outcome['gate_error']}); posting the synthetic result alone, "
+              "so the trial cannot be its lane's frontier yet.", file=sys.stderr)
+        note += "; real-posterior gate crashed, not run"
+    elif outcome["passed"] and a.no_real_gate:
+        note += "; real-posterior gate skipped (--no-real-gate)"
     try:
         flywheel.verify_result(node_id, str(lease.get("lease_token")), outcome["passed"],
-                               metrics=outcome["metrics"], note=outcome.get("reason"))
+                               metrics=outcome["metrics"], note=note or None,
+                               **((real_gate.flywheel_fields(gate) or {}) if gate else {}))
     except flywheel.FlywheelError as exc:
         print(f"The Flywheel refused the result: {_refusal(exc)}", file=sys.stderr)
         return 1
     verdict = "replicated" if outcome["passed"] else "disputed"
     print(f"{node_id}: rerun {'PASSED' if outcome['passed'] else 'FAILED'} ({outcome.get('reason')}); "
           f"trial marked {verdict}. Candidate and work files: {work}")
+    return 0
+
+
+def _ar_gate(a: argparse.Namespace) -> int:
+    """Step 8 of auto-research.md: the real-posterior gate for one sampler file."""
+    if not a.submission.is_file():
+        print(f"No such file: {a.submission}", file=sys.stderr)
+        return 2
+    if a.label is not None and not real_gate.valid_label(a.label):
+        print(f"--label must be 1-64 letters, digits, `.`, `_` or `-`, got {a.label!r}", file=sys.stderr)
+        return 2
+    log = (lambda *x, **k: print(*x, file=sys.stderr, **k)) if a.json_output else print
+    try:
+        res = real_gate.run(a.submission, a.lane, models=_split_ids(a.models) or None, reps=a.reps,
+                            label=a.label, use_queue=not a.no_queue, log=log)
+    except Exception as exc:
+        print(f"The real-posterior gate did not finish: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    if a.json_output:
+        print(json.dumps(res))
+        return 0
+    print(real_gate.table(res))
+    print(real_gate.summary_line(res))
+    print(f"Runs and scores: {res['work_dir']}")
     return 0
 
 
@@ -540,9 +577,22 @@ def main(argv: list[str] | None = None) -> int:
     avn.add_argument("--tolerance", type=float, default=autoresearch.REPLICATION_TOLERANCE,
                      help="pass when the rerun's speed-up is within this relative difference of the posted one "
                           f"(default: {autoresearch.REPLICATION_TOLERANCE})")
-    avn.add_argument("--ttl-minutes", type=int, default=120, help="lease length")
+    avn.add_argument("--ttl-minutes", type=int, default=240,
+                     help="lease length (default 240: the rerun plus the 10 to 40 minute real-posterior gate and queue waits)")
     avn.add_argument("--run-id", default="verify", help="run directory for candidates and work files")
     avn.add_argument("--no-queue", action="store_true", help="bypass the host FIFO evaluation lock")
+    avn.add_argument("--no-real-gate", action="store_true",
+                     help="post the synthetic rerun only; without the real-posterior gate the trial cannot be a frontier")
+
+    agt = ar_sub.add_parser("gate", help="step 8: run a sampler file on the real-posterior gate (autoresearch/real_gate.json)")
+    agt.add_argument("--submission", type=Path, required=True, help="the frozen file you graded")
+    agt.add_argument("--lane", help="its lane; A1 and A4 need it, because the judge supplies their kernel")
+    agt.add_argument("--models", action="append", metavar="MODEL[,MODEL]",
+                     help="quick check on these models only: the result is partial and cannot qualify a frontier")
+    agt.add_argument("--reps", type=int, help="default: the gate's reps; any other value makes the result partial")
+    agt.add_argument("--label", help="name of the run under runs/real_gate/ (default: from the lane and file sha256)")
+    agt.add_argument("--json", action="store_true", dest="json_output", help="print the result as one JSON object")
+    agt.add_argument("--no-queue", action="store_true", help="bypass the host FIFO evaluation lock")
 
 
     as2 = ar_sub.add_parser("eval-s2", help="evaluate Lane S2 gradient/compiler speed patch")
@@ -679,7 +729,7 @@ def main(argv: list[str] | None = None) -> int:
             return _claim_or_release(a)
         handlers = {
             "register": _ar_register, "fetch": _ar_fetch, "note": _ar_note, "set-state": _ar_set_state,
-            "search": _ar_search, "verify-next": _ar_verify_next,
+            "search": _ar_search, "verify-next": _ar_verify_next, "gate": _ar_gate,
         }
         if a.ar_cmd in handlers:
             return handlers[a.ar_cmd](a)

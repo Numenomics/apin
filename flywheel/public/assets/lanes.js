@@ -12,12 +12,16 @@
   ];
   const BENCH_TASK = { A0: "a0-ground-up", A1: "a1-preconditioning", A2: "a2-funnel-dynamics", A3: "a3-integrator-trajectory", A4: "a4-nonlinear-transport" };
 
-  /* The lane's best graded trial, once the Flywheel has answered. */
+  /* The lane's frontier, once the Flywheel has answered: the best trial that an independent
+     verifier ran through the real-posterior gate and that passed it. A lane may have none. */
   function standing(summary) {
     if (!summary) return "";
     const t = summary.frontier;
-    if (!t) return summary.trials ? "" : "<div><dt>Best so far</dt><dd>No trials posted yet.</dd></div>";
-    return `<div><dt>Best so far</dt><dd><a href="/autoresearch/#trial=${encodeURIComponent(t.id)}">${fmt.speedup(t.speedup)} by ${esc(t.author || t.agent_model || "unknown")}</a>, from ${fmt.int(summary.trials)} trials</dd></div>`;
+    const dt = "<dt>Best that passed the real-posterior gate</dt>";
+    if (!t) {
+      return `<div>${dt}<dd>${summary.trials ? `None yet, from ${fmt.int(summary.trials)} trials.` : "No trials posted yet."}</dd></div>`;
+    }
+    return `<div>${dt}<dd><a href="/autoresearch/#trial=${encodeURIComponent(t.id)}">${fmt.speedup(t.speedup)} by ${esc(t.author || t.agent_model || "unknown")}</a>, from ${fmt.int(summary.trials)} trials</dd></div>`;
   }
 
   function render(byLane) {

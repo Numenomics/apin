@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { handleRequest } from "../src/index.ts";
+import { handleRequest, REAL_GATE } from "../src/index.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCHEMA_SQL = fs.readFileSync(path.resolve(__dirname, "../schema.sql"), "utf8");
@@ -16,11 +16,13 @@ const MIGRATIONS_SQL = fs
   .filter((f) => f.endsWith(".sql"))
   .sort()
   .map((f) => fs.readFileSync(path.join(MIGRATIONS_DIR, f), "utf8"));
-/** The flag backfill of migration 0005, for trials written straight into SQLite (as seed.sql does). */
+/** The flag backfill of migration 0006, for trials written straight into SQLite (as seed.sql does). */
 const BACKFILL_SQL = fs
-  .readFileSync(path.join(MIGRATIONS_DIR, "0005_speedup.sql"), "utf8")
+  .readFileSync(path.join(MIGRATIONS_DIR, "0006_real_gate.sql"), "utf8")
   .split("-- BACKFILL BEGIN")[1]
   .split("-- BACKFILL END")[0];
+/** A passing result under the current real-posterior gate, as a verifier or a maintainer posts it. */
+const GATE_PASS = { real_gate: REAL_GATE.id, real_stan_passed: 4, real_stan_total: 4 };
 /**
  * What the deployed database holds beyond today's 0001 to 0004: the indexes of 0003 and the
  * indexes and triggers of 0004 as they were first applied, before 0005 replaced them.
@@ -243,7 +245,7 @@ describe("apin Flywheel Worker", () => {
     assert.equal(n1.status, 201);
     assert.equal(n1.json.node.id, "A1:run1:T0001");
 
-    // Post kept child with real-Stan verification
+    // Post kept child with a passing real-posterior gate result (a maintainer may post one)
     const n2 = await reqJson(env, "POST", "/api/nodes", {
       id: "A1:run1:T0002",
       parent_id: "A1:run1:T0001",
@@ -259,7 +261,8 @@ describe("apin Flywheel Worker", () => {
       yardstick: "A1-judge-1",
       ratio_vs_incumbent: 2.4,
       real_stan_passed: 4,
-      real_stan_total: 5,
+      real_stan_total: 4,
+      real_gate: REAL_GATE.id,
       real_ess_per_cost: 0.024,
       overhead_ratio: 4.5,
       dims: [6, 20],
@@ -299,6 +302,7 @@ describe("apin Flywheel Worker", () => {
       short_horizon_eff: 0.0002,
       long_horizon_eff: 0.0004,
       dims: [6, 20],
+      ...GATE_PASS,
       created_at: "2026-11-21T11:00:00Z",
     });
     assert.equal(n4.status, 201);
@@ -323,8 +327,8 @@ describe("apin Flywheel Worker", () => {
     assert.equal(dagRes.status, 200);
     assert.equal(dagRes.json.nodes.length, 4);
     assert.equal(dagRes.json.edges.length, 2);
-    assert.equal(dagRes.json.alignment.length, 1);
-    assert.equal(dagRes.json.alignment[0].real_stan_pass_rate, 0.8);
+    assert.equal(dagRes.json.alignment.length, 2);
+    assert.equal(dagRes.json.alignment.find((a) => a.id === "A1:run1:T0002").real_stan_pass_rate, 1);
 
     // GET /api/nodes filtering
     const filteredVerified = await reqJson(env, "GET", "/api/nodes?lane=A1&verified=1&limit=10");
@@ -554,6 +558,7 @@ describe("apin Flywheel Worker", () => {
             speedup: 1.3,
             yardstick: "A0-judge-1",
             dims: [6, 20],
+            ...GATE_PASS,
           },
         },
       },
@@ -844,10 +849,12 @@ async function registerToken(env, handle, ip) {
 /**
  * A graded trial. Unless the test gives a speedup, it follows soft_min_eff, with 0.001 as the
  * starting code (speedup 1), so tests that only care about order can keep using soft_min_eff.
+ * It carries a passing real-posterior gate result (GATE_PASS), which only a maintainer's post
+ * stores: an author's real_* fields are dropped, so an author's trial is no step until verified.
  */
 function trial(id, extra = {}) {
   const [lane, run_id, trial_id] = id.split(":");
-  return { id, lane, run_id, trial_id, decision: "keep", soft_min_eff: 0.001, dims: [6, 20], yardstick: "Y1", speedup: speedupOf(extra.soft_min_eff ?? 0.001), ...extra };
+  return { id, lane, run_id, trial_id, decision: "keep", soft_min_eff: 0.001, dims: [6, 20], yardstick: "Y1", speedup: speedupOf(extra.soft_min_eff ?? 0.001), ...GATE_PASS, ...extra };
 }
 
 function speedupOf(eff) {
@@ -1009,11 +1016,13 @@ describe("open registration and abuse limits", () => {
     assert.equal(globalCap.status, 429);
     assert.equal(globalCap.json.scope, "provisional_trials_global_daily");
 
-    // Provisional trials stay visible in the DAG and frontier, marked with their tier.
+    // Provisional trials stay visible in the DAG, marked with their tier. Their own real_* fields
+    // are dropped, so none is a frontier before a verifier posts a gate result.
     const dag = await reqJson(env, "GET", "/api/dag");
     assert.equal(dag.json.nodes.length, 3);
     assert.ok(dag.json.nodes.every((n) => n.author_tier === "provisional" && n.state === "unverified"));
-    assert.equal(dag.json.frontier.A1.author_tier, "provisional");
+    assert.ok(dag.json.nodes.every((n) => n.real_gate === null && n.real_stan_total === null && !n.frontier_step));
+    assert.equal(dag.json.frontier.A1, undefined);
   });
 
   it("lets maintainers promote a handle, revoke it, and purge everything it posted in one call", async () => {
@@ -1182,6 +1191,7 @@ describe("trials: idempotent writes, sources, parents and research state", () =>
     const path = `/api/nodes/${encodeURIComponent(id)}/state`;
     await reqJson(env, "POST", "/api/nodes", trial(id, { soft_min_eff: 0.9 }), bearer(author));
     await reqJson(env, "POST", "/api/nodes", trial("A4:st:T0002", { soft_min_eff: 0.1 }), bearer(author));
+    passGate(sqlite, [id, "A4:st:T0002"]);
 
     assert.equal((await reqJson(env, "POST", path, { state: "bogus" }, bearer(contrib))).status, 400);
     // Only maintainers set verified, even the author cannot.
@@ -1355,14 +1365,23 @@ describe("verification queue", () => {
     assert.equal((await post("A1:q:T0005", { decision: "keep", soft_min_eff: 0.003 })).json.verify_queued, true);
     // Idempotent: a re-post does not queue twice.
     assert.equal((await post("A1:q:T0005", { decision: "keep", soft_min_eff: 0.003 })).json.verify_queued, false);
-    // Once T0005 is replicated, only trials beating it are queued.
+    // A replicated trial that has no passing real-posterior gate result does not set the bar: a
+    // slower trial may still pass the gate and become the frontier.
     sqlite.prepare("UPDATE nodes SET state = 'replicated' WHERE id = 'A1:q:T0005'").run();
-    assert.equal((await post("A1:q:T0006", { decision: "keep", soft_min_eff: 0.0029 })).json.verify_queued, false);
+    assert.equal((await post("A1:q:T0006", { decision: "keep", soft_min_eff: 0.0029 })).json.verify_queued, true);
+    // Once T0005 also passed the gate, only trials beating it are queued.
+    sqlite.prepare("UPDATE nodes SET real_gate = ?, real_stan_passed = 4, real_stan_total = 4 WHERE id = 'A1:q:T0005'").run(REAL_GATE.id);
+    assert.equal((await post("A1:q:T0008", { decision: "keep", soft_min_eff: 0.0029 })).json.verify_queued, false);
+    // A pass under an older gate id does not count.
+    sqlite.prepare("UPDATE nodes SET real_gate = 'older-gate' WHERE id = 'A1:q:T0005'").run();
+    assert.equal((await post("A1:q:T0009", { decision: "keep", soft_min_eff: 0.0029 })).json.verify_queued, true);
+    sqlite.prepare("UPDATE nodes SET real_gate = ? WHERE id = 'A1:q:T0005'").run(REAL_GATE.id);
     assert.equal((await post("A1:q:T0007", { decision: "keep", soft_min_eff: 0.004 })).json.verify_queued, true);
 
     const queue = await reqJson(env, "GET", "/api/verify/queue?lane=A1");
-    assert.deepEqual(queue.json.items.map((i) => i.node_id), ["A1:q:T0001", "A1:q:T0002", "A1:q:T0005", "A1:q:T0007"]);
-    const item = queue.json.items[2];
+    assert.deepEqual(queue.json.items.map((i) => i.node_id).sort(),
+      ["A1:q:T0001", "A1:q:T0002", "A1:q:T0005", "A1:q:T0006", "A1:q:T0007", "A1:q:T0009"]);
+    const item = queue.json.items.find((i) => i.node_id === "A1:q:T0005");
     assert.equal(item.status, "queued");
     assert.equal(item.available, true);
     assert.equal(item.reason, "beats_frontier");
@@ -1467,12 +1486,16 @@ describe("verification queue", () => {
 
 const TRIAL_COLUMNS = [
   "id", "parent_id", "lane", "run_id", "trial_id", "agent_model", "author", "author_tier", "title", "hypothesis",
-  "decision", "soft_min_eff", "speedup", "yardstick", "real_stan_passed", "real_stan_total", "verified", "state", "codex_refs",
+  "decision", "soft_min_eff", "speedup", "yardstick", "real_stan_passed", "real_stan_total", "real_gate", "verified", "state", "codex_refs",
   "metrics_json", "dims", "created_at",
 ];
 
-/** Inserts trials straight into SQLite (triggers keep run_stats current), then backfills the step flags. */
-function seedTrials(sqlite, rows) {
+/**
+ * Inserts trials straight into SQLite (triggers keep run_stats current), then backfills the step
+ * flags. With `gate`, a row that gives no real_stan_total gets a passing gate result (GATE_PASS),
+ * so its kept trials can be steps; without it, no seeded trial has a gate result.
+ */
+function seedTrials(sqlite, rows, { gate = false } = {}) {
   const stmt = sqlite.prepare(
     `INSERT INTO nodes (${TRIAL_COLUMNS.join(", ")}) VALUES (${TRIAL_COLUMNS.map(() => "?").join(", ")})`
   );
@@ -1483,6 +1506,7 @@ function seedTrials(sqlite, rows) {
       parent_id: null, lane, run_id, trial_id, agent_model: "model-x", author: `${run_id}-author`, author_tier: null,
       title: `${trial_id}: ${r.hypothesis ?? "idea"}`, hypothesis: "idea", decision: "discard_no_gain",
       soft_min_eff: null, real_stan_passed: null, real_stan_total: null, verified: 0, state: "unverified",
+      ...(gate && !("real_stan_total" in r) ? GATE_PASS : {}),
       codex_refs: "[]", metrics_json: '{"loc":10}', dims: "[6,20]", yardstick: "Y1", speedup: speedupOf(r.soft_min_eff), ...r,
     };
     stmt.run(...TRIAL_COLUMNS.map((c) => row[c] ?? null));
@@ -1493,18 +1517,25 @@ function seedTrials(sqlite, rows) {
 
 const ts = (i) => new Date(Date.UTC(2026, 0, 1) + i * 60_000).toISOString();
 
+/** Stores a passing gate result on trials an author posted (as a verifier would) and recomputes the flags. */
+function passGate(sqlite, ids) {
+  const stmt = sqlite.prepare("UPDATE nodes SET real_gate = ?, real_stan_passed = 4, real_stan_total = 4 WHERE id = ?");
+  for (const id of ids) stmt.run(REAL_GATE.id, id);
+  sqlite.exec(BACKFILL_SQL);
+}
+
 describe("bounded reads", () => {
   it("/api/overview: totals, lanes with frontier, Stan pick, claims, alignment and models", async () => {
     const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
     seedTrials(sqlite, [
       // Lane A1, run r1: first kept scored trial at T2 (0.1), then improvements; T6 is the frontier.
       { id: "A1:r1:T1", decision: "discard_tier0", created_at: ts(1) },
-      { id: "A1:r1:T2", decision: "keep_baseline", soft_min_eff: 0.1, created_at: ts(2), agent_model: "glm" },
+      { id: "A1:r1:T2", decision: "keep_baseline", soft_min_eff: 0.1, created_at: ts(2), agent_model: "glm", real_stan_passed: 4, real_stan_total: 4, real_gate: REAL_GATE.id },
       { id: "A1:r1:T3", decision: "discard_no_gain", soft_min_eff: 0.05, created_at: ts(3) },
-      { id: "A1:r1:T4", decision: "keep", soft_min_eff: 0.2, created_at: ts(4), real_stan_passed: 3, real_stan_total: 5 },
+      { id: "A1:r1:T4", decision: "keep", soft_min_eff: 0.2, created_at: ts(4), real_stan_passed: 5, real_stan_total: 5, real_gate: REAL_GATE.id },
       { id: "A1:r1:T5", decision: "archive_only", soft_min_eff: 0.9, created_at: ts(5) },
       { id: "A1:r1:T6", decision: "keep_incumbent_failed", soft_min_eff: 0.3, created_at: ts(6) },
-      { id: "A1:r1:T7", decision: "keep", soft_min_eff: 0.4, created_at: ts(7), real_stan_passed: 4, real_stan_total: 5 },
+      { id: "A1:r1:T7", decision: "keep", soft_min_eff: 0.4, created_at: ts(7), real_stan_passed: 5, real_stan_total: 5, real_gate: REAL_GATE.id },
       // Another A1 run, never kept; a disputed high score that must not be the frontier.
       { id: "A1:r2:T1", decision: "keep", soft_min_eff: 0.95, state: "disputed", created_at: ts(8), author: "bob", agent_model: "deepseek" },
       { id: "A1:r2:T2", decision: "discard_no_gain", soft_min_eff: 0.01, created_at: ts(9), author: "bob",
@@ -1518,7 +1549,8 @@ describe("bounded reads", () => {
     assert.equal(res.status, 200);
     assert.equal(res.headers.get("Cache-Control"), "public, max-age=30, s-maxage=30");
     const o = res.json;
-    assert.deepEqual(Object.keys(o).sort(), ["alignment", "claims", "lanes", "models", "totals"]);
+    assert.deepEqual(Object.keys(o).sort(), ["alignment", "claims", "lanes", "models", "real_gate", "totals"]);
+    assert.equal(o.real_gate, REAL_GATE.id);
     assert.deepEqual(
       { ...o.totals, latest_at: undefined },
       // Steps in A1: T2, T4, T7 (T6 keep_incumbent_failed is not frontier-eligible): two improvements.
@@ -1537,16 +1569,16 @@ describe("bounded reads", () => {
     assert.equal(a1.frontier.id, "A1:r1:T7");
     assert.deepEqual([a1.frontier.speedup, a1.frontier.yardstick], [400, "Y1"]);
     assert.ok(!("run" in a1));
-    // Highest pass share wins, newest on ties (T7 and r2:T2 both 4/5; r2:T2 is newer).
-    assert.deepEqual(a1.stan, { id: "A1:r2:T2", run_id: "r2", trial_id: "T2", real_stan_passed: 4, real_stan_total: 5 });
+    // Highest pass share wins, newest on ties (T4 and T7 both 5/5; T7 is newer).
+    assert.deepEqual(a1.stan, { id: "A1:r1:T7", run_id: "r1", trial_id: "T7", real_stan_passed: 5, real_stan_total: 5 });
 
     const a3 = o.lanes[1];
     assert.deepEqual([a3.frontier, a3.steps], [null, 0]);
     assert.equal(a3.stan, null);
 
     assert.equal(o.claims.length, 1);
-    assert.deepEqual(o.alignment.map((p) => p.id), ["A1:r1:T4", "A1:r1:T7", "A1:r2:T2"]);
-    assert.equal(o.alignment[0].real_stan_pass_rate, 0.6);
+    assert.deepEqual(o.alignment.map((p) => p.id), ["A1:r1:T2", "A1:r1:T4", "A1:r1:T7", "A1:r2:T2"]);
+    assert.equal(o.alignment[3].real_stan_pass_rate, 0.8);
     assert.deepEqual(o.models, ["deepseek", "glm", "model-x"]);
   });
 
@@ -1694,7 +1726,7 @@ describe("bounded reads", () => {
         soft_min_eff: i / 1e4,
         speedup: 1.06 ** i,
         created_at: ts(i),
-      }))
+      })), { gate: true }
     );
     const dag = (await reqJson(env, "GET", "/api/dag")).json;
     assert.equal(dag.nodes.length, 300);
@@ -1816,7 +1848,7 @@ describe("review fixes", () => {
     seedTrials(sqlite, [
       { id: "A1:r:T1", decision: "keep", soft_min_eff: 0.1, created_at: ts(1) },
       { id: "A2:r:T1", decision: "keep", soft_min_eff: 0.2, created_at: ts(2) },
-    ]);
+    ], { gate: true });
     const store = new Map();
     env.CACHE = {
       async match(req) {
@@ -2156,7 +2188,7 @@ describe("review round 3", () => {
     seedTrials(sqlite, [
       ...Array.from({ length: 3000 }, (_, i) => ({ id: `A5:tie:T${i}`, decision: "discard_tier1", soft_min_eff: 0.001, created_at: ts(1) })),
       ...Array.from({ length: 3000 }, (_, i) => ({ id: `A6:tie:T${i}`, decision: "keep", soft_min_eff: 0.001, created_at: ts(1) })),
-    ]);
+    ], { gate: true });
     for (const path of ["/api/frontier", "/api/overview", "/api/dag"]) {
       const seen = recordQueries(env);
       assert.equal((await reqJson(env, "GET", path)).status, 200, path);
@@ -2211,14 +2243,18 @@ it("exports nothing that stops the Worker from starting", async () => {
   }
 });
 
-describe("frontier steps (migration 0005)", () => {
+describe("frontier steps (migrations 0005 and 0006)", () => {
   const KEPT = new Set(["keep", "keep_baseline", "keep_simpler"]);
   const MARGIN = 1.05;
   const byPosition = (a, b) =>
     a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 
+  /** Counts for its lane's current yardstick (the gate plays no part). */
   const isEligible = (r) =>
     r.yardstick !== null && r.speedup > 0 && !["retracted", "disputed"].includes(r.state) && (r.verified === 1 || KEPT.has(r.decision));
+  /** Passed the current real-posterior gate on every required model. */
+  const passedGate = (r) => r.real_gate === REAL_GATE.id && r.real_stan_total > 0 && r.real_stan_passed === r.real_stan_total;
+  const ROW = "id, lane, created_at, speedup, yardstick, decision, verified, state, real_gate, real_stan_passed, real_stan_total";
   /** Each lane's current yardstick: the one whose first eligible trial is the newest. */
   function expectedYardsticks(rows) {
     const first = new Map(); // lane -> yardstick -> its first eligible trial
@@ -2234,15 +2270,15 @@ describe("frontier steps (migration 0005)", () => {
   }
   /** The definition, from scratch over every trial: independent of the Worker and of the migration. */
   function expected(sqlite) {
-    const rows = sqlite.prepare("SELECT id, lane, created_at, speedup, yardstick, decision, verified, state FROM nodes").all();
+    const rows = sqlite.prepare(`SELECT ${ROW} FROM nodes`).all();
     rows.sort(byPosition);
     const current = expectedYardsticks(rows);
     const bar = new Map(); // lane -> the latest step's speedup
     const flags = {};
     for (const r of rows) {
       const standard = r.yardstick !== null;
-      // Only trials on the lane's current yardstick are compared.
-      const eligible = isEligible(r) && r.yardstick === current.get(r.lane);
+      // Only trials on the lane's current yardstick that passed the current gate are compared.
+      const eligible = isEligible(r) && passedGate(r) && r.yardstick === current.get(r.lane);
       // At least MARGIN times the latest step, up to rounding (1.26 over 1.2 counts).
       const step = eligible && (!bar.has(r.lane) || r.speedup >= bar.get(r.lane) * MARGIN * (1 - 1e-12));
       if (step) bar.set(r.lane, r.speedup);
@@ -2259,7 +2295,7 @@ describe("frontier steps (migration 0005)", () => {
 
   function assertConsistent(sqlite, label) {
     assert.deepEqual(stored(sqlite), expected(sqlite), label);
-    const rows = sqlite.prepare("SELECT id, lane, created_at, speedup, yardstick, decision, verified, state, frontier_step FROM nodes").all();
+    const rows = sqlite.prepare(`SELECT ${ROW}, frontier_step FROM nodes`).all();
     const current = expectedYardsticks(rows);
     const counters = sqlite.prepare("SELECT lane, yardstick, standard, steps FROM lane_stats WHERE trials > 0 ORDER BY lane").all().map((r) => ({ ...r }));
     const counted = [...new Set(rows.map((r) => r.lane))].sort().map((lane) => {
@@ -2387,12 +2423,19 @@ describe("frontier steps (migration 0005)", () => {
     const DECISIONS = ["keep", "keep", "keep_baseline", "keep_simpler", "discard_tier1", "archive_only"];
     // A second yardstick, so lanes switch yardsticks and old ones get later trials.
     const YARDSTICKS = ["A-y1", "A-y1", "A-y2", null];
+    // Gate results: passing, partial, stale id, cleared.
+    const GATE_RESULTS = [
+      GATE_PASS, GATE_PASS,
+      { real_gate: REAL_GATE.id, real_stan_passed: 3, real_stan_total: 4 },
+      { real_gate: "old-gate", real_stan_passed: 4, real_stan_total: 4 },
+      { real_gate: null, real_stan_passed: null, real_stan_total: null },
+    ];
     const ids = [];
     let next = 0;
     const tally = {};
 
     for (let step = 0; step < 300; step += 1) {
-      const op = ids.length < 5 ? "post" : pick(["post", "post", "post", "repost", "state", "flag", "verify", "admin_verify", "delete", "lease"]);
+      const op = ids.length < 5 ? "post" : pick(["post", "post", "post", "repost", "state", "flag", "verify", "admin_verify", "gate", "delete", "lease"]);
       tally[op] = (tally[op] ?? 0) + 1;
       if (op === "post") {
         const lane = pick(LANES_);
@@ -2422,13 +2465,17 @@ describe("frontier steps (migration 0005)", () => {
           await reqJson(env, "POST", `/api/admin/nodes/${path}/verify`, { verified: rand() < 0.7 }, ADMIN);
         } else if (op === "admin_verify") {
           await reqJson(env, "POST", `/api/admin/nodes/${path}/verify`, { verified: false }, ADMIN);
+        } else if (op === "gate") {
+          // A maintainer sets or clears a gate result, current or stale, passing or not.
+          await reqJson(env, "POST", `/api/admin/nodes/${path}/verify`, { verified: rand() < 0.3, ...pick(GATE_RESULTS) }, ADMIN);
         } else if (op === "delete") {
           await reqJson(env, "DELETE", `/api/admin/nodes/${path}`, undefined, ADMIN);
         } else if (op === "lease" && daveActive) {
           const lease = await reqJson(env, "POST", "/api/verify/claim", {}, bearer(dave));
           if (lease.status === 200) {
+            const gate = pick(GATE_RESULTS);
             await reqJson(env, "POST", `/api/verify/${encodeURIComponent(lease.json.lease.node_id)}/result`,
-              { lease_token: lease.json.lease.lease_token, passed: rand() < 0.5 }, bearer(dave));
+              { lease_token: lease.json.lease.lease_token, passed: rand() < 0.5, ...(gate.real_gate ? gate : {}) }, bearer(dave));
           }
         }
       }
@@ -2446,7 +2493,7 @@ describe("frontier steps (migration 0005)", () => {
       assertConsistent(sqlite, `after op ${step} (${op})`);
     }
     // The sequence exercised every kind of write, and the lanes have real step structure.
-    for (const op of ["post", "repost", "state", "flag", "verify", "delete", "lease"]) assert.ok(tally[op] > 0, op);
+    for (const op of ["post", "repost", "state", "flag", "verify", "gate", "delete", "lease"]) assert.ok(tally[op] > 0, op);
     assert.ok(sqlite.prepare("SELECT COUNT(*) AS n FROM nodes WHERE frontier_step = 1").get().n >= 3);
     // The migration's backfill computes the same flags from scratch.
     const before = stored(sqlite);
@@ -2474,7 +2521,7 @@ describe("frontier steps (migration 0005)", () => {
     const { env, sqlite } = makeEnv();
     seedTrials(sqlite, Array.from({ length: 3000 }, (_, i) => ({
       id: `A1:big:T${String(i).padStart(4, "0")}`, decision: i % 3 ? "discard_no_gain" : "keep", speedup: 1 + (i % 97) / 100, created_at: ts(i),
-    })));
+    })), { gate: true });
     const { seen, restore } = recordQueries(env);
     const dirty = () => sqlite.prepare("SELECT COUNT(*) AS n FROM lane_stats WHERE steps_dirty = 1").get().n;
     const flagQueries = () => seen.filter(([q]) => /frontier_step|yardstick IS NOT NULL|steps_dirty/.test(q) && !/^\s*INSERT/.test(q));
@@ -2757,7 +2804,8 @@ describe("frontier steps (migration 0005)", () => {
     await post("A1:new:T2", 1.3, 3);
     // Plain writes that set no flag.
     const insert = sqlite.prepare(
-      "INSERT INTO nodes (id, lane, run_id, decision, speedup, yardstick, verified, state, created_at) VALUES (?, ?, 'old', ?, ?, ?, 0, 'unverified', ?)"
+      `INSERT INTO nodes (id, lane, run_id, decision, speedup, yardstick, verified, state, created_at, real_gate, real_stan_passed, real_stan_total)
+       VALUES (?, ?, 'old', ?, ?, ?, 0, 'unverified', ?, '${REAL_GATE.id}', 4, 4)`
     );
     insert.run("A1:old:T1", "A1", "keep", 1.1, "Y1", ts(2)); // between the two steps
     insert.run("A1:old:T2", "A1", "keep", 1.5, "Y1", ts(4)); // a new best: steps 1, 1.1 and 1.5 once T2 is disputed
@@ -2808,7 +2856,6 @@ describe("frontier steps (migration 0005)", () => {
       { lane: "A1", standard: 2, steps: 2 }, { lane: "S2", standard: 1, steps: 1 },
     ]);
     sqlite.exec(MIGRATIONS_SQL[4]);
-    assertConsistent(sqlite, "after 0005");
     assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM nodes WHERE frontier_step = 1").get().n, 0);
     assert.deepEqual(sqlite.prepare("SELECT lane, standard, steps, steps_dirty FROM lane_stats ORDER BY lane").all().map((r) => ({ ...r })), [
       { lane: "A1", standard: 0, steps: 0, steps_dirty: 0 }, { lane: "S2", standard: 0, steps: 0, steps_dirty: 0 },
@@ -2819,7 +2866,9 @@ describe("frontier steps (migration 0005)", () => {
     for (const gone of ["idx_nodes_lane_standard", "idx_nodes_reviewed_std", "idx_nodes_reviewed_eff", "idx_nodes_frontier_pick", "idx_nodes_frontier_any"]) {
       assert.ok(!objects.includes(gone), gone);
     }
-    // The Worker then works on it: the first graded trial is the lane's first step.
+    for (const sql of MIGRATIONS_SQL.slice(5)) sqlite.exec(sql);
+    assertConsistent(sqlite, "after 0005 and the later migrations");
+    // The Worker then works on it: the first graded trial with a passing gate result is the lane's first step.
     const env = { DB: d1Over(sqlite), FLYWHEEL_DEV_OPEN_ADMIN: "1" };
     assert.equal((await reqJson(env, "POST", "/api/nodes", trial("A1:g:T1", { speedup: 1 }))).json.node.frontier_step, true);
     assertConsistent(sqlite, "after a graded post");
@@ -2833,7 +2882,7 @@ describe("frontier steps (migration 0005)", () => {
       { id: "A1:c:T3", decision: "keep", soft_min_eff: 0.9, speedup: 9, yardstick: null, created_at: ts(3) },
       { id: "A1:c:T4", decision: "keep", soft_min_eff: 0.03, speedup: null, created_at: ts(4) },
       ...Array.from({ length: 1199 }, (_, i) => ({ id: `A1:d:T${String(i).padStart(4, "0")}`, soft_min_eff: 0.001, created_at: ts(10 + i) })),
-    ]);
+    ], { gate: true });
     const first = await reqJson(env, "GET", "/api/lanes/A1/chart");
     assert.equal(first.status, 200);
     assert.equal(first.headers.get("Cache-Control"), "public, max-age=30, s-maxage=30");
@@ -2879,7 +2928,7 @@ describe("frontier steps (migration 0005)", () => {
       { id: "A2:s:T1", decision: "keep", soft_min_eff: 0.01, created_at: ts(3), hypothesis: "needle too" },
       // 2,500 newer trials that also match the search but are not steps.
       ...Array.from({ length: 2500 }, (_, i) => ({ id: `A1:n:T${i}`, hypothesis: "needle", soft_min_eff: 0.001, created_at: ts(10 + i) })),
-    ]);
+    ], { gate: true });
     const all = (await reqJson(env, "GET", "/api/nodes?step=1")).json;
     assert.deepEqual([all.nodes.map((n) => n.id), all.count, all.count_capped], [["A2:s:T1", "A1:s:T2", "A1:s:T1"], 3, false]);
     assert.ok(all.nodes.every((n) => n.frontier_step === true && n.standard === true));
@@ -2913,6 +2962,7 @@ describe("frontier steps (migration 0005)", () => {
     const at = Date.parse(back.json.node.created_at);
     assert.ok(at >= t0 - 1000 && at <= Date.now() + 1000, back.json.node.created_at);
     assert.equal(back.json.node.created_at, new Date(at).toISOString());
+    passGate(sqlite, ["A1:c:T1"]); // a verifier's result: carol cannot post one herself
     assert.deepEqual(sqlite.prepare("SELECT id FROM nodes WHERE frontier_step = 1 ORDER BY created_at, id").all().map((r) => r.id), ["A1:r:T1", "A1:c:T1"]);
     // A re-post by the owner keeps the stored created_at, whatever it sends.
     const again = await reqJson(env, "POST", "/api/nodes", trial("A1:c:T1", { soft_min_eff: 0.02, created_at: "1999-01-01T00:00:00Z" }), bearer(carol));
@@ -3005,3 +3055,202 @@ describe("frontier steps (migration 0005)", () => {
   });
 });
 
+
+describe("real-posterior gate (migration 0006)", () => {
+  /** An author posts kept trials with source; two contributors verify them. */
+  async function setup() {
+    const { env, sqlite } = makeEnv({ apiKey: "root-admin-secret" });
+    const mint = async (handle) =>
+      (await reqJson(env, "POST", "/api/admin/keys", { handle, role: "contributor", hourly_limit: 1000 }, ADMIN)).json.token;
+    const author = await mint("g-author");
+    const v1 = await mint("g-verifier-1");
+    const v2 = await mint("g-verifier-2");
+    const post = (id, extra = {}) =>
+      reqJson(env, "POST", "/api/nodes", trial(id, { source: `# ${id}\n`, ...extra }), bearer(author));
+    const node = async (id) => (await reqJson(env, "GET", `/api/nodes/${encodeURIComponent(id)}`)).json.node;
+    const frontier = async (lane = "A1") => (await reqJson(env, "GET", `/api/frontier?lane=${lane}`)).json.frontier[lane]?.id ?? null;
+    const lease = async (token, nodeId) => {
+      const res = await reqJson(env, "POST", "/api/verify/claim", { node_id: nodeId }, bearer(token));
+      assert.equal(res.status, 200, JSON.stringify(res.json));
+      return res.json.lease.lease_token;
+    };
+    const result = (token, nodeId, body) =>
+      reqJson(env, "POST", `/api/verify/${encodeURIComponent(nodeId)}/result`, body, bearer(token));
+    return { env, sqlite, author, v1, v2, post, node, frontier, lease, result };
+  }
+
+  it("names the gate of autoresearch/real_gate.json, and migration 0006's backfill uses that id", () => {
+    const gate = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../../autoresearch/real_gate.json"), "utf8"));
+    assert.equal(REAL_GATE.id, gate.id);
+    assert.match(REAL_GATE.id, /^[A-Za-z0-9._-]{1,64}$/);
+    assert.ok(BACKFILL_SQL.includes(`p.real_gate = '${REAL_GATE.id}'`));
+    assert.ok(gate.required.length <= REAL_GATE.maxModels);
+  });
+
+  it("a kept trial is a step only with a passing result under the current gate id", async () => {
+    const { env, sqlite } = makeEnv();
+    const post = (id, extra) => reqJson(env, "POST", "/api/nodes", trial(id, { created_at: ts(Number(id.slice(-1))), ...extra }));
+    const none = { real_gate: null, real_stan_passed: null, real_stan_total: null };
+    // No gate result (as a seeded 4/5 score from before the gate): not a step, and no frontier.
+    assert.equal((await post("A1:g:T1", { ...none, speedup: 1 })).json.node.frontier_step, false);
+    assert.equal((await post("A1:g:T2", { real_stan_passed: 4, real_stan_total: 5, real_gate: null, speedup: 1.2 })).json.node.frontier_step, false);
+    assert.equal((await reqJson(env, "GET", "/api/frontier?lane=A1")).json.frontier.A1, undefined);
+    // The lane still has a current yardstick, so its trials can be queued and verified.
+    assert.equal(sqlite.prepare("SELECT yardstick FROM lane_stats WHERE lane = 'A1'").get().yardstick, "Y1");
+    // passed < total: not a step. A stale gate id: not a step. A total of 0: not a step.
+    assert.equal((await post("A1:g:T3", { real_gate: REAL_GATE.id, real_stan_passed: 3, real_stan_total: 4, speedup: 1.3 })).json.node.frontier_step, false);
+    assert.equal((await post("A1:g:T4", { real_gate: "nuts-ref-v0", real_stan_passed: 4, real_stan_total: 4, speedup: 1.4 })).json.node.frontier_step, false);
+    assert.equal((await post("A1:g:T5", { real_gate: REAL_GATE.id, real_stan_passed: 0, real_stan_total: 0, speedup: 1.5 })).json.node.frontier_step, false);
+    // The current id and every required model passed: a step, and the lane's frontier.
+    assert.equal((await post("A1:g:T6", { ...GATE_PASS, speedup: 1.1 })).json.node.frontier_step, true);
+    const f = (await reqJson(env, "GET", "/api/frontier?lane=A1")).json;
+    assert.deepEqual([f.frontier.A1.id, f.frontier.A1.real_gate, f.real_gate], ["A1:g:T6", REAL_GATE.id, REAL_GATE.id]);
+    // The bar is the latest gated step, not the faster ungated trials before it.
+    assert.equal((await post("A1:g:T7", { ...GATE_PASS, speedup: 1.15 })).json.node.frontier_step, false);
+    assert.equal((await post("A1:g:T8", { ...GATE_PASS, speedup: 1.16 })).json.node.frontier_step, true);
+    assert.deepEqual(sqlite.prepare("SELECT id FROM nodes WHERE frontier_step = 1 ORDER BY created_at").all().map((r) => r.id), ["A1:g:T6", "A1:g:T8"]);
+    // The backfill agrees.
+    const before = sqlite.prepare("SELECT id, frontier_step FROM nodes ORDER BY id").all().map((r) => ({ ...r }));
+    sqlite.exec(BACKFILL_SQL);
+    assert.deepEqual(sqlite.prepare("SELECT id, frontier_step FROM nodes ORDER BY id").all().map((r) => ({ ...r })), before);
+  });
+
+  it("authors never set the gate fields; the lease holder posts them and the frontier moves in the same batch", async () => {
+    const { sqlite, author, v1, v2, post, node, frontier, lease, result } = await setup();
+    // The author's own gate fields are dropped.
+    const posted = await post("A1:g:T1", { speedup: 1.2, real_gate: REAL_GATE.id, real_stan_passed: 4, real_stan_total: 4 });
+    assert.equal(posted.status, 201);
+    assert.deepEqual([posted.json.node.real_gate, posted.json.node.real_stan_total, posted.json.node.frontier_step, posted.json.verify_queued], [null, null, false, true]);
+    assert.equal(await frontier(), null);
+
+    const token = await lease(v1, "A1:g:T1");
+    // The author cannot post the result of their own trial, and a non-holder cannot post one.
+    const self = await result(author, "A1:g:T1", { lease_token: token, passed: true, ...GATE_PASS });
+    assert.deepEqual([self.status, self.json.error], [403, "forbidden_self_verification"]);
+    const other = await result(v2, "A1:g:T1", { lease_token: token, passed: true, ...GATE_PASS });
+    assert.equal(other.status, 409);
+    assert.equal((await node("A1:g:T1")).real_gate, null);
+
+    // Malformed gate results are refused before anything is written.
+    for (const [bad, why] of [
+      [{ real_stan_passed: 5, real_stan_total: 4, real_gate: REAL_GATE.id }, "passed > total"],
+      [{ real_stan_passed: 2.5, real_stan_total: 4, real_gate: REAL_GATE.id }, "not an integer"],
+      [{ real_stan_passed: -1, real_stan_total: 4, real_gate: REAL_GATE.id }, "negative"],
+      [{ real_stan_passed: 21, real_stan_total: 21, real_gate: REAL_GATE.id }, "over the bound"],
+      [{ real_stan_passed: "4", real_stan_total: 4, real_gate: REAL_GATE.id }, "a string count"],
+      [{ real_stan_passed: 4, real_stan_total: 4, real_gate: "nuts ref" }, "a gate id with a space"],
+      [{ real_stan_passed: 4, real_stan_total: 4, real_gate: "x".repeat(65) }, "a long gate id"],
+      [{ real_stan_passed: 4, real_stan_total: 4 }, "no gate id"],
+      [{ real_gate: REAL_GATE.id }, "no counts"],
+      [{ real_ess_per_cost: 0.1 }, "ess without a result"],
+      [{ ...GATE_PASS, real_ess_per_cost: -1 }, "negative ess"],
+    ]) {
+      const res = await result(v1, "A1:g:T1", { lease_token: token, passed: true, ...bad });
+      assert.deepEqual([res.status, res.json.error], [400, "invalid_real_gate"], why);
+    }
+    assert.equal((await node("A1:g:T1")).state, "unverified");
+
+    // The holder's passing result: the trigger marks the lane dirty and the settle in the same
+    // batch makes the trial the lane's frontier.
+    const ok = await result(v1, "A1:g:T1", { lease_token: token, passed: true, ...GATE_PASS, real_ess_per_cost: 0.03, metrics: { real_gate: { id: REAL_GATE.id } } });
+    assert.equal(ok.status, 200, JSON.stringify(ok.json));
+    assert.deepEqual(
+      [ok.json.node.state, ok.json.node.real_gate, ok.json.node.real_stan_passed, ok.json.node.real_stan_total, ok.json.node.real_ess_per_cost, ok.json.node.frontier_step],
+      ["replicated", REAL_GATE.id, 4, 4, 0.03, true]
+    );
+    assert.equal(await frontier(), "A1:g:T1");
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM lane_stats WHERE steps_dirty = 1").get().n, 0);
+    assert.equal(sqlite.prepare("SELECT steps FROM lane_stats WHERE lane = 'A1'").get().steps, 1);
+
+    // A faster trial whose verifier finds 3 of 4 is replicated but does not move the frontier,
+    // and it does not set the queue's bar either.
+    assert.equal((await post("A1:g:T2", { speedup: 2 })).json.verify_queued, true);
+    const t2 = await lease(v2, "A1:g:T2");
+    const partial = await result(v2, "A1:g:T2", { lease_token: t2, passed: true, real_gate: REAL_GATE.id, real_stan_passed: 3, real_stan_total: 4 });
+    assert.deepEqual([partial.json.node.state, partial.json.node.frontier_step], ["replicated", false]);
+    assert.equal(await frontier(), "A1:g:T1");
+    assert.equal((await post("A1:g:T3", { speedup: 1.5 })).json.verify_queued, true);
+
+    // A result without gate fields (verify-next --no-real-gate) replicates the trial, no more.
+    const t3 = await lease(v1, "A1:g:T3");
+    const bare = await result(v1, "A1:g:T3", { lease_token: t3, passed: true });
+    assert.deepEqual([bare.status, bare.json.node.real_gate, bare.json.node.frontier_step], [200, null, false]);
+    assert.equal(await frontier(), "A1:g:T1");
+  });
+
+  it("a maintainer sets and clears gate results; a stale id or a failing count takes a step away", async () => {
+    const { env, post, node, frontier } = await setup();
+    await post("A1:g:T1", { speedup: 1 });
+    await post("A1:g:T2", { speedup: 1.5 });
+    const verify = (id, body) => reqJson(env, "POST", `/api/admin/nodes/${encodeURIComponent(id)}/verify`, body, ADMIN);
+    assert.equal((await verify("A1:g:T1", { verified: false, ...GATE_PASS })).status, 200);
+    assert.equal(await frontier(), "A1:g:T1");
+    await verify("A1:g:T2", { verified: false, ...GATE_PASS });
+    assert.equal(await frontier(), "A1:g:T2");
+    // A stale gate id or a failing count: no longer a step, and the frontier falls back.
+    await verify("A1:g:T2", { verified: false, real_gate: "nuts-ref-v0" });
+    assert.equal(await frontier(), "A1:g:T1");
+    await verify("A1:g:T2", { verified: false, real_gate: REAL_GATE.id });
+    assert.equal(await frontier(), "A1:g:T2");
+    await verify("A1:g:T2", { verified: false, real_stan_passed: 3 });
+    assert.equal(await frontier(), "A1:g:T1");
+    const bad = await verify("A1:g:T2", { real_stan_passed: 5 });
+    assert.deepEqual([bad.status, bad.json.error], [400, "invalid_real_gate"]);
+    await verify("A1:g:T1", { verified: false, real_gate: null });
+    assert.deepEqual([(await node("A1:g:T1")).real_gate, await frontier()], [null, null]);
+  });
+
+  it("an author's change to an unverified trial drops its gate result; a purged verifier's results go too", async () => {
+    const { env, sqlite, v1, post, node, frontier, lease, result } = await setup();
+    await post("A1:g:T1", { speedup: 1.2 });
+    const token = await lease(v1, "A1:g:T1");
+    await result(v1, "A1:g:T1", { lease_token: token, passed: true, ...GATE_PASS });
+    assert.equal(await frontier(), "A1:g:T1");
+    // A maintainer reopens the trial; the author then changes its source.
+    await reqJson(env, "POST", `/api/nodes/${encodeURIComponent("A1:g:T1")}/state`, { state: "unverified", reason: "reopen" }, ADMIN);
+    assert.equal(await frontier(), "A1:g:T1"); // the result still describes the stored source
+    const changed = await post("A1:g:T1", { speedup: 1.2, source: "# a different file\n" });
+    assert.equal(changed.status, 200, JSON.stringify(changed.json));
+    assert.deepEqual([changed.json.node.real_gate, changed.json.node.real_stan_total, changed.json.node.frontier_step], [null, null, false]);
+    assert.equal(await frontier(), null);
+
+    // A verifier's passing result goes when the verifier is purged.
+    await post("A1:g:T2", { speedup: 1.3 });
+    const t2 = await lease(v1, "A1:g:T2");
+    await result(v1, "A1:g:T2", { lease_token: t2, passed: true, ...GATE_PASS });
+    assert.equal(await frontier(), "A1:g:T2");
+    assert.equal((await reqJson(env, "POST", "/api/admin/handles/g-verifier-1/purge", undefined, ADMIN)).status, 200);
+    const reopened = await node("A1:g:T2");
+    assert.deepEqual([reopened.state, reopened.real_gate, reopened.real_stan_total, reopened.frontier_step], ["unverified", null, null, false]);
+    assert.equal(await frontier(), null);
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM lane_stats WHERE steps_dirty = 1").get().n, 0);
+  });
+
+  it("migration 0006 on a database built by 0001 to 0005: earlier real_stan scores do not qualify, and every lane loses its steps", async () => {
+    const sqlite = new DatabaseSync(":memory:");
+    sqlite.exec(SCHEMA_SQL);
+    for (const sql of MIGRATIONS_SQL.slice(0, 5)) sqlite.exec(sql);
+    const insert = sqlite.prepare(
+      `INSERT INTO nodes (id, lane, run_id, decision, speedup, yardstick, real_stan_passed, real_stan_total, verified, state, created_at)
+       VALUES (?, ?, 'r', 'keep', ?, 'Y1', ?, ?, ?, ?, ?)`
+    );
+    insert.run("A1:r:T1", "A1", 1, null, null, 0, "unverified", ts(1));
+    insert.run("A1:r:T2", "A1", 1.3, 5, 5, 1, "verified", ts(2)); // seeded: 5 of 5, but no gate id
+    insert.run("A2:r:T1", "A2", 1, 4, 5, 0, "replicated", ts(1));
+    sqlite.exec(MIGRATIONS_SQL[4].split("-- BACKFILL BEGIN")[1].split("-- BACKFILL END")[0]); // 0005's own flags
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM nodes WHERE frontier_step = 1").get().n, 3);
+    sqlite.exec(MIGRATIONS_SQL[5]);
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM nodes WHERE frontier_step = 1").get().n, 0);
+    assert.deepEqual(sqlite.prepare("SELECT lane, yardstick, standard, steps, steps_dirty FROM lane_stats ORDER BY lane").all().map((r) => ({ ...r })), [
+      { lane: "A1", yardstick: "Y1", standard: 2, steps: 0, steps_dirty: 0 },
+      { lane: "A2", yardstick: "Y1", standard: 1, steps: 0, steps_dirty: 0 },
+    ]);
+    assert.deepEqual({ ...sqlite.prepare("SELECT real_stan_passed, real_stan_total, real_gate FROM nodes WHERE id = 'A1:r:T2'").get() },
+      { real_stan_passed: 5, real_stan_total: 5, real_gate: null });
+    // A gate result then arrives through the Worker and the lane has a frontier again.
+    const env = { DB: d1Over(sqlite), FLYWHEEL_DEV_OPEN_ADMIN: "1" };
+    await reqJson(env, "POST", `/api/admin/nodes/${encodeURIComponent("A1:r:T2")}/verify`, { real_gate: REAL_GATE.id });
+    assert.equal((await reqJson(env, "GET", "/api/frontier")).json.frontier.A1.id, "A1:r:T2");
+    assert.equal((await reqJson(env, "GET", "/api/overview")).json.lanes.find((l) => l.lane === "A2").frontier, null);
+  });
+});

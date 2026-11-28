@@ -127,6 +127,18 @@ const STEP_MARGIN = 1.05;
 /** The factor the SQL compares with: STEP_MARGIN less a rounding allowance, so 1.26 over 1.2 counts. */
 const STEP_FACTOR = STEP_MARGIN - 1e-12;
 
+/**
+ * The real-posterior gate a frontier step must have passed. `id` must equal `id` in
+ * autoresearch/real_gate.json, and the BACKFILL block of the latest migration inlines it
+ * (migration 0006). A trial is a step only when an independent verifier (or a maintainer) posted
+ * a result under this id and every required model passed: real_gate = id, real_stan_total > 0 and
+ * real_stan_passed = real_stan_total. To bump it, change it here, in real_gate.json and in the
+ * BACKFILL block of a new migration together, then run that block. `maxModels` bounds the
+ * real_stan_* counts a result may post.
+ */
+export const REAL_GATE = { id: "nuts-ref-v1", maxModels: 20 } as const;
+const REAL_GATE_ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
+
 type Role = "admin" | "contributor" | "provisional";
 
 export interface ApiKeyRow {
@@ -166,6 +178,7 @@ export interface NodeRow {
   real_stan_passed: number | null;
   real_stan_total: number | null;
   real_ess_per_cost: number | null;
+  real_gate?: string | null;
   overhead_ratio: number | null;
   b2_max: number | null;
   dims: string | null;
@@ -205,6 +218,8 @@ export interface NodeRecord {
   real_stan_passed: number | null;
   real_stan_total: number | null;
   real_ess_per_cost: number | null;
+  /** The real-posterior gate id the real_stan_* result was measured under (REAL_GATE). */
+  real_gate: string | null;
   overhead_ratio: number | null;
   b2_max: number | null;
   dims: number[] | null;
@@ -759,6 +774,7 @@ function deserializeNode(row: NodeRow): NodeRecord {
     real_stan_passed: toFiniteInt(row.real_stan_passed),
     real_stan_total: toFiniteInt(row.real_stan_total),
     real_ess_per_cost: toFiniteNumber(row.real_ess_per_cost),
+    real_gate: row.real_gate ?? null,
     overhead_ratio: toFiniteNumber(row.overhead_ratio),
     b2_max: toFiniteNumber(row.b2_max),
     dims,
@@ -794,13 +810,25 @@ const OUTCOME_KEPT = ["keep", "keep_baseline", "keep_simpler", "keep_incumbent_f
 const sqlList = (xs: readonly string[]) => xs.map((x) => `'${x}'`).join(", ");
 const SQL_OUTCOME_KEPT = sqlList(OUTCOME_KEPT);
 /**
- * A trial that takes part in the step walk: graded, with a speedup, not retracted or disputed,
- * and kept or verified. `t` is a table alias with its dot, or "" for the bare table. Must match
- * the triggers, the BACKFILL block and the condition of idx_nodes_eligible in migration 0005.
+ * A trial that counts for its lane's current yardstick: graded, with a speedup, not retracted or
+ * disputed, and kept or verified. It sets the yardstick and the verification queue works on it,
+ * so it must not need the real-posterior gate: the gate runs only on queued trials. `t` is a
+ * table alias with its dot, or "" for the bare table. Must match the triggers, the BACKFILL block
+ * and the condition of idx_nodes_eligible in migrations 0005 and 0006.
  */
-const sqlStepEligible = (t = "") =>
+const sqlYardstickEligible = (t = "") =>
   `(${t}yardstick IS NOT NULL AND ${t}speedup > 0 AND ${t}state NOT IN (${sqlList(FRONTIER_EXCLUDED_STATES)})
     AND (${t}verified = 1 OR ${t}decision IN (${sqlList([...KEPT_DECISIONS])})))`;
+
+/** A result under the current real-posterior gate on which every required model passed (REAL_GATE). */
+const sqlGatePassed = (t = "") =>
+  `(${t}real_gate = '${REAL_GATE.id}' AND ${t}real_stan_total > 0 AND ${t}real_stan_passed = ${t}real_stan_total)`;
+
+/**
+ * A trial that takes part in the step walk: yardstick-eligible and passed the current
+ * real-posterior gate. Must match the BACKFILL block of migration 0006.
+ */
+const sqlStepEligible = (t = "") => `(${sqlYardstickEligible(t)} AND ${sqlGatePassed(t)})`;
 
 type NodeWithoutRaw = Omit<NodeRecord, "metrics_json">;
 
@@ -890,26 +918,32 @@ async function laneFrontiers(db: D1DatabaseLike, lanes: string[]): Promise<Recor
 // Frontier steps
 //
 // Speed-ups are comparable only within one yardstick. Each lane has one current yardstick
-// (lane_stats.yardstick): the one whose first eligible trial (sqlStepEligible) is the newest.
-// Walk the lane's eligible trials on it in (created_at, id) order. The first is a step. A later
-// one is a step when its speedup is at least STEP_MARGIN times the latest step's. A trial under
-// that margin is not a step and does not raise the bar. A trial on another yardstick is never a
-// step. nodes.frontier_step stores the result, and the lane frontier is the latest step.
+// (lane_stats.yardstick): the one whose first yardstick-eligible trial (sqlYardstickEligible) is
+// the newest. It does not need the real-posterior gate, because only trials on it are queued for
+// the verifier that runs the gate. Walk the lane's step-eligible trials (sqlStepEligible: also
+// passed the current gate, REAL_GATE) on it in (created_at, id) order. The first is a step. A
+// later one is a step when its speedup is at least STEP_MARGIN times the latest step's. A trial
+// under that margin is not a step and does not raise the bar. A trial on another yardstick, or
+// without a passing result under the current gate id, is never a step. nodes.frontier_step
+// stores the result, and the lane frontier is the latest step. A lane may have none.
 //
 // Every flag a write changes commits in the write's own batch, computed in SQL from the rows
 // as they are inside that transaction, so overlapping requests cannot leave stale flags.
 //   * A new trial: stepSelfStmt sets its own flag from the latest step before it. When it is on
-//     the current yardstick, is not that yardstick's first eligible trial and no step follows it
-//     (the newest trial, the usual post), nothing else can change: a step raises the bar, so a
-//     later trial that was not a step still is not. Otherwise the insert trigger of migration
-//     0005 marks the lane dirty. A trial posted from a stale checkout, on an older yardstick
-//     that already has an eligible trial, changes nothing.
-//   * Any other change: the triggers of migration 0005 mark the lane dirty when other flags or
-//     the current yardstick may move (the trial was a step, is eligible now and changed its
-//     position, speedup or yardstick, or was the first eligible trial of its yardstick).
+//     the current yardstick, is not that yardstick's first yardstick-eligible trial and no step
+//     follows it (the newest trial, the usual post), nothing else can change: a step raises the
+//     bar, so a later trial that was not a step still is not. Otherwise the insert trigger of
+//     migration 0005 marks the lane dirty. A trial posted from a stale checkout, on an older
+//     yardstick that already has an eligible trial, changes nothing. An author cannot post a gate
+//     result, so an author's new trial is never a step at once.
+//   * Any other change: the triggers mark the lane dirty when other flags or the current
+//     yardstick may move: the trial was a step, is yardstick-eligible now and changed its
+//     position, speedup, yardstick or gate result (the update trigger of migration 0006), or was
+//     the first yardstick-eligible trial of its yardstick. A verifier's passing gate result is
+//     such a change, so the frontier moves in the result's own batch.
 //   * settleStepsStmts, last in every batch that writes trials, sets each dirty lane's current
 //     yardstick, walks the lane again from its first trial and clears the mark. That reads the
-//     lane's eligible trials on the yardstick about once: the rare path.
+//     lane's yardstick-eligible trials on the yardstick about once: the rare path.
 // ---------------------------------------------------------------------------
 
 /**
@@ -933,11 +967,12 @@ function stepSelfStmt(db: D1DatabaseLike, id: string): D1PreparedStatement {
 }
 
 /**
- * Sets each dirty lane's current yardstick. Lists the lane's yardsticks that have an eligible
- * trial (one seek of idx_nodes_eligible each), takes the first eligible trial of each (one more
- * seek) and keeps the yardstick whose first trial is the newest. When the yardstick changes it
- * counts the lane's graded trials on the new one again (lane_stats.standard). Reads no row when
- * no lane is dirty. Must equal the first recompute statement of migration 0005's BACKFILL block.
+ * Sets each dirty lane's current yardstick. Lists the lane's yardsticks that have a
+ * yardstick-eligible trial (one seek of idx_nodes_eligible each), takes the first such trial of
+ * each (one more seek) and keeps the yardstick whose first trial is the newest. The gate plays no
+ * part. When the yardstick changes it counts the lane's graded trials on the new one again
+ * (lane_stats.standard). Reads no row when no lane is dirty. Must equal the first recompute
+ * statement of migration 0006's BACKFILL block (the same statement as in 0005).
  */
 const SQL_SETTLE_YARDSTICK = `WITH RECURSIVE ys(lane, yardstick) AS (
     SELECT lane, '' FROM lane_stats INDEXED BY idx_lane_stats_dirty WHERE steps_dirty = 1
@@ -945,7 +980,7 @@ const SQL_SETTLE_YARDSTICK = `WITH RECURSIVE ys(lane, yardstick) AS (
     SELECT ys.lane, (
       SELECT e.yardstick FROM nodes AS e INDEXED BY idx_nodes_eligible
       WHERE e.lane = ys.lane AND e.yardstick > ys.yardstick
-        AND ${sqlStepEligible("e.")}
+        AND ${sqlYardstickEligible("e.")}
       ORDER BY e.yardstick LIMIT 1)
     FROM ys WHERE ys.yardstick IS NOT NULL
   ),
@@ -954,7 +989,7 @@ const SQL_SETTLE_YARDSTICK = `WITH RECURSIVE ys(lane, yardstick) AS (
       SELECT ys.yardstick FROM ys JOIN nodes AS f ON f.id = (
         SELECT e.id FROM nodes AS e INDEXED BY idx_nodes_eligible
         WHERE e.lane = ys.lane AND e.yardstick = ys.yardstick
-          AND ${sqlStepEligible("e.")}
+          AND ${sqlYardstickEligible("e.")}
         ORDER BY e.created_at, e.id LIMIT 1)
       WHERE ys.lane = d.lane ORDER BY f.created_at DESC, f.id DESC LIMIT 1)
     FROM lane_stats AS d INDEXED BY idx_lane_stats_dirty WHERE d.steps_dirty = 1
@@ -966,10 +1001,11 @@ FROM cur WHERE lane_stats.lane = cur.lane AND lane_stats.yardstick IS NOT cur.ya
 /**
  * Walks every dirty lane from step to step on its current yardstick and toggles each flag that
  * differs from the walk. The walk starts before the lane's first trial with a bar of 0. From
- * each step it seeks the first eligible trial on the yardstick after it whose speedup clears the
- * bar, so the searches together read each eligible trial of the yardstick about once. A marked
+ * each step it seeks the first step-eligible trial (passed the current gate) on the yardstick
+ * after it whose speedup clears the bar. It reads idx_nodes_eligible forward from the step, so
+ * the searches together read each yardstick-eligible trial of the yardstick about once. A marked
  * trial the walk skipped, on any yardstick, is cleared. Reads no row when no lane is dirty. Must
- * equal the second recompute statement of migration 0005's BACKFILL block.
+ * equal the second recompute statement of migration 0006's BACKFILL block.
  */
 const SQL_SETTLE_STEPS = `UPDATE nodes SET frontier_step = 1 - frontier_step WHERE id IN (
   WITH RECURSIVE walk(lane, yardstick, created_at, id, speedup) AS (
@@ -1287,7 +1323,45 @@ const NODE_DATA_COLUMNS = [
   "soft_min_eff", "ratio_vs_incumbent", "short_horizon_eff", "long_horizon_eff", "overhead_ratio",
   "b2_max", "dims", "codex_refs", "code_sha", "metrics_json", "speedup", "yardstick",
 ] as const;
-const NODE_ADMIN_COLUMNS = ["real_stan_passed", "real_stan_total", "real_ess_per_cost"] as const;
+/** The real-posterior gate result: only a maintainer or the lease holder's verify result writes it. */
+const NODE_ADMIN_COLUMNS = ["real_stan_passed", "real_stan_total", "real_ess_per_cost", "real_gate"] as const;
+type GateColumn = (typeof NODE_ADMIN_COLUMNS)[number];
+
+/**
+ * The gate result fields in a payload, checked: counts are integers with
+ * 0 <= real_stan_passed <= real_stan_total <= REAL_GATE.maxModels, real_gate is a short id and
+ * real_ess_per_cost a number >= 0. A field left out is absent from `fields`; null clears it.
+ * `complete` (a verification result) asks for passed, total and gate together or none of them.
+ */
+function parseGateFields(payload: Args, complete: boolean): { fields: Partial<Record<GateColumn, unknown>> } | Outcome {
+  const bad = (detail: string) => out(400, { error: "invalid_real_gate", detail });
+  const fields: Partial<Record<GateColumn, unknown>> = {};
+  for (const c of NODE_ADMIN_COLUMNS) if (payload[c] !== undefined) fields[c] = payload[c];
+  for (const c of ["real_stan_passed", "real_stan_total"] as const) {
+    const v = fields[c];
+    if (v !== undefined && v !== null && !(Number.isInteger(v) && (v as number) >= 0 && (v as number) <= REAL_GATE.maxModels)) {
+      return bad(`${c} must be an integer from 0 to ${REAL_GATE.maxModels}`);
+    }
+  }
+  const [passed, total] = [fields.real_stan_passed, fields.real_stan_total];
+  if (typeof passed === "number" && typeof total === "number" && passed > total) {
+    return bad("real_stan_passed must not exceed real_stan_total");
+  }
+  const gate = fields.real_gate;
+  if (gate !== undefined && gate !== null && !(typeof gate === "string" && REAL_GATE_ID_RE.test(gate))) {
+    return bad("real_gate must be 1-64 letters, digits, '.', '_' or '-'");
+  }
+  const ess = fields.real_ess_per_cost;
+  if (ess !== undefined && ess !== null && !(typeof ess === "number" && Number.isFinite(ess) && ess >= 0)) {
+    return bad("real_ess_per_cost must be a number of at least 0");
+  }
+  if (complete) {
+    const given = (["real_stan_passed", "real_stan_total", "real_gate"] as const).filter((c) => fields[c] !== undefined && fields[c] !== null);
+    if (given.length !== 0 && given.length !== 3) return bad("send real_stan_passed, real_stan_total and real_gate together");
+    if (given.length === 0 && ess !== undefined && ess !== null) return bad("real_ess_per_cost needs a gate result");
+  }
+  return { fields };
+}
 
 /**
  * A queue item worth verifying now: its trial has a speedup on its lane's current yardstick. A
@@ -1298,15 +1372,18 @@ const SQL_QUEUE_WORTH = "n.speedup > 0 AND n.yardstick = (SELECT l.yardstick FRO
 
 /**
  * The bar for the verification queue: the best speedup among the lane's replicated or verified
- * trials with source on the given yardstick. Unreviewed or sourceless scores never set it, so
- * nobody can block the queue by posting an inflated claim. One row from a partial index.
+ * trials with source on the given yardstick that passed the current real-posterior gate.
+ * Unreviewed or sourceless scores never set it, so nobody can block the queue by posting an
+ * inflated claim, and neither does a reviewed trial that failed the gate (most synthetic bests
+ * do), so a slower trial that may pass it is still queued. Reads the partial index from the top
+ * speedup down to the first trial that passed: the lane's reviewed trials at most.
  */
 async function reviewedBest(db: D1DatabaseLike, lane: string, yardstick: string, excludeId: string): Promise<number | null> {
   const row = await db
     .prepare(
       `SELECT speedup AS best FROM nodes INDEXED BY idx_nodes_reviewed_best
        WHERE lane = ? AND yardstick = ? AND state IN ('replicated', 'verified') AND source_sha IS NOT NULL
-         AND speedup IS NOT NULL AND id <> ?
+         AND speedup IS NOT NULL AND id <> ? AND ${sqlGatePassed()}
        ORDER BY speedup DESC LIMIT 1`
     )
     .bind(lane, yardstick, excludeId)
@@ -1414,6 +1491,10 @@ const opPostNode: Op = async (ctx, payload) => {
     return out(400, { error: "invalid_created_at", detail: "created_at must be a date, for example 2026-11-24T10:00:00Z" });
   }
 
+  // Only a maintainer posts a gate result with a trial. An author's real_* fields are ignored.
+  const gate = isAdmin ? parseGateFields(payload, false) : { fields: {} };
+  if ("status" in gate) return gate;
+
   const id = toNullableString(payload.id) ?? crypto.randomUUID();
   const parents = parseParents(payload, id);
   if ("status" in parents) return parents;
@@ -1472,9 +1553,7 @@ const opPostNode: Op = async (ctx, payload) => {
         : payload.metrics !== undefined
           ? serializeJsonField(payload.metrics)
           : null,
-    real_stan_passed: isAdmin ? toFiniteInt(payload.real_stan_passed) : null,
-    real_stan_total: isAdmin ? toFiniteInt(payload.real_stan_total) : null,
-    real_ess_per_cost: isAdmin ? toFiniteNumber(payload.real_ess_per_cost) : null,
+    ...Object.fromEntries(NODE_ADMIN_COLUMNS.map((c) => [c, gate.fields[c] ?? null])),
     id,
     author: isAdmin ? toNullableString(payload.author) : principal.handle,
     author_tier: isAdmin ? null : principal.role,
@@ -1515,6 +1594,9 @@ const opPostNode: Op = async (ctx, payload) => {
     .filter((c) => c !== "parent_id" || parents.given)
     .map((c) => `${c} = excluded.${c}`);
   updates.push("source_sha = COALESCE(excluded.source_sha, nodes.source_sha)", "updated_at = excluded.updated_at");
+  // A gate result belongs to what was scored: an author's change to it (allowed only while the
+  // trial is unverified and unleased) drops the result, so a new source cannot keep an old pass.
+  if (!isAdmin && changed.length > 0) updates.push(...NODE_ADMIN_COLUMNS.map((c) => `${c} = NULL`));
   if (isAdmin) {
     for (const c of NODE_ADMIN_COLUMNS) updates.push(`${c} = COALESCE(excluded.${c}, nodes.${c})`);
     updates.push("author = COALESCE(excluded.author, nodes.author)");
@@ -1665,8 +1747,9 @@ const opFrontier: Op = async (ctx, args) => {
   const lane = toNullableString(args.lane);
   const lanes = lane ? [lane] : (await laneStats(ctx.env.DB)).map((l) => l.lane);
   const frontier = await laneFrontiers(ctx.env.DB, lanes);
-  if (lane) return out(200, { frontier });
-  return out(200, { frontier, count: Object.keys(frontier).length });
+  // Every frontier passed this real-posterior gate (REAL_GATE); a lane without such a trial is left out.
+  if (lane) return out(200, { frontier, real_gate: REAL_GATE.id });
+  return out(200, { frontier, count: Object.keys(frontier).length, real_gate: REAL_GATE.id });
 };
 
 /**
@@ -1793,7 +1876,10 @@ const opGetNode: Op = async (ctx, args) => {
   });
 };
 
-/** Home page and frontier header: totals, per-lane frontier/run/Stan, claims, alignment, models. */
+/**
+ * Home page and frontier header: totals, per-lane frontier/run/Stan, claims, alignment, models.
+ * A lane's frontier is null until a trial passes the real-posterior gate `real_gate`.
+ */
 const opOverview: Op = async (ctx) => {
   const db = ctx.env.DB;
   const lanes = await laneStats(db);
@@ -1821,6 +1907,7 @@ const opOverview: Op = async (ctx) => {
   const stanByLane = new Map(lanes.map((l, i) => [l.lane, stanRows[i]?.[0] as unknown as StanRow | undefined]));
   const t = totalsRows[0] ?? {};
   return out(200, {
+    real_gate: REAL_GATE.id,
     totals: {
       trials: Number(t.trials ?? 0),
       kept: Number(t.kept ?? 0),
@@ -2593,6 +2680,11 @@ const opVerifyResult: Op = async (ctx, args) => {
   if (note && note.length > LIMITS.reasonChars) return out(400, { error: "field_too_long", field: "note", max: LIMITS.reasonChars });
   const metricsJson = args.metrics === undefined || args.metrics === null ? null : JSON.stringify(args.metrics);
   if (metricsJson && metricsJson.length > 8 * 1024) return out(413, { error: "payload_too_large", field: "metrics", max_bytes: 8192 });
+  // The verifier's real-posterior gate result (apin autoresearch verify-next): passed, total and
+  // gate id together. It replaces any earlier result, so a missing real_ess_per_cost clears it.
+  const gate = parseGateFields(args, true);
+  if ("status" in gate) return gate;
+  const gateCols = gate.fields.real_gate !== undefined && gate.fields.real_gate !== null ? NODE_ADMIN_COLUMNS : [];
 
   const nodeRow = await getNodeRow(db, nodeId);
   if (!nodeRow) return out(404, { error: "not_found" });
@@ -2609,17 +2701,19 @@ const opVerifyResult: Op = async (ctx, args) => {
   const leaseParams = [nodeId, leaseHash, now, ...holderParams];
   const newState = passed ? "replicated" : "disputed";
   const reason = `independent rerun by ${principal.handle}: ${passed ? "pass" : "fail"}${note ? ` (${note})` : ""}`;
-  // One batch (one transaction in D1): the trial's reviewed state and the queue result commit
-  // together, both guarded by the same lease check, so the trial is never unleased and still
-  // unverified in between (when its author could change it).
+  // One batch (one transaction in D1): the trial's reviewed state, its gate result and the queue
+  // result commit together, all guarded by the same lease check, so the trial is never unleased
+  // and still unverified in between (when its author could change it). A passing gate result
+  // marks the lane dirty (trigger of migration 0006) and the settle below moves the frontier.
   const [, done] = await runBatch(db, [
     db
       .prepare(
-        `UPDATE nodes SET state = ?, verified = 0, state_reason = ?, state_by = ?, state_at = ?
+        `UPDATE nodes SET state = ?, verified = 0, state_reason = ?, state_by = ?, state_at = ?${gateCols.map((c) => `, ${c} = ?`).join("")}
          WHERE id = ? AND state IN (${placeholders(RESULT_WRITABLE_STATES.length)})
            AND EXISTS (SELECT 1 FROM verify_queue WHERE ${leaseOk})`
       )
-      .bind(newState, reason.slice(0, LIMITS.reasonChars), principal.handle, now, nodeId, ...RESULT_WRITABLE_STATES, ...leaseParams),
+      .bind(newState, reason.slice(0, LIMITS.reasonChars), principal.handle, now,
+        ...gateCols.map((c) => gate.fields[c] ?? null), nodeId, ...RESULT_WRITABLE_STATES, ...leaseParams),
     db
       .prepare(
         `UPDATE verify_queue SET status = 'done', result = ?, result_json = ?, verifier = ?,
@@ -2785,10 +2879,13 @@ const opAdminHandle: Op = async (ctx, args) => {
           "DELETE FROM sources WHERE lower(uploaded_by) = lower(?) AND sha256 NOT IN (SELECT source_sha FROM nodes WHERE source_sha IS NOT NULL)"
         )
         .bind(handle),
-      // Lease results this handle posted on others' trials are reopened, not trusted.
+      // Lease results this handle posted on others' trials are reopened, not trusted. A gate
+      // result on such a trial goes with them (it came with the result, or the trial must be
+      // verified again anyway), so a purged verifier cannot leave a frontier behind.
       db
         .prepare(
-          `UPDATE nodes SET state = 'unverified', state_reason = NULL, state_by = NULL, state_at = NULL
+          `UPDATE nodes SET state = 'unverified', state_reason = NULL, state_by = NULL, state_at = NULL,
+             ${NODE_ADMIN_COLUMNS.map((c) => `${c} = CASE WHEN real_gate IS NULL THEN ${c} END`).join(", ")}
            WHERE state IN ('replicated', 'disputed', 'needs-replication') AND lower(state_by) = lower(?)`
         )
         .bind(handle),
@@ -2840,20 +2937,25 @@ const opAdminVerifyNode: Op = async (ctx, payload) => {
   const existing = await getNodeRow(db, nodeId);
   if (!existing) return out(404, { error: "not_found" });
   const verified = payload.verified === false || payload.verified === 0 ? 0 : 1;
-  const pick = <T>(key: string, conv: (v: unknown) => T, fallback: T): T =>
-    payload[key] !== undefined ? conv(payload[key]) : fallback;
-  const stanPassed = pick("real_stan_passed", toFiniteInt, existing.real_stan_passed);
-  const stanTotal = pick("real_stan_total", toFiniteInt, existing.real_stan_total);
-  const stanEss = pick("real_ess_per_cost", toFiniteNumber, existing.real_ess_per_cost);
+  // A maintainer may set or clear any gate field; a field left out keeps its stored value.
+  const gate = parseGateFields(payload, false);
+  if ("status" in gate) return gate;
+  const kept = existing as unknown as Record<string, unknown>;
+  const gateValues = NODE_ADMIN_COLUMNS.map((c) => (c in gate.fields ? gate.fields[c] : kept[c]) ?? null);
+  const merged = Object.fromEntries(NODE_ADMIN_COLUMNS.map((c, i) => [c, gateValues[i]]));
+  if (typeof merged.real_stan_passed === "number" && typeof merged.real_stan_total === "number"
+      && merged.real_stan_passed > merged.real_stan_total) {
+    return out(400, { error: "invalid_real_gate", detail: "real_stan_passed must not exceed real_stan_total" });
+  }
   const state = verified ? "verified" : (existing.state === "verified" ? "unverified" : existing.state ?? "unverified");
   const now = nowIso();
   await runBatch(db, [
     db
       .prepare(
         `UPDATE nodes SET verified = ?, state = ?, state_by = ?, state_at = ?,
-           real_stan_passed = ?, real_stan_total = ?, real_ess_per_cost = ? WHERE id = ?`
+           ${NODE_ADMIN_COLUMNS.map((c) => `${c} = ?`).join(", ")} WHERE id = ?`
       )
-      .bind(verified, state, (ctx.principal as AuthPrincipal).handle, now, stanPassed, stanTotal, stanEss, nodeId),
+      .bind(verified, state, (ctx.principal as AuthPrincipal).handle, now, ...gateValues, nodeId),
     ...settleStepsStmts(db),
   ]);
   if (verified) {
@@ -2941,7 +3043,7 @@ const MCP_TOOLS: McpTool[] = [
   {
     name: "flywheel_frontier",
     description:
-      "Return each lane's frontier: the latest trial that moved it, among kept or verified graded trials, compared by speedup.",
+      "Return each lane's frontier: the latest trial that moved it, among kept or verified graded trials that an independent verifier ran through the current real-posterior gate (real_gate) and that passed it on every required model, compared by speedup. A lane may have none.",
     inputSchema: {
       type: "object",
       properties: { lane: { type: "string", description: "Optional lane filter (e.g. A0, A1, A2, A3)." } },
@@ -3104,6 +3206,7 @@ const MCP_TOOLS: McpTool[] = [
         real_stan_passed: { type: "integer" },
         real_stan_total: { type: "integer" },
         real_ess_per_cost: { type: "number" },
+        real_gate: { type: "string", description: "Maintainers only: the real-posterior gate id of real_stan_*." },
         overhead_ratio: { type: "number" },
         b2_max: { type: "number" },
         dims: { type: "array", items: { type: "integer" } },
@@ -3178,11 +3281,17 @@ const MCP_TOOLS: McpTool[] = [
   },
   {
     name: "flywheel_verify_result",
-    description: "Post the result of an independent rerun: passed=true sets the trial replicated, false sets it disputed.",
+    description: "Post the result of an independent rerun: passed=true sets the trial replicated, false sets it disputed. Add the real-posterior gate result (real_stan_passed, real_stan_total, real_gate) so the trial can be its lane's frontier.",
     inputSchema: {
       type: "object",
       required: ["node_id", "lease_token", "passed"],
-      properties: { node_id: str, lease_token: str, passed: { type: "boolean" }, metrics: { type: "object" }, note: str },
+      properties: {
+        node_id: str, lease_token: str, passed: { type: "boolean" }, metrics: { type: "object" }, note: str,
+        real_stan_passed: { type: "integer", minimum: 0, maximum: REAL_GATE.maxModels, description: "Required models that passed the real-posterior gate." },
+        real_stan_total: { type: "integer", minimum: 0, maximum: REAL_GATE.maxModels, description: "Required models of the gate." },
+        real_gate: { type: "string", description: "The gate id (autoresearch/real_gate.json). Send with real_stan_passed and real_stan_total." },
+        real_ess_per_cost: { type: "number", minimum: 0 },
+      },
       additionalProperties: false,
     },
     write: true,

@@ -16,7 +16,7 @@ import { DatabaseSync } from "node:sqlite";
 import { it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { handleRequest, LIMITS } from "../src/index.ts";
+import { handleRequest, LIMITS, REAL_GATE } from "../src/index.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SCHEMA = fs.readFileSync(path.resolve(here, "../schema.sql"), "utf8");
@@ -25,9 +25,9 @@ const MIGRATIONS = fs
   .filter((f) => f.endsWith(".sql"))
   .sort()
   .map((f) => fs.readFileSync(path.resolve(here, "../migrations", f), "utf8"));
-/** Trials below are inserted straight into SQLite, as seed.sql does, so they need 0005's flag backfill. */
+/** Trials below are inserted straight into SQLite, as seed.sql does, so they need 0006's flag backfill. */
 const BACKFILL = fs
-  .readFileSync(path.resolve(here, "../migrations/0005_speedup.sql"), "utf8")
+  .readFileSync(path.resolve(here, "../migrations/0006_real_gate.sql"), "utf8")
   .split("-- BACKFILL BEGIN")[1]
   .split("-- BACKFILL END")[0];
 
@@ -43,7 +43,7 @@ const SOURCE = "import numpy as np\n" + "def adapt(state):\n    return state\n".
 const NODE_COLS = [
   "id", "parent_id", "lane", "run_id", "trial_id", "agent_model", "author", "author_tier", "title", "hypothesis",
   "decision", "soft_min_eff", "speedup", "yardstick", "ratio_vs_incumbent", "real_stan_passed", "real_stan_total",
-  "overhead_ratio", "b2_max", "dims", "codex_refs", "code_sha", "metrics_json", "verified", "state", "created_at",
+  "real_gate", "overhead_ratio", "b2_max", "dims", "codex_refs", "code_sha", "metrics_json", "verified", "state", "created_at",
 ];
 const INSERT_NODE = `INSERT INTO nodes (${NODE_COLS.join(", ")}) VALUES (${NODE_COLS.map(() => "?").join(", ")})`;
 const INSERT_EDGE = "INSERT OR IGNORE INTO node_parents (child, parent, relation, created_at) VALUES (?, ?, ?, ?)";
@@ -59,7 +59,8 @@ const CHART_CURSOR = "2026-01-01T02:00:00.000Z|0";
 /**
  * N trials over 8 lanes (one run of N/10 trials in A1, the rest in runs of about 60), a tie block, 30 notes.
  * Nine in ten trials are graded, with a speedup between 0.8 and 1.4 that drifts up over time
- * (one in twenty of them failed its checks and has none). The rest are exploratory.
+ * (one in twenty of them failed its checks and has none). The rest are exploratory. Half the
+ * kept trials carry a passing real-posterior gate result, so the lanes have frontier steps.
  */
 function synthesize(n) {
   const longRun = Math.round(n / 10);
@@ -86,18 +87,19 @@ function synthesize(n) {
     const created = new Date(Date.UTC(2026, 0, 1) + i * 30_000).toISOString();
     const graded = rand() < 0.9;
     const speedup = graded && rand() < 0.95 ? 0.8 + 0.3 * rand() + (0.3 * i) / slots.length : null;
+    const gated = !stan && decision === "keep" && rand() < 0.5;
     statements.push([INSERT_NODE, [
       id, parent, run.lane, run.run_id, `T${k + 1}`, MODELS[(k + run.run_id.length) % MODELS.length],
       `agent-${run.run_id}`, "provisional", `T${k + 1}: ${HYPOTHESIS.slice(0, 70)}`, HYPOTHESIS, decision,
-      rand() / 100, speedup, graded ? `${run.lane}:judge-1:r8` : null, 1 + rand(), stan ? Math.floor(rand() * 6) : null,
-      stan ? 5 : null, 4 + rand(), 0.1, "[6,20]", '["fisher-low-rank"]', "cbc54bbbd03d8511", METRICS, 0, "unverified", created,
+      rand() / 100, speedup, graded ? `${run.lane}:judge-1:r8` : null, 1 + rand(), stan ? Math.floor(rand() * 6) : gated ? 4 : null,
+      stan ? 5 : gated ? 4 : null, gated ? REAL_GATE.id : null, 4 + rand(), 0.1, "[6,20]", '["fisher-low-rank"]', "cbc54bbbd03d8511", METRICS, 0, "unverified", created,
     ]]);
     if (parent) statements.push([INSERT_EDGE, [id, parent, "incumbent", created]]);
     if (rand() < 0.03 && last.size > 0) {
       statements.push([INSERT_EDGE, [id, [...last.values()][Math.floor(rand() * last.size)], "combines", created]]);
     }
     if (decision === "keep") incumbent.set(run.run_id, id);
-    if (decision === "keep" && speedup !== null && run.lane === "A1" && !firstStepA1) firstStepA1 = id;
+    if (gated && speedup !== null && run.lane === "A1" && !firstStepA1) firstStepA1 = id;
     last.set(run.run_id, id);
   });
   // A block of TIE_TRIALS trials sharing the newest timestamp (lane TIE, model tie-model):
@@ -106,7 +108,7 @@ function synthesize(n) {
   for (let k = 0; k < TIE_TRIALS; k += 1) {
     statements.push([INSERT_NODE, [
       `TIE:tie:T${String(k).padStart(4, "0")}`, null, "TIE", "tie", `T${k}`, "tie-model", "agent-tie", "provisional",
-      `T${k}: tie`, HYPOTHESIS, "discard_tier1", 0.001, 1, "TIE:judge-1:r8", 1, null, null, 4, 0.1, "[6,20]",
+      `T${k}: tie`, HYPOTHESIS, "discard_tier1", 0.001, 1, "TIE:judge-1:r8", 1, null, null, null, 4, 0.1, "[6,20]",
       '["fisher-low-rank"]', "cbc54bbbd03d8511", METRICS, 0, "unverified", tieAt,
     ]]);
   }

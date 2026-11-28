@@ -419,7 +419,7 @@ def test_cli_verify_next_leases_reruns_and_posts(
 
     monkeypatch.setattr(autoresearch, "rerun_for_verification", fake_rerun)
     assert cli.main(["autoresearch", "verify-next", "--lane", "A1"]) == 0
-    assert fake.calls[0]["body"] == {"lane": "A1", "ttl_minutes": 120}
+    assert fake.calls[0]["body"] == {"lane": "A1", "ttl_minutes": 240}
     assert seen["path"].read_text() == "def adapt(): pass\n"
     assert seen["path"].parent == tmp_path / "autoresearch" / "lanes" / "A1" / "runs" / "verify" / "A1_run_T0004"
     assert seen["claimed_speedup"] == 1.31 and seen["claimed_yardstick"] == "A1-0123456789ab"
@@ -445,6 +445,68 @@ def test_cli_verify_next_leases_reruns_and_posts(
     fake.on("POST", "/api/verify/claim", lambda c: _http_error(404, {"error": "queue_empty"}))
     assert cli.main(["autoresearch", "verify-next"]) == 0
     assert "Nothing to verify" in capsys.readouterr().out
+
+
+def test_cli_verify_next_posts_the_real_posterior_gate_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from harness import real_gate
+
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    (tmp_path / "autoresearch" / "lanes" / "A1").mkdir(parents=True, exist_ok=True)
+    flywheel.save_token("apfw_verifier")
+    fake = FakeFlywheel(monkeypatch)
+    node_id = "A1:run:T0004"
+    fake.on("POST", "/api/verify/claim", {
+        "ok": True,
+        "lease": {"node_id": node_id, "lane": "A1", "lease_token": "vlease_abc", "lease_expires_at": "2026-11-23T02:00:00Z"},
+        "node": {"id": node_id, "lane": "A1", "speedup": 1.31, "yardstick": "A1-0123456789ab"},
+    })
+    fake.on("GET", f"/api/nodes/{node_id}/source", _source_payload(node_id, "def adapt_metric(): pass\n"))
+    fake.on("POST", f"/api/verify/{node_id}/result", {"ok": True})
+    gate = real_gate.load()
+    rows = [{"model": m, "status": "right", "reason": "right", "ess_per_cost": 0.02} for m in gate["required"]]
+    rows.append({"model": gate["reported"][0], "status": "wrong", "reason": "wrong: lp__ mean"})
+    gate_res = real_gate.summarize(gate, rows)
+    seen: dict[str, Any] = {}
+
+    def fake_rerun(path, lane, **kw):
+        seen.update(kw)
+        metrics = {"speedup": 1.31, "real_gate": real_gate.metrics_summary(gate_res)}
+        return {"comparable": True, "passed": True, "metrics": metrics, "reason": "reproduced", "gate": gate_res, "gate_error": None}
+
+    monkeypatch.setattr(autoresearch, "rerun_for_verification", fake_rerun)
+    assert cli.main(["autoresearch", "verify-next"]) == 0
+    assert seen["run_gate"] is True
+    body = fake.calls[-1]["body"]
+    n = len(gate["required"])
+    assert (body["real_stan_passed"], body["real_stan_total"], body["real_gate"]) == (n, n, gate["id"])
+    assert body["real_ess_per_cost"] == pytest.approx(0.02)
+    assert body["metrics"]["real_gate"]["models"][gate["reported"][0]] == "wrong"
+    assert f"real-posterior gate {gate['id']}: {n} of {n} required" in body["note"]
+    assert f"{n} of {n} required models passed the 0.1-SD bench gate at this budget" in capsys.readouterr().out
+
+    # A crashed gate posts the synthetic result alone, and says so.
+    monkeypatch.setattr(autoresearch, "rerun_for_verification", lambda *a, **k: {
+        "comparable": True, "passed": True, "metrics": {"speedup": 1.31}, "reason": "reproduced",
+        "gate": None, "gate_error": "RuntimeError: no bridgestan"})
+    assert cli.main(["autoresearch", "verify-next"]) == 0
+    body = fake.calls[-1]["body"]
+    assert not any(k.startswith("real_") for k in body) and "gate crashed" in body["note"]
+    assert "no bridgestan" in capsys.readouterr().err
+
+    # --no-real-gate skips it; a failed synthetic rerun posts as before, without the gate.
+    monkeypatch.setattr(autoresearch, "rerun_for_verification", lambda *a, **k: seen.update(k) or {
+        "comparable": True, "passed": True, "metrics": {}, "reason": "reproduced"})
+    assert cli.main(["autoresearch", "verify-next", "--no-real-gate"]) == 0
+    assert seen["run_gate"] is False
+    body = fake.calls[-1]["body"]
+    assert not any(k.startswith("real_") for k in body) and "skipped (--no-real-gate)" in body["note"]
+    monkeypatch.setattr(autoresearch, "rerun_for_verification", lambda *a, **k: {
+        "comparable": True, "passed": False, "metrics": {}, "reason": "mismatch: rerun 1.2x"})
+    assert cli.main(["autoresearch", "verify-next"]) == 0
+    body = fake.calls[-1]["body"]
+    assert body == {"lease_token": "vlease_abc", "passed": False, "metrics": {}, "note": "mismatch: rerun 1.2x"}
 
 
 def test_brief_lists_open_hypotheses_and_recent_insights(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
