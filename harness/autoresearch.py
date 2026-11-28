@@ -35,7 +35,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import flywheel, grade, judge, logdensity, queue
+from . import flywheel, grade, judge, logdensity, queue, real_gate
 from .grade import IMPROVEMENT_MARGIN
 from .models import ROOT
 
@@ -506,14 +506,20 @@ def rerun_for_verification(
     work_dir: Path | None = None,
     use_queue: bool = True,
     autoresearch_dir: Path = ROOT / "autoresearch",
+    run_gate: bool = True,
 ) -> dict:
     """Rerun a fetched trial through the grader on the standard public configuration.
 
     The rerun is the same computation as the trial it checks, so it should reproduce the posted
-    speed-up to within `tolerance` (relative). Returns ``{comparable, passed, metrics, reason}``.
-    `comparable` is False when the trial was graded against another yardstick (an older judge or
-    starting code) or posted no speed-up. Such a rerun says nothing about the trial. Nothing is
-    written to any ledger.
+    speed-up to within `tolerance` (relative). Returns ``{comparable, passed, metrics, reason,
+    gate, gate_error}``. `comparable` is False when the trial was graded against another
+    yardstick (an older judge or starting code) or posted no speed-up. Such a rerun says nothing
+    about the trial. Nothing is written to any ledger.
+
+    When the rerun reproduces and `run_gate` is on, the trial's source then runs the full
+    real-posterior gate (harness/real_gate.py, 10 to 40 minutes): `gate` is its result and
+    `metrics["real_gate"]` its summary. A lane's frontier needs that result. A gate that crashes
+    leaves `gate` None and says why in `gate_error`; the synthetic result stands on its own.
     """
     yd = load_yardstick(lane, autoresearch_dir=autoresearch_dir)
     metrics: dict = {"yardstick": yd["id"], "judge_digest": yd["judge_digest"], "config": grade.config(),
@@ -542,7 +548,15 @@ def rerun_for_verification(
     passed = rel <= tolerance
     reason = (f"reproduced {sp:.6g}x (posted {claimed_speedup:.6g}x)" if passed
               else f"mismatch: rerun {sp:.6g}x, posted {claimed_speedup:.6g}x ({rel:.2%} apart)")
-    return {"comparable": True, "passed": passed, "metrics": metrics, "reason": reason}
+    out = {"comparable": True, "passed": passed, "metrics": metrics, "reason": reason, "gate": None, "gate_error": None}
+    if passed and run_gate:
+        try:
+            out["gate"] = real_gate.run(Path(source_path), lane, work_dir=work / "real_gate", use_queue=use_queue)
+        except Exception as exc:  # a crash is not evidence against the trial: post the synthetic result alone
+            out["gate_error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            metrics["real_gate"] = real_gate.metrics_summary(out["gate"])
+    return out
 
 
 def format_evaluator_json(
@@ -726,6 +740,9 @@ def build_research_brief(
             local_digest = judge.judge_digest()
             local_yd = _local_yardstick_id(None if all_lanes else lane, autoresearch_dir)
             lines.append(f"## Live Flywheel Frontier (`{flywheel_url}` | local judge_digest=`{local_digest}`)")
+            gate_id = fr_raw.get("real_gate") if isinstance(fr_raw, dict) else None
+            lines.append(f"Each frontier passed the real-posterior gate `{gate_id or '?'}` on every "
+                         "required model, after an independent rerun. A lane without one is not listed.")
             lane_frontier: dict | None = None
             if frontier:
                 for row in frontier:
@@ -745,7 +762,7 @@ def build_research_brief(
                         f"`{row.get('id', '?')}` — {title}{compat}{tag}"
                     )
             else:
-                lines.append("- (no frontier nodes yet)")
+                lines.append("- (no lane has a trial that passed the real-posterior gate yet)")
             lines.append("")
 
             if not all_lanes and lane not in ("S2", "S3"):

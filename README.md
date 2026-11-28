@@ -78,6 +78,8 @@ Each lane has a brief in `autoresearch/lanes/<LANE>/program.md` and a list of re
 | **Run** | The trials you make under one `--run-id`. |
 | **Speed-up** | A trial's efficiency divided by the frozen efficiency of the lane's starting code (`start.py`), both scored by the same grader on the same seeds. It reads as "times the starting code" and compares across runs and agents. |
 | **Yardstick** | The frozen score of a lane's starting code (`autoresearch/lanes/<LANE>/yardstick.json`). Every speed-up names the yardstick it divides by. |
+| **Frontier** | A lane's best result on the Flywheel. A kept trial counts only after an independent verifier has rerun it and posted a real-posterior gate result under the current gate id (`autoresearch/real_gate.json`), and it passed the 0.1-SD bench gate on every required model. A lane may have no frontier. The keep rule of `eval` stays synthetic. |
+| **Real-posterior gate** | Step 8 of [auto-research.md](auto-research.md), run by `apin autoresearch gate`: the 0.1-SD bench gate on the models the Stan NUTS reference passes at this budget (required), plus reported models that do not count. |
 | **Track** | Where a finished sampler is ranked. `L1` to `L5`. Tracks are never pooled. |
 | **Task** | One of the five problems in the agent benchmark. Each mirrors one of the lanes `A0` to `A4`. |
 | **Record** | A result a maintainer has reproduced, committed under `records/`. |
@@ -89,8 +91,8 @@ Every lane, track and benchmark task runs these four checks in order.
 
 1. **Valid kernel.** The harness lints the code, replays it bit for bit in a clean process, and tests invariance on targets with exact draws. A kernel that does not preserve the target distribution scores zero.
 2. **Efficiency on every shape.** The grader (`harness/grade.py`) tests Gaussians, funnels, bananas, Rosenbrock ridges, mixtures and heavy tails in 6 and 20 dimensions, at a short and a long budget, on 8 seeded suites. The score is a soft minimum across shape classes, so the worst class sets it. Lanes report it as a speed-up over the starting code on public seeds. The benchmark runs the same grader on hidden seeds.
-3. **Accuracy on real posteriors.** On Stan models from [posteriordb](https://github.com/stan-dev/posteriordb), every checked quantity must lie within 0.1 posterior standard deviations of the reference at 99.5% confidence.
-4. **Independent reproduction.** A maintainer reruns the submission on new seeds before marking it verified.
+3. **Accuracy on real posteriors.** On Stan models from [posteriordb](https://github.com/stan-dev/posteriordb), every checked quantity must lie within 0.1 posterior standard deviations of the reference at 99.5% confidence. For a lane's frontier, the models are those of the real-posterior gate (`autoresearch/real_gate.json`).
+4. **Independent reproduction.** A verifier reruns a kept trial (`apin autoresearch verify-next`), then runs the real-posterior gate on it. A maintainer reruns a submission on new seeds before marking it verified.
 
 Passing means "passed the 0.1-SD bench gate at this budget". Never describe a sampler as correct, exact, unbiased or proven. See [BENCH.md](BENCH.md) for the rules and [PROTOCOL.md](PROTOCOL.md) for the measurement method.
 
@@ -131,7 +133,7 @@ uv run apin score --models public --reps 3 --baseline cmdstan --track L1 --submi
 
 | Path | What it holds |
 |---|---|
-| `autoresearch/` | One directory per lane, the open task list (`task_catalog.json`) and the rulings on what is allowed (`RULINGS.md`). |
+| `autoresearch/` | One directory per lane, the open task list (`task_catalog.json`), the rulings on what is allowed (`RULINGS.md`) and the real-posterior gate a frontier must pass (`real_gate.json`). |
 | `harbor/` | The agent benchmark: the task containers, the base image and the verifier. |
 | `harness/` | The runner, the accuracy gate, the invariance checks, the lane judges and the Flywheel client. |
 | `flywheel/` | The website and its API: a Cloudflare Worker with a D1 database. The site is in `flywheel/public/`. |

@@ -309,14 +309,23 @@ def test_seed_from_apin_generates_valid_sql(tmp_path: Path) -> None:
     assert conn.execute("SELECT lane, run_id, trials, kept, archived FROM run_stats").fetchall() == [
         ("A1", "glm53_a1_1h", 3, 2, 1)
     ]
-    # seed.sql ends with migration 0005's backfill: only T0002 was graded, so it is the lane's
-    # one frontier step, and the lane counters agree.
+    # seed.sql ends with migration 0006's backfill: only T0002 was graded, but its seeded real-Stan
+    # score carries no gate id (real_gate), so the lane has no frontier step until a verifier runs
+    # the real-posterior gate. The lane counters agree.
     flags = conn.execute("SELECT id, yardstick IS NOT NULL, frontier_step, speedup FROM nodes ORDER BY id").fetchall()
     assert flags == [
         ("A1:glm53_a1_1h:T0001", 0, 0, None),
-        ("A1:glm53_a1_1h:T0002", 1, 1, 1.27),
+        ("A1:glm53_a1_1h:T0002", 1, 0, 1.27),
         ("A1:glm53_a1_1h:T0003", 0, 0, None),
     ]
+    assert conn.execute("SELECT real_gate FROM nodes WHERE real_gate IS NOT NULL").fetchall() == []
+    assert conn.execute("SELECT standard, steps, yardstick IS NOT NULL FROM lane_stats WHERE lane = 'A1'").fetchone() == (1, 0, 1)
+    # Once T0002 carries a passing result under the current gate, the same backfill makes it the step.
+    gate_id = json.loads((REPO_ROOT / "autoresearch" / "real_gate.json").read_text())["id"]
+    conn.execute("UPDATE nodes SET real_gate = ?, real_stan_passed = 3, real_stan_total = 3 WHERE id = 'A1:glm53_a1_1h:T0002'",
+                 (gate_id,))
+    conn.executescript(seed_mod.flag_backfill_sql())
+    assert conn.execute("SELECT id FROM nodes WHERE frontier_step = 1").fetchall() == [("A1:glm53_a1_1h:T0002",)]
     assert conn.execute("SELECT standard, steps FROM lane_stats WHERE lane = 'A1'").fetchone() == (1, 1)
     assert seed_mod.flag_backfill_sql() in seed_sql
     conn.close()
@@ -339,18 +348,22 @@ def test_seed_from_apin_writes_the_flag_backfill_for_the_rollout_repair(
     conn.executescript((REPO_ROOT / "flywheel" / "schema.sql").read_text(encoding="utf-8"))
     for mig in sorted((REPO_ROOT / "flywheel" / "migrations").glob("*.sql")):
         conn.executescript(mig.read_text(encoding="utf-8"))
-    # Trials written straight into the table: no step flag set.
+    # Trials written straight into the table: no step flag set. All but A1:r:T6 passed the
+    # current real-posterior gate; T6 has a full score under an older gate id, so it is no step.
+    gate_id = json.loads((REPO_ROOT / "autoresearch" / "real_gate.json").read_text())["id"]
     rows = [
-        ("A1:r:T1", "A1", "keep", 1.0, "y", "2026-01-01T00:01:00Z"),
-        ("A1:r:T2", "A1", "keep", 1.03, "y", "2026-01-01T00:02:00Z"),
-        ("A1:r:T3", "A1", "keep", 1.05, "y", "2026-01-01T00:03:00Z"),
-        ("A1:r:T4", "A1", "keep", 9.0, None, "2026-01-01T00:04:00Z"),
-        ("A1:r:T5", "A1", "keep", None, "y", "2026-01-01T00:05:00Z"),
-        ("S1:r:T1", "S1", "discard_tier1", 5.0, "y", "2026-01-01T00:01:00Z"),
-        ("S1:r:T2", "S1", "keep_simpler", 2.0, "y", "2026-01-01T00:02:00Z"),
+        ("A1:r:T1", "A1", "keep", 1.0, "y", "2026-01-01T00:01:00Z", gate_id),
+        ("A1:r:T2", "A1", "keep", 1.03, "y", "2026-01-01T00:02:00Z", gate_id),
+        ("A1:r:T3", "A1", "keep", 1.05, "y", "2026-01-01T00:03:00Z", gate_id),
+        ("A1:r:T4", "A1", "keep", 9.0, None, "2026-01-01T00:04:00Z", gate_id),
+        ("A1:r:T5", "A1", "keep", None, "y", "2026-01-01T00:05:00Z", gate_id),
+        ("A1:r:T6", "A1", "keep", 2.0, "y", "2026-01-01T00:06:00Z", "older-gate"),
+        ("S1:r:T1", "S1", "discard_tier1", 5.0, "y", "2026-01-01T00:01:00Z", gate_id),
+        ("S1:r:T2", "S1", "keep_simpler", 2.0, "y", "2026-01-01T00:02:00Z", gate_id),
     ]
     conn.executemany(
-        "INSERT INTO nodes (id, lane, run_id, decision, speedup, yardstick, created_at) VALUES (?, ?, 'r', ?, ?, ?, ?)",
+        "INSERT INTO nodes (id, lane, run_id, decision, speedup, yardstick, created_at, real_gate, real_stan_passed, real_stan_total)"
+        " VALUES (?, ?, 'r', ?, ?, ?, ?, ?, 4, 4)",
         rows,
     )
     assert conn.execute("SELECT SUM(frontier_step) FROM nodes").fetchone() == (0,)
@@ -363,11 +376,12 @@ def test_seed_from_apin_writes_the_flag_backfill_for_the_rollout_repair(
             ("A1:r:T3", 1, 1),
             ("A1:r:T4", 0, 0),
             ("A1:r:T5", 1, 0),
+            ("A1:r:T6", 1, 0),
             ("S1:r:T1", 1, 0),
             ("S1:r:T2", 1, 1),
         ]
         stats = conn.execute("SELECT lane, standard, steps, steps_dirty FROM lane_stats ORDER BY lane").fetchall()
-        assert stats == [("A1", 4, 2, 0), ("S1", 2, 1, 0)]
+        assert stats == [("A1", 5, 2, 0), ("S1", 2, 1, 0)]
     conn.close()
 
 

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from harness import autoresearch, flywheel, grade, invariance, judge, shapes
+from harness import autoresearch, flywheel, grade, invariance, judge, real_gate, shapes
 
 ROOT = Path(__file__).parent.parent
 EXAMPLES = ROOT / "examples" / "samplers"
@@ -247,14 +247,42 @@ def test_decide_rule():
     assert autoresearch.decide(0.979, 1.0, True) == "discard_no_gain"
 
 
-def test_rerun_reproduces_the_posted_speedup_or_reports_a_mismatch(lane):
+def test_rerun_reproduces_the_posted_speedup_or_reports_a_mismatch(lane, monkeypatch):
     ar_dir, lane_dir, _, _ = lane
     yd = json.loads((lane_dir / "yardstick.json").read_text())
     cand = lane_dir / "cand.py"
     cand.write_text(_long(1.3))
+    gate_calls = []
+    gate = real_gate.load()
+    rows = [{"model": m, "status": "right", "reason": "right", "ess_per_cost": 0.01} for m in gate["required"]]
+    rows += [{"model": m, "status": "unproven", "reason": "chains have not mixed"} for m in gate["reported"]]
+
+    def fake_gate(path, lane_name, **kw):
+        gate_calls.append((path, lane_name, kw))
+        return {**real_gate.summarize(gate, rows), "submission_sha256": "abc"}
+
+    monkeypatch.setattr(real_gate, "run", fake_gate)
     ok = autoresearch.rerun_for_verification(cand, "A2", claimed_speedup=1.3, claimed_yardstick=yd["id"],
                                              autoresearch_dir=ar_dir, use_queue=False)
     assert ok["comparable"] and ok["passed"] and ok["metrics"]["speedup"] == 1.3 and "reproduced" in ok["reason"]
+    # A reproduced rerun then runs the full real-posterior gate on the same file.
+    assert len(gate_calls) == 1 and gate_calls[0][0] == cand and gate_calls[0][1] == "A2"
+    assert gate_calls[0][2]["use_queue"] is False and "models" not in gate_calls[0][2]
+    assert ok["gate"]["ok"] and ok["gate_error"] is None
+    assert ok["metrics"]["real_gate"] == {
+        "id": gate["id"], "ok": True, "required_passed": len(gate["required"]), "required_total": len(gate["required"]),
+        "models": {**{m: "right" for m in gate["required"]}, **{m: "unproven" for m in gate["reported"]}},
+        "submission_sha256": "abc",
+    }
+    # --no-real-gate skips it; a crash in it leaves the synthetic result standing.
+    skipped = autoresearch.rerun_for_verification(cand, "A2", claimed_speedup=1.3, claimed_yardstick=yd["id"],
+                                                  autoresearch_dir=ar_dir, use_queue=False, run_gate=False)
+    assert skipped["passed"] and skipped["gate"] is None and "real_gate" not in skipped["metrics"] and len(gate_calls) == 1
+    monkeypatch.setattr(real_gate, "run", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no bridgestan")))
+    crashed = autoresearch.rerun_for_verification(cand, "A2", claimed_speedup=1.3, claimed_yardstick=yd["id"],
+                                                  autoresearch_dir=ar_dir, use_queue=False)
+    assert crashed["passed"] and crashed["gate"] is None and "no bridgestan" in crashed["gate_error"]
+    monkeypatch.setattr(real_gate, "run", lambda *a, **k: pytest.fail("a failed rerun must not run the gate"))
     bad = autoresearch.rerun_for_verification(cand, "A2", claimed_speedup=1.5, claimed_yardstick=yd["id"],
                                               autoresearch_dir=ar_dir, use_queue=False)
     assert bad["comparable"] and not bad["passed"] and "mismatch" in bad["reason"]
